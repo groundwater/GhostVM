@@ -2,6 +2,9 @@ import Foundation
 import AppKit
 import Virtualization
 import Darwin
+import ObjectiveC
+
+private var windowDelegateAssociationKey: UInt8 = 0
 
 // MARK: - Utilities
 
@@ -722,6 +725,44 @@ final class VMController {
                 }
                 vmView.autoresizingMask = [.width, .height]
                 window.contentView = vmView
+
+                final class VMWindowDelegate: NSObject, NSWindowDelegate {
+                    private let vmQueue: DispatchQueue
+                    private let virtualMachine: VZVirtualMachine
+                    private let vmView: VZVirtualMachineView
+
+                    init(vmQueue: DispatchQueue, virtualMachine: VZVirtualMachine, vmView: VZVirtualMachineView) {
+                        self.vmQueue = vmQueue
+                        self.virtualMachine = virtualMachine
+                        self.vmView = vmView
+                    }
+
+                    func windowShouldClose(_ sender: NSWindow) -> Bool {
+                        switch virtualMachine.state {
+                        case .stopped, .stopping:
+                            return true
+                        default:
+                            vmQueue.async {
+                                do {
+                                    try self.virtualMachine.requestStop()
+                                } catch {
+                                    print("Failed to request stop via close button: \(error.localizedDescription)")
+                                }
+                            }
+                            return false
+                        }
+                    }
+
+                    func windowWillClose(_ notification: Notification) {
+                        vmView.virtualMachine = nil
+                        NSApplication.shared.stop(nil)
+                    }
+                }
+
+                let windowDelegate = VMWindowDelegate(vmQueue: vmQueue, virtualMachine: virtualMachine, vmView: vmView)
+                window.delegate = windowDelegate
+                objc_setAssociatedObject(window, &windowDelegateAssociationKey, windowDelegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+
                 window.center()
                 window.makeKeyAndOrderFront(nil)
                 app.activate(ignoringOtherApps: true)
