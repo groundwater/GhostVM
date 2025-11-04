@@ -34,7 +34,7 @@ Key commands:
 
 - `init <name>` – Create a new VM bundle, generate hardware identifiers, auxiliary storage, empty disk, and config. Options: `--cpus`, `--memory`, `--disk`, `--restore-image`, `--shared-folder`, `--writable`.
 - `install <name>` – Boot the VM with `VZMacOSInstaller` using the restore image. Progress updates print to stdout.
-- `start <name> [--headless]` – Launch the VM. GUI mode displays a minimal AppKit window hosting `VZVirtualMachineView`; headless mode hooks the serial console to STDIO.
+- `start <name> [--headless] [--shared-folder PATH] [--writable|--read-only]` – Launch the VM. GUI mode displays a minimal AppKit window hosting `VZVirtualMachineView`; headless mode hooks the serial console to STDIO. Supplying `--shared-folder` lets you override or add a shared directory for this run (default read-only unless `--writable` is provided).
 - `stop <name>` – Request graceful shutdown; escalates to SIGKILL if the guest ignores requests.
 - `status <name>` – Report running state, PID, and configuration summary.
 - `snapshot <name> create|revert <snapname>` – External snapshots by copying bundle artifacts (coarse and space-heavy but simple).
@@ -58,6 +58,7 @@ make
 ./vmctl install sandbox
 ./vmctl start sandbox          # GUI
 ./vmctl start sandbox --headless
+./vmctl start sandbox --shared-folder ~/Projects --writable
 ./vmctl snapshot sandbox create clean
 ./vmctl stop sandbox
 ./vmctl snapshot sandbox revert clean

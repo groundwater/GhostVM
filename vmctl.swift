@@ -220,7 +220,7 @@ final class VMConfigurationBuilder {
         self.storedConfig = storedConfig
     }
 
-    func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool) throws -> VZVirtualMachineConfiguration {
+    func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VZVirtualMachineConfiguration {
         let config = VZVirtualMachineConfiguration()
         config.bootLoader = VZMacOSBootLoader()
         config.cpuCount = storedConfig.cpus
@@ -275,9 +275,22 @@ final class VMConfigurationBuilder {
             config.pointingDevices = []
         }
 
-        if let sharedPath = storedConfig.sharedFolderPath {
-            let url = URL(fileURLWithPath: sharedPath)
-            let sharedDirectory = VZSharedDirectory(url: url, readOnly: storedConfig.sharedFolderReadOnly)
+        let sharedFolderSelection: (path: String, readOnly: Bool)?
+        if let runtimeSharedFolder = runtimeSharedFolder {
+            sharedFolderSelection = (runtimeSharedFolder.path, runtimeSharedFolder.readOnly)
+        } else if let storedPath = storedConfig.sharedFolderPath {
+            sharedFolderSelection = (storedPath, storedConfig.sharedFolderReadOnly)
+        } else {
+            sharedFolderSelection = nil
+        }
+
+        if let selection = sharedFolderSelection {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: selection.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("Shared folder path \(selection.path) does not exist or is not a directory.")
+            }
+            let url = URL(fileURLWithPath: selection.path)
+            let sharedDirectory = VZSharedDirectory(url: url, readOnly: selection.readOnly)
             let singleShare = VZSingleDirectoryShare(directory: sharedDirectory)
             let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag)
             shareDevice.share = singleShare
@@ -340,6 +353,11 @@ struct InitOptions {
     var restoreImagePath: String?
     var sharedFolderPath: String?
     var sharedFolderWritable: Bool = false
+}
+
+struct RuntimeSharedFolderOverride {
+    let path: String
+    let readOnly: Bool
 }
 
 final class VMController {
@@ -471,7 +489,7 @@ final class VMController {
         let restoreImage = try loadRestoreImage(from: restoreImageURL)
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: true)
+        let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: true, runtimeSharedFolder: nil)
 
         let vmQueue = DispatchQueue(label: "vmctl.install.\(name)")
         let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
@@ -482,9 +500,8 @@ final class VMController {
 
         let progress = installer.progress
         let observation = progress.observe(\.fractionCompleted, options: [.new]) { progress, _ in
-            let percent = Int(progress.fractionCompleted * 100)
             let description = progress.localizedDescription ?? ""
-            print("Install progress: \(percent)% \(description)")
+            print("Install progress: \(description)")
         }
 
         let group = DispatchGroup()
@@ -522,7 +539,7 @@ final class VMController {
         print("Reminder: Apple’s EULA requires macOS guests to run on Apple-branded hardware.")
     }
 
-    func startVM(name: String, headless: Bool) throws -> Never {
+    func startVM(name: String, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
         let bundleURL = bundleURL(for: name)
         let layout = VMFileLayout(bundleURL: bundleURL)
         let store = VMConfigStore(layout: layout)
@@ -533,7 +550,7 @@ final class VMController {
         }
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless)
+        let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
         let vmQueue = DispatchQueue(label: "vmctl.run.\(name)")
         let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
         let pid = getpid()
@@ -923,18 +940,44 @@ struct CLI {
 
     private func handleStart(arguments: [String]) throws {
         guard let name = arguments.first else {
-            throw VMError.message("Usage: vmctl start <name> [--headless]")
+            throw VMError.message("Usage: vmctl start <name> [--headless] [--shared-folder PATH] [--writable|--read-only]")
         }
         var headless = false
-        for option in arguments.dropFirst() {
+        var sharedFolderPath: String?
+        var writableOverride: Bool?
+        var index = 1
+        while index < arguments.count {
+            let option = arguments[index]
             switch option {
             case "--headless":
                 headless = true
+            case "--shared-folder":
+                index += 1
+                guard index < arguments.count else {
+                    throw VMError.message("Missing value for --shared-folder.")
+                }
+                sharedFolderPath = arguments[index]
+            case "--writable":
+                writableOverride = true
+            case "--read-only":
+                writableOverride = false
             default:
                 throw VMError.message("Unknown option '\(option)'.")
             }
+            index += 1
         }
-        try controller.startVM(name: name, headless: headless)
+
+        if sharedFolderPath == nil, writableOverride != nil {
+            throw VMError.message("Use --shared-folder together with --writable/--read-only.")
+        }
+
+        var runtimeSharedFolder: RuntimeSharedFolderOverride?
+        if let path = sharedFolderPath {
+            let readOnly = !(writableOverride ?? false)
+            runtimeSharedFolder = RuntimeSharedFolderOverride(path: path, readOnly: readOnly)
+        }
+
+        try controller.startVM(name: name, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
     }
 
     private func handleStop(arguments: [String]) throws {
@@ -968,7 +1011,7 @@ Usage: vmctl <command> [options]
 Commands:
   init <name> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
   install <name>
-  start <name> [--headless]
+  start <name> [--headless] [--shared-folder PATH] [--writable|--read-only]
   stop <name>
   status <name>
   snapshot <name> <create|revert> <snapshot>
@@ -976,8 +1019,9 @@ Commands:
 Examples:
   vmctl init sandbox --cpus 6 --memory 16 --disk 128
   vmctl install sandbox
-  vmctl start sandbox               # GUI
-  vmctl start sandbox --headless    # headless (SSH after setup)
+  vmctl start sandbox                                   # GUI
+  vmctl start sandbox --headless                        # headless (SSH after setup)
+  vmctl start sandbox --shared-folder ~/Projects --writable
   vmctl stop sandbox
   vmctl status sandbox
   vmctl snapshot sandbox create clean
