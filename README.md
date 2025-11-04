@@ -41,6 +41,8 @@ Key commands:
 
 Restore images are auto-discovered (e.g. `~/Downloads/*.ipsw`, `/Applications/Install macOS*.app/Contents/SharedSupport/SharedSupport.dmg`) unless `--restore-image` is specified.
 
+https://developer.apple.com/download/os/
+
 After installation, enable Remote Login (SSH) inside the guest for comfortable headless use.
 
 ## Notes

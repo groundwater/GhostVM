@@ -382,6 +382,65 @@ final class VMController {
         self.rootDirectory = rootDirectory
     }
 
+    struct VMListEntry {
+        let name: String
+        let bundleURL: URL
+        let installed: Bool
+        let runningPID: pid_t?
+
+        var isRunning: Bool {
+            return runningPID != nil
+        }
+
+        var statusDescription: String {
+            if let pid = runningPID {
+                return "Running (PID \(pid))"
+            }
+            if !installed {
+                return "Not Installed"
+            }
+            return "Stopped"
+        }
+    }
+
+    func listVMs() throws -> [VMListEntry] {
+        guard fileManager.fileExists(atPath: rootDirectory.path) else {
+            return []
+        }
+
+        let contents = try fileManager.contentsOfDirectory(at: rootDirectory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        var entries: [VMListEntry] = []
+
+        for item in contents where item.pathExtension == "vm" {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                continue
+            }
+
+            let layout = VMFileLayout(bundleURL: item)
+            guard fileManager.fileExists(atPath: layout.configURL.path) else {
+                continue
+            }
+
+            let store = VMConfigStore(layout: layout)
+            guard let config = try? store.load() else {
+                continue
+            }
+
+            var running: pid_t?
+            if let pid = readPID(from: layout.pidFileURL), kill(pid, 0) == 0 {
+                running = pid
+            } else {
+                running = nil
+            }
+
+            let entry = VMListEntry(name: config.name, bundleURL: item, installed: config.installed, runningPID: running)
+            entries.append(entry)
+        }
+
+        return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     func bundleURL(for name: String) -> URL {
         return rootDirectory.appendingPathComponent("\(name).vm", isDirectory: true)
     }
@@ -1062,6 +1121,7 @@ Note: After installation, enable Remote Login (SSH) inside the guest for conveni
 
 // MARK: - Entry Point
 
+#if !VMCTL_APP
 @main
 struct VMCTLMain {
     static func main() {
@@ -1078,3 +1138,4 @@ struct VMCTLMain {
         }
     }
 }
+#endif
