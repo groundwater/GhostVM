@@ -263,8 +263,22 @@ final class VMConfigurationBuilder {
 
         if !headless {
             // GUI mode attaches a single display plus keyboard and pointing devices so VZVirtualMachineView works.
-            let display = VZMacGraphicsDisplayConfiguration(widthInPixels: 1920, heightInPixels: 1200, pixelsPerInch: 110)
             let graphics = VZMacGraphicsDeviceConfiguration()
+            let display: VZMacGraphicsDisplayConfiguration
+            if let mainScreen = NSScreen.main {
+                if #available(macOS 14.0, *) {
+                    display = VZMacGraphicsDisplayConfiguration(for: mainScreen, sizeInPoints: mainScreen.frame.size)
+                } else {
+                    let pointSize = mainScreen.frame.size
+                    let scale = max(mainScreen.backingScaleFactor, 1.0)
+                    let width = max(Int((pointSize.width * scale).rounded()), 1024)
+                    let height = max(Int((pointSize.height * scale).rounded()), 768)
+                    let defaultPixelsPerInch = max(Int((110.0 * scale).rounded()), 110)
+                    display = VZMacGraphicsDisplayConfiguration(widthInPixels: width, heightInPixels: height, pixelsPerInch: defaultPixelsPerInch)
+                }
+            } else {
+                display = VZMacGraphicsDisplayConfiguration(widthInPixels: 2560, heightInPixels: 1600, pixelsPerInch: 110)
+            }
             graphics.displays = [display]
             config.graphicsDevices = [graphics]
             config.keyboards = [VZUSBKeyboardConfiguration()]
@@ -644,6 +658,9 @@ final class VMController {
                 window.title = "vmctl – \(name)"
                 let vmView = VZVirtualMachineView()
                 vmView.virtualMachine = virtualMachine
+                if #available(macOS 14.0, *) {
+                    vmView.automaticallyReconfiguresDisplay = true
+                }
                 vmView.autoresizingMask = [.width, .height]
                 window.contentView = vmView
                 window.center()
