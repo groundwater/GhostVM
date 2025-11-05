@@ -84,7 +84,11 @@ struct MainView: View {
                             isBusy: model.busyNames.contains(entry.name),
                             isSelected: model.selectedName == entry.name,
                             onSelect: {
-                                model.selectedName = entry.name
+                                if model.selectedName == entry.name {
+                                    model.selectedName = nil
+                                } else {
+                                    model.selectedName = entry.name
+                                }
                             },
                             onToggle: {
                                 model.selectedName = entry.name

@@ -24,12 +24,12 @@ Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.ap
 ## Building
 
 ```bash
-make            # builds ./vmctl
+make            # builds ./vmctl (codesigned ad-hoc with entitlements)
 make app        # builds VirtualMachineManager.app alongside vmctl
 make clean      # removes the binary and app bundle
 ```
 
-The `make` targets rely on `swiftc` to compile both targets and link against the system frameworks in `/System/Library/Frameworks`. Override `SWIFTC`, `TARGET`, or `APP_TARGET` if you need custom toolchains or names.
+The `make` targets rely on `swiftc` to compile both targets and link against the system frameworks in `/System/Library/Frameworks`. By default the binaries are ad-hoc signed so the virtualization entitlement is present. Override `CODESIGN_ID` with a Developer ID or other identity if you prefer. You can also override `SWIFTC`, `TARGET`, or `APP_TARGET` for custom toolchains or names.
 
 ## Usage
 

@@ -3,7 +3,7 @@ TARGET ?= vmctl
 SOURCES := vmctl.swift
 FRAMEWORKS := -framework Virtualization -framework AppKit
 SWIFTFLAGS := -parse-as-library
-CODESIGN_ID ?=
+CODESIGN_ID ?= -
 ENTITLEMENTS := entitlements.plist
 APP_TARGET ?= VirtualMachineManager
 APP_SOURCES := VMApp.swift vmctl.swift
@@ -17,11 +17,10 @@ all: build
 
 build:
 	$(SWIFTC) $(SWIFTFLAGS) -o $(TARGET) $(SOURCES) $(FRAMEWORKS)
-	@if [ -n "$(CODESIGN_ID)" ]; then \
-		codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(TARGET)"; \
-	else \
-		echo "Skipping codesign (set CODESIGN_ID to sign with entitlements)."; \
+	@if [ "$(CODESIGN_ID)" = "-" ]; then \
+		echo "Codesigning $(TARGET) with ad-hoc identity to apply entitlements."; \
 	fi
+	codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(TARGET)"
 
 run: build
 	./$(TARGET)
@@ -37,11 +36,10 @@ app: build
 	$(SWIFTC) $(SWIFTFLAGS) -DVMCTL_APP -o $(APP_BUNDLE)/Contents/MacOS/$(APP_TARGET) $(APP_SOURCES) $(FRAMEWORKS)
 	cp $(TARGET) $(APP_BUNDLE)/Contents/MacOS/vmctl
 	cp icon.png $(APP_BUNDLE)/Contents/Resources/icon.png
-	@if [ -n "$(CODESIGN_ID)" ]; then \
-		codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)"; \
-	else \
-		echo "Skipping codesign (set CODESIGN_ID to sign with entitlements)."; \
+	@if [ "$(CODESIGN_ID)" = "-" ]; then \
+		echo "Codesigning $(APP_BUNDLE) with ad-hoc identity to apply entitlements."; \
 	fi
+	codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)"
 
 clean:
 	rm -f $(TARGET)
