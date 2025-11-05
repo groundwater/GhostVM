@@ -390,6 +390,9 @@ final class VMController {
         let bundleURL: URL
         let installed: Bool
         let runningPID: pid_t?
+        let cpuCount: Int
+        let memoryBytes: UInt64
+        let diskBytes: UInt64
 
         var isRunning: Bool {
             return runningPID != nil
@@ -437,7 +440,15 @@ final class VMController {
                 running = nil
             }
 
-            let entry = VMListEntry(name: config.name, bundleURL: item, installed: config.installed, runningPID: running)
+            let entry = VMListEntry(
+                name: config.name,
+                bundleURL: item,
+                installed: config.installed,
+                runningPID: running,
+                cpuCount: config.cpus,
+                memoryBytes: config.memoryBytes,
+                diskBytes: config.diskBytes
+            )
             entries.append(entry)
         }
 
@@ -549,6 +560,24 @@ final class VMController {
         print("Restore image: \(restoreImageURL.path)")
         print("Hardware model saved to \(layout.hardwareModelURL.path)")
         print("Disk size: \(options.diskGiB) GiB, Memory: \(options.memoryGiB) GiB, vCPUs: \(options.cpus)")
+    }
+
+    func moveVMToTrash(name: String) throws {
+        let bundleURL = bundleURL(for: name)
+        guard fileManager.fileExists(atPath: bundleURL.path) else {
+            throw VMError.message("VM '\(name)' does not exist.")
+        }
+
+        let layout = VMFileLayout(bundleURL: bundleURL)
+        if let pid = readPID(from: layout.pidFileURL), kill(pid, 0) == 0 {
+            throw VMError.message("VM '\(name)' is running. Stop it before deleting.")
+        }
+
+        do {
+            try fileManager.trashItem(at: bundleURL, resultingItemURL: nil)
+        } catch {
+            throw VMError.message("Failed to move VM to Trash: \(error.localizedDescription)")
+        }
     }
 
     func installVM(name: String) throws {

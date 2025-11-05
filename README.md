@@ -1,28 +1,35 @@
-# vmctl
+# Virtual Machine Manager
 
-`vmctl` is a single-file Swift command-line utility that provisions and manages macOS virtual machines on Apple Silicon using Apple’s Virtualization.framework. It creates self-contained VM bundles under `~/VMs/<name>.vm/` and supports initialization, installation, start (GUI or headless), graceful stop, status inspection, and coarse snapshots.
+Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained bundles under `~/VMs/<name>.vm/`. The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
 
 ## Requirements
 
-- macOS 13 or newer running on Apple Silicon (arm64).
-- Xcode command-line tools with the Virtualization.framework headers/libraries.
-- The host must comply with Apple’s EULA (macOS guests on Apple-branded hardware).
-- macOS virtualization entitlement enabled (run from Terminal on the host).
+### Running the App
+
+- macOS 15 or newer on Apple Silicon (arm64).
+- Apple’s macOS virtualization entitlement enabled on the host.
+- Apple’s `Virtualization.framework`, which is part of macOS; end users do **not** need Xcode installed to run the packaged app.
+
+### Using the Command Line Tool
+
+- Same runtime requirements as the app.
+- Keep the VM bundles under `~/VMs` accessible to the user account invoking `vmctl`.
+
+### Building From Source
+
+- Xcode 15 (or newer) with the corresponding command-line tools installed so `swiftc` can link against `Virtualization.framework` and `AppKit`.
+- macOS 15 or newer on Apple Silicon.
+- The ability to run binaries with the macOS virtualization entitlement (granted via Terminal once per host).
 
 ## Building
 
 ```bash
 make            # builds ./vmctl
-make clean      # removes the binary
+make app        # builds VirtualMachineManager.app alongside vmctl
+make clean      # removes the binary and app bundle
 ```
 
-The Makefile invokes:
-
-```bash
-swiftc -parse-as-library -o vmctl vmctl.swift -framework Virtualization -framework AppKit
-```
-
-You can override `SWIFTC` or `TARGET` environment variables when calling `make`.
+The `make` targets rely on `swiftc` to compile both targets and link against the system frameworks in `/System/Library/Frameworks`. Override `SWIFTC`, `TARGET`, or `APP_TARGET` if you need custom toolchains or names.
 
 ## Usage
 
