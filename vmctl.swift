@@ -3,8 +3,26 @@ import AppKit
 import Virtualization
 import Darwin
 import ObjectiveC
+import CoreGraphics
 
 private var windowDelegateAssociationKey: UInt8 = 0
+
+private func pixelsPerInch(for screen: NSScreen) -> Int {
+    if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+        let sizeMillimeters = CGDisplayScreenSize(displayID)
+        let pixelWidth = CGDisplayPixelsWide(displayID)
+        if sizeMillimeters.width > 0 {
+            let widthInches = Double(sizeMillimeters.width) / 25.4
+            let computed = Double(pixelWidth) / widthInches
+            if computed.isFinite, computed > 0 {
+                return max(Int(computed.rounded()), 72)
+            }
+        }
+    }
+    let scale = max(screen.backingScaleFactor, 1.0)
+    return max(Int((110.0 * scale).rounded()), 110)
+}
 
 // MARK: - Utilities
 
@@ -272,11 +290,19 @@ final class VMConfigurationBuilder {
                 if #available(macOS 14.0, *) {
                     display = VZMacGraphicsDisplayConfiguration(for: mainScreen, sizeInPoints: mainScreen.frame.size)
                 } else {
-                    let pointSize = mainScreen.frame.size
                     let scale = max(mainScreen.backingScaleFactor, 1.0)
-                    let width = max(Int((pointSize.width * scale).rounded()), 1024)
-                    let height = max(Int((pointSize.height * scale).rounded()), 768)
-                    let defaultPixelsPerInch = max(Int((110.0 * scale).rounded()), 110)
+                    var width = max(Int((mainScreen.frame.width * scale).rounded()), 1024)
+                    var height = max(Int((mainScreen.frame.height * scale).rounded()), 768)
+                    if let screenNumber = mainScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+                        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
+                        let displayWidth = CGDisplayPixelsWide(displayID)
+                        let displayHeight = CGDisplayPixelsHigh(displayID)
+                        if displayWidth > 0, displayHeight > 0 {
+                            width = max(Int(displayWidth), 1024)
+                            height = max(Int(displayHeight), 768)
+                        }
+                    }
+                    let defaultPixelsPerInch = pixelsPerInch(for: mainScreen)
                     display = VZMacGraphicsDisplayConfiguration(widthInPixels: width, heightInPixels: height, pixelsPerInch: defaultPixelsPerInch)
                 }
             } else {
@@ -457,6 +483,66 @@ final class VMController {
 
     func bundleURL(for name: String) -> URL {
         return rootDirectory.appendingPathComponent("\(name).vm", isDirectory: true)
+    }
+
+    func storedConfig(for name: String) throws -> VMStoredConfig {
+        let bundleURL = bundleURL(for: name)
+        guard fileManager.fileExists(atPath: bundleURL.path) else {
+            throw VMError.message("VM '\(name)' does not exist.")
+        }
+        let layout = VMFileLayout(bundleURL: bundleURL)
+        let store = VMConfigStore(layout: layout)
+        return try store.load()
+    }
+
+    func updateVMSettings(name: String, cpus: Int, memoryGiB: UInt64, sharedFolderPath: String?, sharedFolderWritable: Bool) throws {
+        let bundleURL = bundleURL(for: name)
+        guard fileManager.fileExists(atPath: bundleURL.path) else {
+            throw VMError.message("VM '\(name)' does not exist.")
+        }
+
+        let layout = VMFileLayout(bundleURL: bundleURL)
+        guard !isVMProcessRunning(layout: layout) else {
+            throw VMError.message("Stop VM '\(name)' before editing its settings.")
+        }
+
+        var config = try storedConfig(for: name)
+
+        let minimumCPUs = max(Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount), 1)
+        guard cpus >= minimumCPUs else {
+            throw VMError.message("CPU count must be at least \(minimumCPUs).")
+        }
+
+        guard memoryGiB > 0 else {
+            throw VMError.message("Memory must be greater than zero.")
+        }
+        let memoryBytes = memoryGiB * (1 << 30)
+        let minimumMemory = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        guard memoryBytes >= minimumMemory else {
+            let minimumGiB = max(1, Int((minimumMemory + ((1 << 30) - 1)) >> 30))
+            throw VMError.message("Memory must be at least \(minimumGiB) GiB.")
+        }
+
+        var sanitizedSharedPath: String?
+        if let path = sharedFolderPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("Shared folder path \(path) does not exist or is not a directory.")
+            }
+            sanitizedSharedPath = path
+        }
+
+        config.cpus = cpus
+        config.memoryBytes = memoryBytes
+        config.sharedFolderPath = sanitizedSharedPath
+        if sanitizedSharedPath != nil {
+            config.sharedFolderReadOnly = !sharedFolderWritable
+        } else {
+            config.sharedFolderReadOnly = true
+        }
+
+        let store = VMConfigStore(layout: layout)
+        try store.save(config)
     }
 
     func initVM(name: String, options: InitOptions) throws {

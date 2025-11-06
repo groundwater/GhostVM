@@ -42,6 +42,7 @@ struct MainView: View {
     let onToggle: (VMController.VMListEntry) -> Void
     let onDelete: (VMController.VMListEntry) -> Void
     let onShowInFinder: (VMController.VMListEntry) -> Void
+    let onEditSettings: (VMController.VMListEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -83,13 +84,6 @@ struct MainView: View {
                             entry: entry,
                             isBusy: model.busyNames.contains(entry.name),
                             isSelected: model.selectedName == entry.name,
-                            onSelect: {
-                                if model.selectedName == entry.name {
-                                    model.selectedName = nil
-                                } else {
-                                    model.selectedName = entry.name
-                                }
-                            },
                             onToggle: {
                                 model.selectedName = entry.name
                                 onToggle(entry)
@@ -101,11 +95,15 @@ struct MainView: View {
                             onShowInFinder: {
                                 model.selectedName = entry.name
                                 onShowInFinder(entry)
+                            },
+                            onEditSettings: {
+                                model.selectedName = entry.name
+                                onEditSettings(entry)
                             }
                         )
-                        .listRowInsets(.init())
-                        .listRowBackground(Color.clear)
                         .tag(entry.name)
+                        .listRowInsets(.init())
+                        // Let the system draw selection; do NOT override listRowBackground
                     }
                 }
             }
@@ -121,10 +119,10 @@ struct VMRowView: View {
     let entry: VMController.VMListEntry
     let isBusy: Bool
     let isSelected: Bool
-    let onSelect: () -> Void
     let onToggle: () -> Void
     let onDelete: () -> Void
     let onShowInFinder: () -> Void
+    let onEditSettings: () -> Void
 
     @State private var isPlayHovered = false
     private let menuIconSize: CGFloat = 18
@@ -153,14 +151,13 @@ struct VMRowView: View {
 
             HStack(spacing: 8) {
                 Button(action: {
-                    onSelect()
                     onToggle()
                 }) {
                     Image(systemName: entry.isRunning ? "pause.fill" : "play.fill")
                         .font(.system(size: 18, weight: .semibold))
                         .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless) // important: don't steal first-click focus from the List
                 .foregroundStyle(isBusy ? Color.secondary : Color.primary)
                 .background(
                     Circle()
@@ -185,7 +182,7 @@ struct VMRowView: View {
                         .frame(width: 28, height: 28)
                 }
                 .fixedSize()
-                .menuStyle(.borderlessButton)
+                .menuStyle(.borderlessButton) // prevents stealing row focus
                 .menuIndicator(.hidden)
                 .help("More actions")
             }
@@ -193,14 +190,8 @@ struct VMRowView: View {
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            onSelect()
-        }
-        .contextMenu {
-            actionMenuItems()
-        }
+        // Let the system draw selected row highlight (blue/gray). Do not override background.
+        .contextMenu { actionMenuItems() }
     }
 
     private var statsDescription: String {
@@ -221,22 +212,26 @@ struct VMRowView: View {
     @ViewBuilder
     private func actionMenuItems() -> some View {
         Button(entry.isRunning ? "Pause" : "Start") {
-            onSelect()
             onToggle()
         }
         .disabled(isBusy)
 
+        if !entry.isRunning {
+            Button("Edit Settings…") {
+                onEditSettings()
+            }
+            .disabled(isBusy)
+        }
+
         Divider()
 
         Button("Show in Finder") {
-            onSelect()
             onShowInFinder()
         }
 
         Divider()
 
         Button("Delete", role: .destructive) {
-            onSelect()
             onDelete()
         }
         .disabled(entry.isRunning || isBusy)
@@ -255,7 +250,9 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var statusTimer: Timer?
     private weak var createSheet: NSPanel?
+    private weak var editSheet: NSPanel?
     private var createForm: CreateForm?
+    private var editForm: EditForm?
     private var runningProcesses: [RunningProcess] = []
 
     private struct RunningProcess {
@@ -273,6 +270,17 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let sharedFolderField: NSTextField
         let sharedWritableCheckbox: NSButton
         let createButton: NSButton
+    }
+
+    private struct EditForm {
+        let name: String
+        let panel: NSPanel
+        let cpuField: NSTextField
+        let memoryField: NSTextField
+        let diskField: NSTextField
+        let sharedFolderField: NSTextField
+        let sharedWritableCheckbox: NSButton
+        let saveButton: NSButton
     }
 
     override init() {
@@ -395,7 +403,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             onCreate: { [weak self] in self?.presentCreateSheet() },
             onToggle: { [weak self] entry in self?.toggleVM(entry: entry) },
             onDelete: { [weak self] entry in self?.confirmDelete(entry: entry) },
-            onShowInFinder: { [weak self] entry in self?.showInFinder(entry: entry) }
+            onShowInFinder: { [weak self] entry in self?.showInFinder(entry: entry) },
+            onEditSettings: { [weak self] entry in self?.presentEditSettings(for: entry) }
         )
 
         let hostingView = NSHostingView(rootView: content)
@@ -713,6 +722,235 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func presentEditSettings(for entry: VMController.VMListEntry) {
+        guard let window = self.window else { return }
+
+        if entry.isRunning {
+            presentErrorAlert(message: "VM Running", informative: "Stop \(entry.name) before editing its settings.")
+            return
+        }
+
+        if let sheet = editSheet {
+            window.makeKeyAndOrderFront(sheet)
+            return
+        }
+
+        viewModel.statusMessage = "Loading settings for \(entry.name)…"
+        commandQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let config = try self.controller.storedConfig(for: entry.name)
+                DispatchQueue.main.async {
+                    self.viewModel.statusMessage = "Ready."
+                    self.showEditSheet(for: entry.name, config: config)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.viewModel.statusMessage = "Failed to load settings."
+                    self.presentErrorAlert(message: "Failed to Load Settings", informative: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    private func showEditSheet(for name: String, config: VMStoredConfig) {
+        guard let window = self.window else { return }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 340),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "VM Settings"
+        panel.isFloatingPanel = false
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.center()
+
+        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        panel.contentView = contentView
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
+
+        contentView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+        ])
+
+        let descriptionLabel = NSTextField(labelWithString: "Adjust CPU, memory, and shared folder settings. Changes apply the next time the VM starts.")
+        descriptionLabel.lineBreakMode = .byWordWrapping
+        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(descriptionLabel)
+
+        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 12, weight: .semibold)
+
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            row.distribution = .fill
+
+            control.translatesAutoresizingMaskIntoConstraints = false
+            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+
+            row.addArrangedSubview(label)
+            row.addArrangedSubview(control)
+            if let trailing = trailing {
+                row.addArrangedSubview(trailing)
+            }
+
+            return row
+        }
+
+        let nameField = NSTextField(string: name)
+        nameField.isEnabled = false
+        stack.addArrangedSubview(labeledRow("Name", control: nameField))
+
+        let cpuField = NSTextField(string: "\(config.cpus)")
+        cpuField.placeholderString = "Number of vCPUs"
+        stack.addArrangedSubview(labeledRow("CPUs", control: cpuField))
+
+        let memoryGiB = max(1, Int((config.memoryBytes + ((1 << 30) - 1)) >> 30))
+        let memoryField = NSTextField(string: "\(memoryGiB)")
+        memoryField.placeholderString = "GiB"
+        stack.addArrangedSubview(labeledRow("Memory", control: memoryField))
+
+        let diskFormatter = ByteCountFormatter()
+        diskFormatter.allowedUnits = [.useGB]
+        diskFormatter.countStyle = .file
+        diskFormatter.includesUnit = true
+        let diskDisplay = diskFormatter.string(fromByteCount: Int64(config.diskBytes))
+        let diskField = NSTextField(string: diskDisplay)
+        diskField.isEnabled = false
+        stack.addArrangedSubview(labeledRow("Disk", control: diskField))
+
+        let sharedField = NSTextField(string: config.sharedFolderPath ?? "")
+        sharedField.placeholderString = "Optional shared folder path"
+        let sharedBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseSharedFolder))
+        stack.addArrangedSubview(labeledRow("Shared Folder", control: sharedField, trailing: sharedBrowse))
+
+        let sharedWritable = NSButton(checkboxWithTitle: "Allow writes to shared folder", target: nil, action: nil)
+        if let sharedPath = config.sharedFolderPath, !sharedPath.isEmpty {
+            sharedWritable.state = config.sharedFolderReadOnly ? .off : .on
+        } else {
+            sharedWritable.state = .off
+        }
+        stack.addArrangedSubview(sharedWritable)
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.alignment = .centerY
+        buttonRow.spacing = 8
+        buttonRow.distribution = .fillProportionally
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelEditSheet))
+        cancelButton.bezelStyle = .rounded
+
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(confirmEditSheet))
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+
+        buttonRow.addArrangedSubview(spacer)
+        buttonRow.addArrangedSubview(cancelButton)
+        buttonRow.addArrangedSubview(saveButton)
+        stack.addArrangedSubview(buttonRow)
+
+        editForm = EditForm(
+            name: name,
+            panel: panel,
+            cpuField: cpuField,
+            memoryField: memoryField,
+            diskField: diskField,
+            sharedFolderField: sharedField,
+            sharedWritableCheckbox: sharedWritable,
+            saveButton: saveButton
+        )
+
+        editSheet = panel
+        window.beginSheet(panel) { [weak self] _ in
+            self?.editSheet = nil
+            self?.editForm = nil
+        }
+    }
+
+    @objc private func cancelEditSheet(_ sender: Any?) {
+        guard let panel = editForm?.panel else { return }
+        window?.endSheet(panel)
+    }
+
+    @objc private func confirmEditSheet(_ sender: Any?) {
+        guard let form = editForm else { return }
+
+        guard let cpus = Int(form.cpuField.stringValue), cpus > 0 else {
+            presentErrorAlert(message: "Invalid CPU Count", informative: "Enter a positive integer for vCPU count.")
+            return
+        }
+
+        guard let memoryValue = UInt64(form.memoryField.stringValue), memoryValue > 0 else {
+            presentErrorAlert(message: "Invalid Memory", informative: "Enter memory in GiB (positive number).")
+            return
+        }
+
+        let sharedPathValue = form.sharedFolderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !sharedPathValue.isEmpty {
+            var isDirectory: ObjCBool = false
+            if !FileManager.default.fileExists(atPath: sharedPathValue, isDirectory: &isDirectory) || !isDirectory.boolValue {
+                presentErrorAlert(message: "Invalid Shared Folder", informative: "Select a folder that exists before saving.")
+                return
+            }
+        }
+
+        window?.endSheet(form.panel)
+
+        let name = form.name
+        let sharedPath = sharedPathValue.isEmpty ? nil : sharedPathValue
+        let writable = (form.sharedWritableCheckbox.state == .on)
+
+        viewModel.busyNames.insert(name)
+        viewModel.statusMessage = "Updating \(name)…"
+
+        commandQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.controller.updateVMSettings(
+                    name: name,
+                    cpus: cpus,
+                    memoryGiB: memoryValue,
+                    sharedFolderPath: sharedPath,
+                    sharedFolderWritable: writable
+                )
+                DispatchQueue.main.async {
+                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.statusMessage = "Updated \(name)."
+                    self.refreshVMs()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.statusMessage = "Update failed: \(error.localizedDescription)"
+                    self.presentErrorAlert(message: "Failed to Update VM", informative: error.localizedDescription)
+                    self.refreshVMs()
+                }
+            }
+        }
+    }
+
     @objc private func browseRestoreImage(_ sender: Any?) {
         guard let form = createForm else { return }
         let panel = NSOpenPanel()
@@ -732,15 +970,26 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     }
 
     @objc private func browseSharedFolder(_ sender: Any?) {
-        guard let form = createForm else { return }
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Choose"
-        panel.beginSheetModal(for: form.panel) { response in
-            if response == .OK, let url = panel.url {
-                form.sharedFolderField.stringValue = url.path
+        if let form = createForm {
+            presentSharedFolderPicker(attachedTo: form.panel) { path in
+                form.sharedFolderField.stringValue = path
+            }
+        } else if let form = editForm {
+            presentSharedFolderPicker(attachedTo: form.panel) { path in
+                form.sharedFolderField.stringValue = path
+            }
+        }
+    }
+
+    private func presentSharedFolderPicker(attachedTo panel: NSPanel, update: @escaping (String) -> Void) {
+        let openPanel = NSOpenPanel()
+        openPanel.canChooseFiles = false
+        openPanel.canChooseDirectories = true
+        openPanel.allowsMultipleSelection = false
+        openPanel.prompt = "Choose"
+        openPanel.beginSheetModal(for: panel) { response in
+            if response == .OK, let url = openPanel.url {
+                update(url.path)
             }
         }
     }
