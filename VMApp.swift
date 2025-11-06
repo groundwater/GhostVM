@@ -359,6 +359,17 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if let window = window {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            buildInterface()
+            window?.center()
+            window?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
     // MARK: - Menu & Interface
 
     private func setupMenus() {
@@ -426,6 +437,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
+        window.isReleasedWhenClosed = false
         window.title = "Virtual Machine Manager"
 
         let content = MainView(
