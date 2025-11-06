@@ -242,17 +242,24 @@ struct VMRowView: View {
 
 @main
 final class VMCTLApp: NSObject, NSApplicationDelegate {
+    private static let vmRootDefaultsKey = "VMCTLRootDirectoryPath"
+    private static let defaultVMRootDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)
+
     private let cliURL: URL
     private let commandQueue = DispatchQueue(label: "vmctl.app.command")
-    private let controller = VMController()
+    private let userDefaults = UserDefaults.standard
+    private var vmRootDirectory: URL
+    private let controller: VMController
     private let viewModel = VMListViewModel()
 
     private var window: NSWindow!
     private var statusTimer: Timer?
     private weak var createSheet: NSPanel?
     private weak var editSheet: NSPanel?
+    private weak var settingsSheet: NSPanel?
     private var createForm: CreateForm?
     private var editForm: EditForm?
+    private var settingsForm: SettingsForm?
     private var runningProcesses: [RunningProcess] = []
     private var managedSessions: [String: EmbeddedVMSession] = [:]
     private var awaitingQuitConfirmation = false
@@ -285,6 +292,11 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let saveButton: NSButton
     }
 
+    private struct SettingsForm {
+        let panel: NSPanel
+        let pathField: NSTextField
+    }
+
     override init() {
         if let override = ProcessInfo.processInfo.environment["VMCTL_CLI_PATH"] {
             cliURL = URL(fileURLWithPath: override)
@@ -292,6 +304,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             let executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
             cliURL = executableURL.deletingLastPathComponent().appendingPathComponent("vmctl")
         }
+
+        let storedPath = UserDefaults.standard.string(forKey: VMCTLApp.vmRootDefaultsKey)
+        if let path = storedPath, !path.isEmpty {
+            vmRootDirectory = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
+        } else {
+            vmRootDirectory = VMCTLApp.defaultVMRootDirectory
+        }
+        controller = VMController(rootDirectory: vmRootDirectory)
         super.init()
     }
 
@@ -383,6 +403,9 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let aboutItem = NSMenuItem(title: "About \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
         aboutItem.target = NSApp
         appMenu.addItem(aboutItem)
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings(_:)), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
         appMenu.addItem(NSMenuItem.separator())
         let hideItem = NSMenuItem(title: "Hide \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         hideItem.target = NSApp
@@ -1091,6 +1114,174 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                 }
             }
         }
+    }
+
+    // MARK: - Settings
+
+    @objc private func openSettings(_ sender: Any?) {
+        presentSettingsSheet()
+    }
+
+    private func presentSettingsSheet() {
+        guard let window = self.window else { return }
+
+        if let sheet = settingsSheet {
+            window.makeKeyAndOrderFront(sheet)
+            return
+        }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Settings"
+        panel.isFloatingPanel = false
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.center()
+
+        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
+        panel.contentView = contentView
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 14
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
+
+        contentView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+        ])
+
+        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .vm bundles. Changes take effect immediately.")
+        descriptionLabel.lineBreakMode = .byWordWrapping
+        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(descriptionLabel)
+
+        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 12, weight: .semibold)
+
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            row.distribution = .fill
+
+            control.translatesAutoresizingMaskIntoConstraints = false
+            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+
+            row.addArrangedSubview(label)
+            row.addArrangedSubview(control)
+            if let trailing = trailing {
+                row.addArrangedSubview(trailing)
+            }
+            return row
+        }
+
+        let pathField = NSTextField(string: vmRootDirectory.path)
+        pathField.placeholderString = VMCTLApp.defaultVMRootDirectory.path
+        let browseButton = NSButton(title: "Browse…", target: self, action: #selector(browseVMFolder(_:)))
+        stack.addArrangedSubview(labeledRow("VMs Folder", control: pathField, trailing: browseButton))
+
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.alignment = .centerY
+        buttonRow.spacing = 8
+        buttonRow.distribution = .fillProportionally
+
+        let resetButton = NSButton(title: "Reset to Default", target: self, action: #selector(resetVMFolderToDefault(_:)))
+        resetButton.bezelStyle = .rounded
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelSettingsSheet(_:)))
+        cancelButton.bezelStyle = .rounded
+
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(confirmSettingsSheet(_:)))
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+
+        buttonRow.addArrangedSubview(resetButton)
+        buttonRow.addArrangedSubview(spacer)
+        buttonRow.addArrangedSubview(cancelButton)
+        buttonRow.addArrangedSubview(saveButton)
+        stack.addArrangedSubview(buttonRow)
+
+        settingsForm = SettingsForm(panel: panel, pathField: pathField)
+        settingsSheet = panel
+
+        window.beginSheet(panel) { [weak self] _ in
+            self?.settingsSheet = nil
+            self?.settingsForm = nil
+        }
+    }
+
+    @objc private func cancelSettingsSheet(_ sender: Any?) {
+        guard let panel = settingsForm?.panel else { return }
+        window?.endSheet(panel)
+    }
+
+    @objc private func confirmSettingsSheet(_ sender: Any?) {
+        guard let form = settingsForm else { return }
+
+        let rawPath = form.pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawPath.isEmpty else {
+            presentErrorAlert(message: "Folder Required", informative: "Enter or choose a folder to store your virtual machines.")
+            return
+        }
+
+        let expandedPath = (rawPath as NSString).expandingTildeInPath
+        let resolvedPath = expandedPath.isEmpty ? rawPath : expandedPath
+        let selectedURL = URL(fileURLWithPath: resolvedPath, isDirectory: true).standardizedFileURL
+        let fm = FileManager.default
+        var isDirectory: ObjCBool = false
+
+        if fm.fileExists(atPath: selectedURL.path, isDirectory: &isDirectory) {
+            if !isDirectory.boolValue {
+                presentErrorAlert(message: "Not a Folder", informative: "\(selectedURL.path) exists but is not a directory.")
+                return
+            }
+        } else {
+            do {
+                try fm.createDirectory(at: selectedURL, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                presentErrorAlert(message: "Failed to Create Folder", informative: error.localizedDescription)
+                return
+            }
+        }
+
+        window?.endSheet(form.panel)
+        applyVMRootDirectory(selectedURL)
+    }
+
+    @objc private func browseVMFolder(_ sender: Any?) {
+        guard let form = settingsForm else { return }
+        presentSharedFolderPicker(attachedTo: form.panel) { path in
+            form.pathField.stringValue = path
+        }
+    }
+
+    @objc private func resetVMFolderToDefault(_ sender: Any?) {
+        settingsForm?.pathField.stringValue = VMCTLApp.defaultVMRootDirectory.path
+    }
+
+    private func applyVMRootDirectory(_ url: URL) {
+        vmRootDirectory = url
+        controller.updateRootDirectory(url)
+        userDefaults.set(url.path, forKey: VMCTLApp.vmRootDefaultsKey)
+        viewModel.statusMessage = "Using VMs folder at \(url.path)"
+        refreshVMs()
     }
 
     @objc private func browseRestoreImage(_ sender: Any?) {

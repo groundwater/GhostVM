@@ -438,10 +438,18 @@ struct RuntimeSharedFolderOverride {
 
 final class VMController {
     private let fileManager = FileManager.default
-    private let rootDirectory: URL
+    private var rootDirectory: URL
 
     init(rootDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)) {
         self.rootDirectory = rootDirectory
+    }
+
+    var currentRootDirectory: URL {
+        return rootDirectory
+    }
+
+    func updateRootDirectory(_ url: URL) {
+        rootDirectory = url
     }
 
     struct VMListEntry {
