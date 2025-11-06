@@ -153,7 +153,7 @@ struct VMRowView: View {
                 Button(action: {
                     onToggle()
                 }) {
-                    Image(systemName: entry.isRunning ? "pause.fill" : "play.fill")
+                    Image(systemName: entry.isRunning ? "stop.fill" : "play.fill")
                         .font(.system(size: 18, weight: .semibold))
                         .frame(width: 28, height: 28)
                 }
@@ -254,6 +254,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var createForm: CreateForm?
     private var editForm: EditForm?
     private var runningProcesses: [RunningProcess] = []
+    private var managedSessions: [String: EmbeddedVMSession] = [:]
+    private var awaitingQuitConfirmation = false
 
     private struct RunningProcess {
         let process: Process
@@ -322,6 +324,35 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         statusTimer = nil
         runningProcesses.forEach { $0.pipe.fileHandleForReading.readabilityHandler = nil }
         runningProcesses.removeAll()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if awaitingQuitConfirmation {
+            return .terminateLater
+        }
+
+        let activeSessions = managedSessions
+        guard !activeSessions.isEmpty else {
+            return .terminateNow
+        }
+
+        let names = activeSessions.keys.sorted().joined(separator: ", ")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Suspend running virtual machines before quitting?"
+        alert.informativeText = "The following VMs are still running:\n\(names)\nThey need to be suspended before the app quits."
+        alert.addButton(withTitle: "Suspend & Quit")
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\u{1b}"
+
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            awaitingQuitConfirmation = true
+            suspendSessionsBeforeQuit(Array(activeSessions.values))
+            return .terminateLater
+        }
+        return .terminateCancel
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -449,21 +480,24 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     private func toggleVM(entry: VMController.VMListEntry) {
         if viewModel.busyNames.contains(entry.name) { return }
-        viewModel.busyNames.insert(entry.name)
+
+        if let session = managedSessions[entry.name] {
+            viewModel.statusMessage = "Stopping \(entry.name)…"
+            session.requestStop()
+            return
+        }
 
         if entry.isRunning {
+            viewModel.busyNames.insert(entry.name)
             viewModel.statusMessage = "Stopping \(entry.name)…"
             runCommand(["stop", entry.name], waitForTermination: true, associatedName: entry.name) { [weak self] in
                 self?.viewModel.busyNames.remove(entry.name)
                 self?.refreshVMs()
             }
-        } else {
-            viewModel.statusMessage = "Starting \(entry.name)…"
-            runCommand(["start", entry.name], waitForTermination: false, associatedName: entry.name) { [weak self] in
-                self?.viewModel.busyNames.remove(entry.name)
-                self?.refreshVMs()
-            }
+            return
         }
+
+        startEmbeddedVM(named: entry.name)
     }
 
     private func confirmDelete(entry: VMController.VMListEntry) {
@@ -510,6 +544,102 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                     self.viewModel.busyNames.remove(name)
                     self.presentErrorAlert(message: "Failed to Delete VM", informative: error.localizedDescription)
                     self.refreshVMs()
+                }
+            }
+        }
+    }
+
+    // MARK: - Embedded VM Management
+
+    private func startEmbeddedVM(named name: String) {
+        if managedSessions[name] != nil { return }
+
+        viewModel.busyNames.insert(name)
+        viewModel.statusMessage = "Starting \(name)…"
+
+        commandQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let session = try self.controller.makeEmbeddedSession(name: name, runtimeSharedFolder: nil)
+                DispatchQueue.main.async {
+                    self.register(session: session, for: name)
+                    session.start { [weak self] result in
+                        guard let self else { return }
+                        switch result {
+                        case .success:
+                            self.viewModel.statusMessage = "\(name) started."
+                            self.refreshVMs()
+                        case .failure(let error):
+                            self.managedSessions.removeValue(forKey: name)
+                            self.viewModel.statusMessage = "Failed to start \(name): \(error.localizedDescription)"
+                            self.viewModel.busyNames.remove(name)
+                            self.presentErrorAlert(message: "Failed to Start VM", informative: error.localizedDescription)
+                            self.refreshVMs()
+                        }
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.statusMessage = "Failed to start \(name): \(error.localizedDescription)"
+                    self.presentErrorAlert(message: "Failed to Start VM", informative: error.localizedDescription)
+                    self.refreshVMs()
+                }
+            }
+        }
+    }
+
+    private func register(session: EmbeddedVMSession, for name: String) {
+        managedSessions[name] = session
+
+        session.stateDidChange = { [weak self] state in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch state {
+                case .starting, .stopping:
+                    self.viewModel.busyNames.insert(name)
+                default:
+                    self.viewModel.busyNames.remove(name)
+                }
+            }
+        }
+
+        session.statusChanged = { [weak self] message in
+            DispatchQueue.main.async {
+                self?.viewModel.statusMessage = message
+            }
+        }
+
+        session.terminationHandler = { [weak self] result in
+            guard let self else { return }
+            self.managedSessions.removeValue(forKey: name)
+            switch result {
+            case .success:
+                self.viewModel.statusMessage = "\(name) stopped."
+            case .failure(let error):
+                self.viewModel.statusMessage = "\(name) stopped with error: \(error.localizedDescription)"
+                self.presentErrorAlert(message: "Virtual Machine Error", informative: error.localizedDescription)
+            }
+            self.viewModel.busyNames.remove(name)
+            self.refreshVMs()
+        }
+    }
+
+    private func suspendSessionsBeforeQuit(_ sessions: [EmbeddedVMSession]) {
+        if sessions.isEmpty {
+            awaitingQuitConfirmation = false
+            NSApp.reply(toApplicationShouldTerminate: true)
+            return
+        }
+
+        var remaining = sessions.count
+        for session in sessions {
+            session.requestStop { [weak self] _ in
+                guard let self else { return }
+                remaining -= 1
+                if remaining == 0 {
+                    self.awaitingQuitConfirmation = false
+                    NSApp.reply(toApplicationShouldTerminate: true)
                 }
             }
         }

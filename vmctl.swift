@@ -351,20 +351,53 @@ final class VMConfigurationBuilder {
     }
 }
 
-// MARK: - PID Tracking
+// MARK: - PID / Lock Tracking
 
-func readPID(from url: URL) -> pid_t? {
-    guard let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else {
+enum VMLockOwner: Equatable {
+    case cli(pid_t)
+    case embedded(pid_t)
+
+    var pid: pid_t {
+        switch self {
+        case .cli(let pid), .embedded(let pid):
+            return pid
+        }
+    }
+
+    var isEmbedded: Bool {
+        if case .embedded = self { return true }
+        return false
+    }
+}
+
+func readVMLockOwner(from url: URL) -> VMLockOwner? {
+    guard let data = try? Data(contentsOf: url),
+          let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+          !text.isEmpty else {
         return nil
     }
-    return pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines))
+
+    if text.hasPrefix("embedded:") {
+        let suffix = text.dropFirst("embedded:".count)
+        if let pid = pid_t(suffix) {
+            return .embedded(pid)
+        }
+        return nil
+    }
+
+    if let pid = pid_t(text) {
+        return .cli(pid)
+    }
+    return nil
 }
 
-func writePID(_ pid: pid_t, to url: URL) throws {
-    try "\(pid)\n".data(using: .utf8)?.write(to: url, options: .atomic)
+func writeVMLockOwner(_ owner: VMLockOwner, to url: URL) throws {
+    let prefix = owner.isEmbedded ? "embedded:" : ""
+    try "\(prefix)\(owner.pid)\n".data(using: .utf8)?.write(to: url, options: .atomic)
 }
 
-func removePID(at url: URL) {
+func removeVMLock(at url: URL) {
     try? FileManager.default.removeItem(at: url)
 }
 
@@ -416,15 +449,22 @@ final class VMController {
         let bundleURL: URL
         let installed: Bool
         let runningPID: pid_t?
+        let managedInProcess: Bool
         let cpuCount: Int
         let memoryBytes: UInt64
         let diskBytes: UInt64
 
         var isRunning: Bool {
-            return runningPID != nil
+            return managedInProcess || runningPID != nil
         }
 
         var statusDescription: String {
+            if managedInProcess {
+                if let pid = runningPID {
+                    return "Running (managed by app, PID \(pid))"
+                }
+                return "Running (managed by app)"
+            }
             if let pid = runningPID {
                 return "Running (PID \(pid))"
             }
@@ -432,6 +472,19 @@ final class VMController {
                 return "Not Installed"
             }
             return "Stopped"
+        }
+
+        func withManagedInProcess(_ value: Bool) -> VMListEntry {
+            return VMListEntry(
+                name: name,
+                bundleURL: bundleURL,
+                installed: installed,
+                runningPID: runningPID,
+                managedInProcess: value,
+                cpuCount: cpuCount,
+                memoryBytes: memoryBytes,
+                diskBytes: diskBytes
+            )
         }
     }
 
@@ -460,10 +513,14 @@ final class VMController {
             }
 
             var running: pid_t?
-            if let pid = readPID(from: layout.pidFileURL), kill(pid, 0) == 0 {
-                running = pid
-            } else {
-                running = nil
+            var managedInProcess = false
+            if let owner = readVMLockOwner(from: layout.pidFileURL) {
+                if kill(owner.pid, 0) == 0 {
+                    running = owner.pid
+                    managedInProcess = owner.isEmbedded
+                } else {
+                    removeVMLock(at: layout.pidFileURL)
+                }
             }
 
             let entry = VMListEntry(
@@ -471,6 +528,7 @@ final class VMController {
                 bundleURL: item,
                 installed: config.installed,
                 runningPID: running,
+                managedInProcess: managedInProcess,
                 cpuCount: config.cpus,
                 memoryBytes: config.memoryBytes,
                 diskBytes: config.diskBytes
@@ -655,7 +713,10 @@ final class VMController {
         }
 
         let layout = VMFileLayout(bundleURL: bundleURL)
-        if let pid = readPID(from: layout.pidFileURL), kill(pid, 0) == 0 {
+        if let owner = readVMLockOwner(from: layout.pidFileURL), kill(owner.pid, 0) == 0 {
+            if owner.isEmbedded {
+                throw VMError.message("VM '\(name)' is running inside Virtual Machine Manager. Stop it before deleting.")
+            }
             throw VMError.message("VM '\(name)' is running. Stop it before deleting.")
         }
 
@@ -736,8 +797,16 @@ final class VMController {
         let store = VMConfigStore(layout: layout)
         let config = try store.load()
 
-        if let pid = readPID(from: layout.pidFileURL), kill(pid, 0) == 0 {
-            throw VMError.message("VM '\(name)' is already running under PID \(pid).")
+        if let owner = readVMLockOwner(from: layout.pidFileURL) {
+            if kill(owner.pid, 0) == 0 {
+                if owner.isEmbedded {
+                    throw VMError.message("VM '\(name)' is running inside Virtual Machine Manager (PID \(owner.pid)). Stop it there before starting via CLI.")
+                } else {
+                    throw VMError.message("VM '\(name)' is already running under PID \(owner.pid).")
+                }
+            } else {
+                removeVMLock(at: layout.pidFileURL)
+            }
         }
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
@@ -745,11 +814,11 @@ final class VMController {
         let vmQueue = DispatchQueue(label: "vmctl.run.\(name)")
         let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
         let pid = getpid()
-        try writePID(pid, to: layout.pidFileURL)
+        try writeVMLockOwner(.cli(pid), to: layout.pidFileURL)
 
         // A single closure runs all exit paths so we never leave stale pid files behind.
         func cleanupAndExit(_ code: Int32) -> Never {
-            removePID(at: layout.pidFileURL)
+            removeVMLock(at: layout.pidFileURL)
             exit(code)
         }
 
@@ -897,13 +966,20 @@ final class VMController {
     func stopVM(name: String, timeout: TimeInterval = 30) throws {
         let bundleURL = bundleURL(for: name)
         let layout = VMFileLayout(bundleURL: bundleURL)
-        guard let pid = readPID(from: layout.pidFileURL) else {
+        guard let owner = readVMLockOwner(from: layout.pidFileURL) else {
             print("VM '\(name)' does not appear to be running.")
             return
         }
+        let pid = owner.pid
+
+        if owner.isEmbedded {
+            print("VM '\(name)' is running inside Virtual Machine Manager (PID \(pid)). Stop it from the app.")
+            return
+        }
+
         if kill(pid, 0) != 0 {
             print("Stale PID file detected. Cleaning up.")
-            removePID(at: layout.pidFileURL)
+            removeVMLock(at: layout.pidFileURL)
             return
         }
 
@@ -914,7 +990,7 @@ final class VMController {
         while Date() < deadline {
             if kill(pid, 0) != 0 {
                 print("VM process exited.")
-                removePID(at: layout.pidFileURL)
+                removeVMLock(at: layout.pidFileURL)
                 return
             }
             Thread.sleep(forTimeInterval: 1)
@@ -922,7 +998,7 @@ final class VMController {
 
         print("Graceful shutdown timed out. Sending SIGKILL.")
         kill(pid, SIGKILL)
-        removePID(at: layout.pidFileURL)
+        removeVMLock(at: layout.pidFileURL)
     }
 
     func status(name: String) throws {
@@ -933,17 +1009,31 @@ final class VMController {
             throw VMError.message("VM '\(name)' does not exist.")
         }
         let config = try store.load()
-        let runningPID = readPID(from: layout.pidFileURL)
-        let isRunning: Bool
-        if let pid = runningPID, kill(pid, 0) == 0 {
-            isRunning = true
-        } else {
-            isRunning = false
+        let lockOwner = readVMLockOwner(from: layout.pidFileURL)
+        var isRunning = false
+        var runningPID: pid_t?
+        var managedInProcess = false
+        if let owner = lockOwner {
+            if kill(owner.pid, 0) == 0 {
+                isRunning = true
+                runningPID = owner.pid
+                managedInProcess = owner.isEmbedded
+            } else {
+                removeVMLock(at: layout.pidFileURL)
+            }
         }
 
         print("Name: \(config.name)")
         print("Bundle: \(bundleURL.path)")
-        print("State: \(isRunning ? "running (PID \(runningPID!))" : "stopped")")
+        if isRunning {
+            if managedInProcess {
+                print("State: running (managed by app, PID \(runningPID!))")
+            } else {
+                print("State: running (PID \(runningPID!))")
+            }
+        } else {
+            print("State: stopped")
+        }
         print(String(format: "vCPUs: %d, Memory: %.1f GiB, Disk: %.1f GiB", config.cpus, Double(config.memoryBytes) / Double(1 << 30), Double(config.diskBytes) / Double(1 << 30)))
         print("Restore image: \(config.restoreImagePath)")
         if let shared = config.sharedFolderPath {
@@ -1026,12 +1116,294 @@ final class VMController {
     }
 
     private func isVMProcessRunning(layout: VMFileLayout) -> Bool {
-        if let pid = readPID(from: layout.pidFileURL), kill(pid, 0) == 0 {
-            return true
+        if let owner = readVMLockOwner(from: layout.pidFileURL) {
+            if kill(owner.pid, 0) == 0 {
+                return true
+            }
+            removeVMLock(at: layout.pidFileURL)
         }
         return false
     }
 }
+
+#if VMCTL_APP
+extension VMController {
+    func makeEmbeddedSession(name: String, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> EmbeddedVMSession {
+        let bundleURL = bundleURL(for: name)
+        guard FileManager.default.fileExists(atPath: bundleURL.path) else {
+            throw VMError.message("VM '\(name)' does not exist.")
+        }
+
+        let layout = VMFileLayout(bundleURL: bundleURL)
+        let store = VMConfigStore(layout: layout)
+        let config = try store.load()
+
+        if let owner = readVMLockOwner(from: layout.pidFileURL) {
+            if kill(owner.pid, 0) == 0 {
+                if owner.isEmbedded {
+                    throw VMError.message("VM '\(name)' is already running inside Virtual Machine Manager.")
+                } else {
+                    throw VMError.message("VM '\(name)' is already running under PID \(owner.pid).")
+                }
+            } else {
+                removeVMLock(at: layout.pidFileURL)
+            }
+        }
+
+        return try EmbeddedVMSession(name: name, layout: layout, storedConfig: config, runtimeSharedFolder: runtimeSharedFolder)
+    }
+}
+
+final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachineDelegate {
+    enum State {
+        case initialized
+        case starting
+        case running
+        case stopping
+        case stopped
+    }
+
+    let name: String
+    let window: NSWindow
+    var stateDidChange: ((State) -> Void)?
+    var statusChanged: ((String) -> Void)?
+    var terminationHandler: ((Result<Void, Error>) -> Void)?
+
+    var isRunning: Bool { state == .running }
+    var isStopping: Bool { state == .stopping }
+
+    private let layout: VMFileLayout
+    private let virtualMachine: VZVirtualMachine
+    private let vmQueue: DispatchQueue
+    private let vmView: VZVirtualMachineView
+    private var state: State = .initialized {
+        didSet {
+            if state != oldValue {
+                stateDidChange?(state)
+            }
+        }
+    }
+    private var ownsLock = false
+    private var didTerminate = false
+    private var stopContinuations: [(Result<Void, Error>) -> Void] = []
+
+    init(name: String, layout: VMFileLayout, storedConfig: VMStoredConfig, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
+        self.name = name
+        self.layout = layout
+        let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
+        let configuration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
+        self.vmQueue = DispatchQueue(label: "vmctl.embedded.\(name)")
+        self.virtualMachine = VZVirtualMachine(configuration: configuration, queue: vmQueue)
+        let ui = EmbeddedVMSession.makeWindowAndView(name: name)
+        self.window = ui.window
+        self.vmView = ui.view
+        super.init()
+
+        self.virtualMachine.delegate = self
+        configureUIBindings()
+    }
+
+    func start(completion: @escaping (Result<Void, Error>) -> Void) {
+        guard state == .initialized || state == .stopped else {
+            completion(.failure(VMError.message("VM '\(name)' is already starting or running.")))
+            return
+        }
+
+        state = .starting
+        do {
+            try writeVMLockOwner(.embedded(ProcessInfo.processInfo.processIdentifier), to: layout.pidFileURL)
+            ownsLock = true
+        } catch {
+            state = .stopped
+            completion(.failure(error))
+            return
+        }
+
+        vmQueue.async {
+            self.virtualMachine.start { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success:
+                        self.state = .running
+                        self.window.center()
+                        self.window.makeKeyAndOrderFront(nil)
+                        NSApplication.shared.activate(ignoringOtherApps: true)
+                        self.statusChanged?("VM \(self.name) started.")
+                        completion(.success(()))
+                    case .failure(let error):
+                        self.state = .stopped
+                        if self.ownsLock {
+                            removeVMLock(at: self.layout.pidFileURL)
+                            self.ownsLock = false
+                        }
+                        self.statusChanged?("Failed to start \(self.name): \(error.localizedDescription)")
+                        completion(.failure(error))
+                    }
+                }
+            }
+        }
+    }
+
+    func requestStop(force: Bool = false, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        if state == .stopped {
+            completion?(.success(()))
+            return
+        }
+
+        if let completion = completion {
+            stopContinuations.append(completion)
+        }
+
+        let alreadyStopping = state == .stopping
+        if !alreadyStopping {
+            state = .stopping
+            statusChanged?("Stopping \(name)…")
+        }
+
+        if force {
+            issueForceStop()
+        } else if !alreadyStopping {
+            issueGracefulStop()
+        }
+    }
+
+    func bringToFront() {
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        switch state {
+        case .stopped:
+            return true
+        default:
+            requestStop()
+            return false
+        }
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        vmView.virtualMachine = nil
+    }
+
+    // MARK: - VZVirtualMachineDelegate
+
+    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
+        DispatchQueue.main.async {
+            self.handleTermination(result: .success(()))
+        }
+    }
+
+    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
+        DispatchQueue.main.async {
+            self.handleTermination(result: .failure(error))
+        }
+    }
+
+    // MARK: - Helpers
+
+    private static func makeWindowAndView(name: String) -> (window: NSWindow, view: VZVirtualMachineView) {
+        let builder = { () -> (NSWindow, VZVirtualMachineView) in
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 1024, height: 640),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Virtual Machine – \(name)"
+
+            let vmView = VZVirtualMachineView()
+            if #available(macOS 14.0, *) {
+                vmView.automaticallyReconfiguresDisplay = true
+            }
+            vmView.autoresizingMask = [.width, .height]
+            window.contentView = vmView
+            return (window, vmView)
+        }
+
+        if Thread.isMainThread {
+            return builder()
+        }
+
+        var result: (NSWindow, VZVirtualMachineView)!
+        DispatchQueue.main.sync {
+            result = builder()
+        }
+        return result
+    }
+
+    private func configureUIBindings() {
+        let work = {
+            self.window.delegate = self
+            self.window.isReleasedWhenClosed = false
+            self.vmView.virtualMachine = self.virtualMachine
+        }
+
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.sync(execute: work)
+        }
+    }
+
+    private func issueGracefulStop() {
+        vmQueue.async {
+            do {
+                try self.virtualMachine.requestStop()
+            } catch {
+                DispatchQueue.main.async {
+                    self.statusChanged?("Failed to request stop: \(error.localizedDescription)")
+                    self.issueForceStop()
+                }
+            }
+        }
+    }
+
+    private func issueForceStop() {
+        vmQueue.async {
+            self.virtualMachine.stop { error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        self.handleTermination(result: .failure(error))
+                    } else {
+                        self.handleTermination(result: .success(()))
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleTermination(result: Result<Void, Error>) {
+        guard !didTerminate else { return }
+        didTerminate = true
+
+        if ownsLock {
+            removeVMLock(at: layout.pidFileURL)
+            ownsLock = false
+        }
+
+        state = .stopped
+        vmView.virtualMachine = nil
+        if window.isVisible {
+            window.orderOut(nil)
+        }
+
+        terminationHandler?(result)
+        if !stopContinuations.isEmpty {
+            stopContinuations.forEach { $0(result) }
+            stopContinuations.removeAll()
+        }
+    }
+
+    deinit {
+        if ownsLock {
+            removeVMLock(at: layout.pidFileURL)
+        }
+    }
+}
+#endif
 
 // MARK: - Signal Trap Helper
 
