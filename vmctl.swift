@@ -820,12 +820,18 @@ final class VMController {
             }
         }
 
+        let suppressDockIcon = ProcessInfo.processInfo.environment["VMCTL_SUPPRESS_DOCK_ICON"] == "1"
+
         if headless {
             dispatchMain()
         } else {
             DispatchQueue.main.async {
                 let app = NSApplication.shared
-                app.setActivationPolicy(.regular)
+                if suppressDockIcon {
+                    app.setActivationPolicy(.accessory)
+                } else {
+                    app.setActivationPolicy(.regular)
+                }
                 let window = NSWindow(
                     contentRect: NSRect(x: 0, y: 0, width: 1024, height: 640),
                     styleMask: [.titled, .closable, .miniaturizable, .resizable],

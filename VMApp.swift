@@ -1003,6 +1003,11 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             let process = Process()
             process.executableURL = self.cliURL
             process.arguments = arguments
+            var environment = ProcessInfo.processInfo.environment
+            if arguments.first == "start" {
+                environment["VMCTL_SUPPRESS_DOCK_ICON"] = "1"
+            }
+            process.environment = environment
 
             let pipe = Pipe()
             process.standardOutput = pipe
