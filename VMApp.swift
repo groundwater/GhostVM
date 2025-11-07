@@ -313,31 +313,31 @@ struct VMRowView: View {
             Spacer()
 
             HStack(spacing: 8) {
-                Button(action: {
-                    onToggle()
-                }) {
-                    Image(systemName: entry.isRunning ? "stop.fill" : "play.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.borderless) // important: don't steal first-click focus from the List
-                .foregroundStyle((isBusy || !entry.installed) ? Color.secondary : Color.primary)
-                .background(
-                    Circle()
-                        .fill(isPlayHovered ? Color.accentColor.opacity(0.15) : Color.clear)
-                )
-                .overlay(
-                    Circle()
-                        .stroke(isPlayHovered ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.2), lineWidth: 1)
-                )
-                .contentShape(Circle())
-                .disabled(isBusy || !entry.installed)
-                .help(primaryActionHelpText)
-                .onHover { hovering in
-                    isPlayHovered = hovering && !isBusy
-                }
-
-                if !entry.installed {
+                if entry.installed {
+                    Button(action: {
+                        onToggle()
+                    }) {
+                        Image(systemName: entry.isRunning ? "stop.fill" : "play.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless) // important: don't steal first-click focus from the List
+                    .foregroundStyle(isBusy ? Color.secondary : Color.primary)
+                    .background(
+                        Circle()
+                            .fill(isPlayHovered ? Color.accentColor.opacity(0.15) : Color.clear)
+                    )
+                    .overlay(
+                        Circle()
+                            .stroke(isPlayHovered ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.2), lineWidth: 1)
+                    )
+                    .contentShape(Circle())
+                    .disabled(isBusy)
+                    .help(primaryActionHelpText)
+                    .onHover { hovering in
+                        isPlayHovered = hovering && !isBusy
+                    }
+                } else {
                     Button(action: onInstall) {
                         Label("Install", systemImage: "arrow.down.circle")
                             .labelStyle(.titleAndIcon)
@@ -501,6 +501,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let window: NSWindow
         let progressIndicator: NSProgressIndicator
         let logTextView: NSTextView
+        let logAttributes: [NSAttributedString.Key: Any]
     }
 
     override init() {
@@ -976,9 +977,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = true
         textView.autoresizingMask = [.width]
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        let logFont = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = logFont
         textView.textColor = NSColor.labelColor
         textView.backgroundColor = NSColor.textBackgroundColor
+        textView.usesAdaptiveColorMappingForDarkAppearance = true
+        let logAttributes: [NSAttributedString.Key: Any] = [
+            .font: logFont,
+            .foregroundColor: NSColor.labelColor
+        ]
         scrollView.documentView = textView
         stack.addArrangedSubview(scrollView)
 
@@ -987,7 +994,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             name: name,
             window: window,
             progressIndicator: progressIndicator,
-            logTextView: textView
+            logTextView: textView,
+            logAttributes: logAttributes
         )
     }
 
@@ -995,7 +1003,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         guard let session = installSessions[bundlePath] else { return }
         let sanitized = chunk.replacingOccurrences(of: "\r", with: "\n")
         if let storage = session.logTextView.textStorage {
-            storage.append(NSAttributedString(string: sanitized))
+            storage.append(NSAttributedString(string: sanitized, attributes: session.logAttributes))
         } else {
             session.logTextView.string += sanitized
         }
@@ -1839,6 +1847,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             if arguments.first == "start" {
                 environment["VMCTL_SUPPRESS_DOCK_ICON"] = "1"
             }
+            environment["NSUnbufferedIO"] = "YES"
             process.environment = environment
 
             let pipe = Pipe()
