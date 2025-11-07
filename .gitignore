@@ -1,0 +1,4 @@
+vmctl
+*.app
+.claude/
+.vscode/
