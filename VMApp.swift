@@ -152,6 +152,7 @@ struct MainView: View {
     let onShowInFinder: (VMController.VMListEntry) -> Void
     let onEditSettings: (VMController.VMListEntry) -> Void
     let onRemove: (VMController.VMListEntry) -> Void
+    let onImportBundles: ([URL]) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -226,9 +227,52 @@ struct MainView: View {
             }
             .listStyle(.plain)
             .padding(.horizontal, -16)
+            .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: handleDrop)
         }
         .padding(16)
         .frame(minWidth: 560, minHeight: 440)
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard !providers.isEmpty else { return false }
+        let identifier = UTType.fileURL.identifier
+        var accepted = false
+        var collected: [URL] = []
+        let lock = NSLock()
+        let group = DispatchGroup()
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(identifier) {
+            accepted = true
+            group.enter()
+            provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                var resolvedURL: URL?
+                if let url = item as? URL {
+                    resolvedURL = url
+                } else if let nsurl = item as? NSURL {
+                    resolvedURL = nsurl as URL
+                } else if let data = item as? Data {
+                    resolvedURL = URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true)
+                }
+
+                if let url = resolvedURL {
+                    lock.lock()
+                    collected.append(url)
+                    lock.unlock()
+                }
+            }
+        }
+
+        guard accepted else { return false }
+
+        group.notify(queue: .main) {
+            let bundles = collected.filter { $0.pathExtension.lowercased() == VMController.bundleExtensionLowercased }
+            if !bundles.isEmpty {
+                onImportBundles(bundles)
+            }
+        }
+
+        return true
     }
 }
 
@@ -566,30 +610,36 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     // MARK: - Menu & Interface
 
     private func handleOpenRequests(_ urls: [URL]) {
-        var didAddNewBundle = false
-        var recognized = false
-        for rawURL in urls {
-            let standardized = rawURL.standardizedFileURL
-            guard isRecognizedVMBundle(standardized) else { continue }
-            recognized = true
-            if library.addBundle(standardized) {
-                didAddNewBundle = true
-            }
-            pendingLaunchPaths.insert(standardized.path)
-        }
-
-        guard recognized else { return }
-
-        if didAddNewBundle {
-            refreshVMs()
-        } else {
-            startPendingLaunchesIfNeeded()
-        }
+        registerBundles(urls, autoLaunch: true)
     }
 
     private func isRecognizedVMBundle(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
         return ext == recognizedBundleExtension
+    }
+
+    private func registerBundles(_ urls: [URL], autoLaunch: Bool) {
+        var recognized = false
+        var added = false
+        for rawURL in urls {
+            let standardized = rawURL.standardizedFileURL
+            guard isRecognizedVMBundle(standardized) else { continue }
+            recognized = true
+            if library.addBundle(standardized) {
+                added = true
+            }
+            if autoLaunch {
+                pendingLaunchPaths.insert(standardized.path)
+            }
+        }
+
+        guard recognized else { return }
+
+        if added {
+            refreshVMs()
+        } else if autoLaunch {
+            startPendingLaunchesIfNeeded()
+        }
     }
 
     private func startPendingLaunchesIfNeeded() {
@@ -700,7 +750,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             onDelete: { [weak self] entry in self?.confirmDelete(entry: entry) },
             onShowInFinder: { [weak self] entry in self?.showInFinder(entry: entry) },
             onEditSettings: { [weak self] entry in self?.presentEditSettings(for: entry) },
-            onRemove: { [weak self] entry in self?.removeFromList(entry: entry) }
+            onRemove: { [weak self] entry in self?.removeFromList(entry: entry) },
+            onImportBundles: { [weak self] urls in self?.registerBundles(urls, autoLaunch: false) }
         )
 
         let hostingView = NSHostingView(rootView: content)
