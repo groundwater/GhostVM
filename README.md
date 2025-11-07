@@ -1,6 +1,6 @@
 # Virtual Machine Manager
 
-Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained bundles under `~/VMs/<name>.vm/`. The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
+Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained bundles under `~/VMs/<name>.VirtualMachine/`. The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
 
 ## Requirements
 
@@ -45,6 +45,7 @@ Key commands:
 - `stop <name>` – Request graceful shutdown; escalates to SIGKILL if the guest ignores requests.
 - `status <name>` – Report running state, PID, and configuration summary.
 - `snapshot <name> create|revert <snapname>` – External snapshots by copying bundle artifacts (coarse and space-heavy but simple).
+- The macOS app mirrors the same workflow: create a VM, then choose **Install** to run the installer with a live log/progress window, no Terminal required. Once installed, start/stop the VM directly in the UI.
 
 Restore images are auto-discovered (e.g. `~/Downloads/*.ipsw`, `/Applications/Install macOS*.app/Contents/SharedSupport/SharedSupport.dmg`) unless `--restore-image` is specified.
 

@@ -36,6 +36,7 @@ app: build
 	$(SWIFTC) $(SWIFTFLAGS) -DVMCTL_APP -o $(APP_BUNDLE)/Contents/MacOS/$(APP_TARGET) $(APP_SOURCES) $(FRAMEWORKS)
 	cp $(TARGET) $(APP_BUNDLE)/Contents/MacOS/vmctl
 	cp icon.png $(APP_BUNDLE)/Contents/Resources/icon.png
+	cp vm.png $(APP_BUNDLE)/Contents/Resources/vm.png
 	@if [ "$(CODESIGN_ID)" = "-" ]; then \
 		echo "Codesigning $(APP_BUNDLE) with ad-hoc identity to apply entitlements."; \
 	fi

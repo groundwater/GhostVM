@@ -40,6 +40,7 @@ struct MainView: View {
     let onRefresh: () -> Void
     let onCreate: () -> Void
     let onToggle: (VMController.VMListEntry) -> Void
+    let onInstall: (VMController.VMListEntry) -> Void
     let onDelete: (VMController.VMListEntry) -> Void
     let onShowInFinder: (VMController.VMListEntry) -> Void
     let onEditSettings: (VMController.VMListEntry) -> Void
@@ -88,6 +89,10 @@ struct MainView: View {
                                 model.selectedName = entry.name
                                 onToggle(entry)
                             },
+                            onInstall: {
+                                model.selectedName = entry.name
+                                onInstall(entry)
+                            },
                             onDelete: {
                                 model.selectedName = entry.name
                                 onDelete(entry)
@@ -120,6 +125,7 @@ struct VMRowView: View {
     let isBusy: Bool
     let isSelected: Bool
     let onToggle: () -> Void
+    let onInstall: () -> Void
     let onDelete: () -> Void
     let onShowInFinder: () -> Void
     let onEditSettings: () -> Void
@@ -158,7 +164,7 @@ struct VMRowView: View {
                         .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.borderless) // important: don't steal first-click focus from the List
-                .foregroundStyle(isBusy ? Color.secondary : Color.primary)
+                .foregroundStyle((isBusy || !entry.installed) ? Color.secondary : Color.primary)
                 .background(
                     Circle()
                         .fill(isPlayHovered ? Color.accentColor.opacity(0.15) : Color.clear)
@@ -168,10 +174,21 @@ struct VMRowView: View {
                         .stroke(isPlayHovered ? Color.accentColor.opacity(0.35) : Color.secondary.opacity(0.2), lineWidth: 1)
                 )
                 .contentShape(Circle())
-                .disabled(isBusy)
-                .help(entry.isRunning ? "Pause VM" : "Start VM")
+                .disabled(isBusy || !entry.installed)
+                .help(primaryActionHelpText)
                 .onHover { hovering in
                     isPlayHovered = hovering && !isBusy
+                }
+
+                if !entry.installed {
+                    Button(action: onInstall) {
+                        Label("Install", systemImage: "arrow.down.circle")
+                            .labelStyle(.titleAndIcon)
+                    }
+                    .controlSize(.small)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isBusy)
+                    .help("Install macOS into this VM bundle")
                 }
 
                 Menu {
@@ -200,6 +217,13 @@ struct VMRowView: View {
         return "CPUs: \(entry.cpuCount) · Memory: \(memory) · Disk: \(disk)"
     }
 
+    private var primaryActionHelpText: String {
+        if !entry.installed {
+            return "Install macOS before starting"
+        }
+        return entry.isRunning ? "Pause VM" : "Start VM"
+    }
+
     private func formattedBytes(_ bytes: UInt64, style: ByteCountFormatter.CountStyle) -> String {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useGB, .useMB]
@@ -214,7 +238,14 @@ struct VMRowView: View {
         Button(entry.isRunning ? "Pause" : "Start") {
             onToggle()
         }
-        .disabled(isBusy)
+        .disabled(isBusy || !entry.installed)
+
+        if !entry.installed {
+            Button("Install…") {
+                onInstall()
+            }
+            .disabled(isBusy)
+        }
 
         if !entry.isRunning {
             Button("Edit Settings…") {
@@ -251,6 +282,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var vmRootDirectory: URL
     private let controller: VMController
     private let viewModel = VMListViewModel()
+    private let recognizedBundleExtension = "virtualmachine"
 
     private var window: NSWindow!
     private var statusTimer: Timer?
@@ -260,8 +292,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var createForm: CreateForm?
     private var editForm: EditForm?
     private var settingsForm: SettingsForm?
+    private var installSessions: [String: InstallProgressSession] = [:]
     private var runningProcesses: [RunningProcess] = []
     private var managedSessions: [String: EmbeddedVMSession] = [:]
+    private var pendingLaunchNames: Set<String> = []
     private var awaitingQuitConfirmation = false
 
     private struct RunningProcess {
@@ -295,6 +329,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private struct SettingsForm {
         let panel: NSPanel
         let pathField: NSTextField
+    }
+
+    private struct InstallProgressSession {
+        let name: String
+        let window: NSWindow
+        let progressIndicator: NSProgressIndicator
+        let logTextView: NSTextView
     }
 
     override init() {
@@ -390,7 +431,69 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+        handleOpenRequests([URL(fileURLWithPath: filename)])
+        return true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        handleOpenRequests(urls)
+    }
+
     // MARK: - Menu & Interface
+
+    private func handleOpenRequests(_ urls: [URL]) {
+        var needsRefresh = false
+        for rawURL in urls {
+            let standardized = rawURL.standardizedFileURL
+            guard isRecognizedVMBundle(standardized) else { continue }
+            let name = standardized.deletingPathExtension().lastPathComponent
+            pendingLaunchNames.insert(name)
+
+            let parent = standardized.deletingLastPathComponent()
+            if parent.standardizedFileURL != vmRootDirectory.standardizedFileURL {
+                applyVMRootDirectory(parent)
+            } else {
+                needsRefresh = true
+            }
+        }
+        if needsRefresh {
+            refreshVMs()
+        }
+    }
+
+    private func isRecognizedVMBundle(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ext == recognizedBundleExtension
+    }
+
+    private func startPendingLaunchesIfNeeded() {
+        guard !pendingLaunchNames.isEmpty else { return }
+        let entries = viewModel.entries
+        var handled: [String] = []
+
+        for name in pendingLaunchNames {
+            guard let entry = entries.first(where: { $0.name == name }) else {
+                continue
+            }
+            handled.append(name)
+
+            if let session = managedSessions[name] {
+                session.bringToFront()
+                continue
+            }
+
+            guard entry.installed else {
+                viewModel.statusMessage = "\(name) is not installed."
+                presentErrorAlert(message: "Cannot Start VM", informative: "\(name) is not installed. Install macOS before launching.")
+                continue
+            }
+
+            startEmbeddedVM(named: name)
+        }
+
+        handled.forEach { pendingLaunchNames.remove($0) }
+    }
 
     private func setupMenus() {
         let mainMenu = NSMenu()
@@ -468,6 +571,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             onRefresh: { [weak self] in self?.refreshVMs() },
             onCreate: { [weak self] in self?.presentCreateSheet() },
             onToggle: { [weak self] entry in self?.toggleVM(entry: entry) },
+            onInstall: { [weak self] entry in self?.installVM(entry: entry) },
             onDelete: { [weak self] entry in self?.confirmDelete(entry: entry) },
             onShowInFinder: { [weak self] entry in self?.showInFinder(entry: entry) },
             onEditSettings: { [weak self] entry in self?.presentEditSettings(for: entry) }
@@ -502,6 +606,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                     }
                     self.viewModel.entries = list
                     self.viewModel.statusMessage = "Ready."
+                    self.startPendingLaunchesIfNeeded()
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -525,10 +630,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         if entry.isRunning {
             viewModel.busyNames.insert(entry.name)
             viewModel.statusMessage = "Stopping \(entry.name)…"
-            runCommand(["stop", entry.name], waitForTermination: true, associatedName: entry.name) { [weak self] in
+            runCommand(["stop", entry.name], waitForTermination: true, associatedName: entry.name, completion: { [weak self] in
                 self?.viewModel.busyNames.remove(entry.name)
                 self?.refreshVMs()
-            }
+            })
             return
         }
 
@@ -561,6 +666,149 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         viewModel.statusMessage = "Revealed \(entry.name) in Finder."
     }
 
+    // MARK: - Install Workflow
+
+    private func installVM(entry: VMController.VMListEntry) {
+        let name = entry.name
+        if entry.installed {
+            presentErrorAlert(message: "Already Installed", informative: "\(name) already has macOS installed.")
+            return
+        }
+        if entry.isRunning || managedSessions[name] != nil {
+            presentErrorAlert(message: "VM Running", informative: "Stop \(name) before running the installer.")
+            return
+        }
+        if let session = installSessions[name] {
+            session.window.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let session = makeInstallProgressSession(name: name)
+        installSessions[name] = session
+        session.window.makeKeyAndOrderFront(nil)
+
+        viewModel.busyNames.insert(name)
+        viewModel.statusMessage = "Installing \(name)…"
+
+        runCommand(
+            ["install", name],
+            waitForTermination: false,
+            associatedName: name,
+            outputHandler: { [weak self] chunk in
+                self?.appendInstallLog(for: name, chunk: chunk)
+            },
+            terminationHandler: { [weak self] status in
+                guard let self else { return }
+                let success = (status == 0)
+                let finalLine = success ? "Installation completed successfully." : "Installation failed (exit status \(status))."
+                self.appendInstallLog(for: name, chunk: "\n\(finalLine)\n")
+                self.finishInstallSession(name: name, succeeded: success)
+                if success {
+                    self.viewModel.statusMessage = "\(name) installed."
+                } else {
+                    self.viewModel.statusMessage = "Install failed for \(name)."
+                    self.presentErrorAlert(message: "Install Failed", informative: finalLine)
+                }
+            },
+            completion: { [weak self] in
+                guard let self else { return }
+                self.viewModel.busyNames.remove(name)
+                self.refreshVMs()
+            }
+        )
+    }
+
+    private func makeInstallProgressSession(name: String) -> InstallProgressSession {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 360),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.title = "Installing \(name)"
+        window.center()
+
+        let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = contentView
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+
+        contentView.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+        ])
+
+        let header = NSTextField(labelWithString: "Running macOS installer via vmctl. Leave this window open to monitor progress.")
+        header.lineBreakMode = .byWordWrapping
+        header.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        stack.addArrangedSubview(header)
+
+        let progressIndicator = NSProgressIndicator()
+        progressIndicator.style = .spinning
+        progressIndicator.controlSize = .regular
+        progressIndicator.isIndeterminate = true
+        progressIndicator.startAnimation(nil)
+        stack.addArrangedSubview(progressIndicator)
+
+        let logLabel = NSTextField(labelWithString: "Installer Output")
+        logLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        stack.addArrangedSubview(logLabel)
+
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.borderType = .bezelBorder
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.textColor = NSColor.labelColor
+        textView.backgroundColor = NSColor.textBackgroundColor
+        scrollView.documentView = textView
+        stack.addArrangedSubview(scrollView)
+
+        return InstallProgressSession(
+            name: name,
+            window: window,
+            progressIndicator: progressIndicator,
+            logTextView: textView
+        )
+    }
+
+    private func appendInstallLog(for name: String, chunk: String) {
+        guard let session = installSessions[name] else { return }
+        let sanitized = chunk.replacingOccurrences(of: "\r", with: "\n")
+        if let storage = session.logTextView.textStorage {
+            storage.append(NSAttributedString(string: sanitized))
+        } else {
+            session.logTextView.string += sanitized
+        }
+        session.logTextView.scrollToEndOfDocument(nil)
+    }
+
+    private func finishInstallSession(name: String, succeeded: Bool) {
+        guard let session = installSessions[name] else { return }
+        session.progressIndicator.stopAnimation(nil)
+        session.progressIndicator.isHidden = true
+        session.window.title = succeeded ? "Installed \(name)" : "Install Failed – \(name)"
+        installSessions.removeValue(forKey: name)
+    }
+
     private func deleteVM(name: String) {
         viewModel.busyNames.insert(name)
         viewModel.statusMessage = "Moving \(name) to Trash…"
@@ -587,7 +835,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     // MARK: - Embedded VM Management
 
     private func startEmbeddedVM(named name: String) {
-        if managedSessions[name] != nil { return }
+        if let existing = managedSessions[name] {
+            existing.bringToFront()
+            return
+        }
 
         viewModel.busyNames.insert(name)
         viewModel.statusMessage = "Starting \(name)…"
@@ -1161,7 +1412,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
 
-        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .vm bundles. Changes take effect immediately.")
+        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .VirtualMachine bundles. Changes take effect immediately.")
         descriptionLabel.lineBreakMode = .byWordWrapping
         descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(descriptionLabel)
@@ -1329,7 +1580,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     // MARK: - Command Runner
 
-    private func runCommand(_ arguments: [String], waitForTermination: Bool, associatedName: String? = nil, completion: (() -> Void)? = nil) {
+    private func runCommand(
+        _ arguments: [String],
+        waitForTermination: Bool,
+        associatedName: String? = nil,
+        outputHandler: ((String) -> Void)? = nil,
+        terminationHandler: ((Int32) -> Void)? = nil,
+        completion: (() -> Void)? = nil
+    ) {
         commandQueue.async { [weak self] in
             guard let self else { return }
 
@@ -1361,7 +1619,11 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                 process.waitUntilExit()
                 let output = String(data: data, encoding: .utf8) ?? ""
                 DispatchQueue.main.async {
-                    self.viewModel.statusMessage = output.isEmpty ? "Complete." : output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let handler = outputHandler {
+                        handler(output)
+                    } else {
+                        self.viewModel.statusMessage = output.isEmpty ? "Complete." : output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                     completion?()
                 }
             } else {
@@ -1377,7 +1639,11 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                     }
                     if let chunk = String(data: data, encoding: .utf8), !chunk.isEmpty {
                         DispatchQueue.main.async {
-                            self?.viewModel.statusMessage = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if let handler = outputHandler {
+                                handler(chunk)
+                            } else {
+                                self?.viewModel.statusMessage = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+                            }
                         }
                     }
                 }
@@ -1385,7 +1651,11 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                 process.terminationHandler = { [weak self] proc in
                     guard let self else { return }
                     DispatchQueue.main.async {
-                        self.viewModel.statusMessage = "vmctl exited with status \(proc.terminationStatus)"
+                        if let handler = terminationHandler {
+                            handler(proc.terminationStatus)
+                        } else {
+                            self.viewModel.statusMessage = "vmctl exited with status \(proc.terminationStatus)"
+                        }
                         self.removeRunningProcess(proc)
                         completion?()
                     }

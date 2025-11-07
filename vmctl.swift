@@ -437,6 +437,9 @@ struct RuntimeSharedFolderOverride {
 }
 
 final class VMController {
+    private static let bundleExtension = "VirtualMachine"
+    private static let bundleExtensionLowercased = bundleExtension.lowercased()
+
     private let fileManager = FileManager.default
     private var rootDirectory: URL
 
@@ -504,7 +507,7 @@ final class VMController {
         let contents = try fileManager.contentsOfDirectory(at: rootDirectory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         var entries: [VMListEntry] = []
 
-        for item in contents where item.pathExtension == "vm" {
+        for item in contents where isSupportedBundleURL(item) {
             var isDirectory: ObjCBool = false
             guard fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory), isDirectory.boolValue else {
                 continue
@@ -548,7 +551,12 @@ final class VMController {
     }
 
     func bundleURL(for name: String) -> URL {
-        return rootDirectory.appendingPathComponent("\(name).vm", isDirectory: true)
+        return rootDirectory.appendingPathComponent("\(name).\(VMController.bundleExtension)", isDirectory: true)
+    }
+
+    private func isSupportedBundleURL(_ url: URL) -> Bool {
+        let ext = url.pathExtension.lowercased()
+        return ext == VMController.bundleExtensionLowercased
     }
 
     func storedConfig(for name: String) throws -> VMStoredConfig {
