@@ -6,15 +6,122 @@ import UniformTypeIdentifiers
 // MARK: - View Model & Helpers
 
 extension VMController.VMListEntry: Identifiable {
-    var id: String { name }
+    var id: String { bundleURL.path }
 }
 
 final class VMListViewModel: ObservableObject {
     @Published var entries: [VMController.VMListEntry] = []
     @Published var statusMessage: String = "Ready."
-    @Published var busyNames: Set<String> = []
+    @Published var busyBundlePaths: Set<String> = []
     @Published var emptyMessage: String? = "Loading…"
-    @Published var selectedName: String?
+    @Published var selectedBundlePath: String?
+}
+
+final class VMLibrary {
+    private let defaults: UserDefaults
+    private let storageKey = "VMLibraryBundlePaths"
+    private var storedPaths: [String]
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let raw = defaults.array(forKey: storageKey) as? [String] ?? []
+        var deduped: [String] = []
+        var seen: Set<String> = []
+        for path in raw {
+            if seen.insert(path).inserted {
+                deduped.append(path)
+            }
+        }
+        storedPaths = deduped
+    }
+
+    var bundleURLs: [URL] {
+        return storedPaths.map { URL(fileURLWithPath: $0).standardizedFileURL }
+    }
+
+    @discardableResult
+    func addBundle(_ url: URL) -> Bool {
+        let normalized = normalize(url)
+        guard normalized.pathExtension.lowercased() == VMController.bundleExtensionLowercased else { return false }
+        let path = normalized.path
+        guard !storedPaths.contains(path) else { return false }
+        storedPaths.append(path)
+        persist()
+        return true
+    }
+
+    func addBundles(in directory: URL) {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return
+        }
+        for item in contents where item.pathExtension.lowercased() == VMController.bundleExtensionLowercased {
+            _ = addBundle(item)
+        }
+    }
+
+    @discardableResult
+    func removeBundle(_ url: URL) -> Bool {
+        let path = normalize(url).path
+        let originalCount = storedPaths.count
+        storedPaths.removeAll { $0 == path }
+        if storedPaths.count != originalCount {
+            persist()
+            return true
+        }
+        return false
+    }
+
+    func removeBundles(at urls: [URL]) {
+        let paths = Set(urls.map { normalize($0).path })
+        guard !paths.isEmpty else { return }
+        let originalCount = storedPaths.count
+        storedPaths.removeAll { paths.contains($0) }
+        if storedPaths.count != originalCount {
+            persist()
+        }
+    }
+
+    func contains(_ url: URL) -> Bool {
+        return storedPaths.contains(normalize(url).path)
+    }
+
+    func clearMissingBundles() -> [URL] {
+        let fm = FileManager.default
+        var removed: [URL] = []
+        storedPaths.removeAll { path in
+            if !fm.fileExists(atPath: path) {
+                removed.append(URL(fileURLWithPath: path))
+                return true
+            }
+            return false
+        }
+        if !removed.isEmpty {
+            persist()
+        }
+        return removed
+    }
+
+    func replaceAll(with urls: [URL]) {
+        var deduped: [String] = []
+        var seen: Set<String> = []
+        for url in urls {
+            let path = normalize(url).path
+            if seen.insert(path).inserted {
+                deduped.append(path)
+            }
+        }
+        storedPaths = deduped
+        persist()
+    }
+
+    private func normalize(_ url: URL) -> URL {
+        return url.standardizedFileURL
+    }
+
+    private func persist() {
+        defaults.set(storedPaths, forKey: storageKey)
+    }
 }
 
 private func statusColor(for entry: VMController.VMListEntry) -> Color {
@@ -44,6 +151,7 @@ struct MainView: View {
     let onDelete: (VMController.VMListEntry) -> Void
     let onShowInFinder: (VMController.VMListEntry) -> Void
     let onEditSettings: (VMController.VMListEntry) -> Void
+    let onRemove: (VMController.VMListEntry) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -73,7 +181,7 @@ struct MainView: View {
                 .buttonStyle(.bordered)
             }
 
-            List(selection: $model.selectedName) {
+            List(selection: $model.selectedBundlePath) {
                 if let message = model.emptyMessage, model.entries.isEmpty {
                     Section {
                         Text(message)
@@ -83,30 +191,34 @@ struct MainView: View {
                     ForEach(model.entries) { entry in
                         VMRowView(
                             entry: entry,
-                            isBusy: model.busyNames.contains(entry.name),
-                            isSelected: model.selectedName == entry.name,
+                            isBusy: model.busyBundlePaths.contains(entry.bundleURL.path),
+                            isSelected: model.selectedBundlePath == entry.bundleURL.path,
                             onToggle: {
-                                model.selectedName = entry.name
+                                model.selectedBundlePath = entry.bundleURL.path
                                 onToggle(entry)
                             },
                             onInstall: {
-                                model.selectedName = entry.name
+                                model.selectedBundlePath = entry.bundleURL.path
                                 onInstall(entry)
                             },
                             onDelete: {
-                                model.selectedName = entry.name
+                                model.selectedBundlePath = entry.bundleURL.path
                                 onDelete(entry)
                             },
                             onShowInFinder: {
-                                model.selectedName = entry.name
+                                model.selectedBundlePath = entry.bundleURL.path
                                 onShowInFinder(entry)
                             },
                             onEditSettings: {
-                                model.selectedName = entry.name
+                                model.selectedBundlePath = entry.bundleURL.path
                                 onEditSettings(entry)
+                            },
+                            onRemove: {
+                                model.selectedBundlePath = entry.bundleURL.path
+                                onRemove(entry)
                             }
                         )
-                        .tag(entry.name)
+                        .tag(entry.bundleURL.path)
                         .listRowInsets(.init())
                         // Let the system draw selection; do NOT override listRowBackground
                     }
@@ -129,6 +241,7 @@ struct VMRowView: View {
     let onDelete: () -> Void
     let onShowInFinder: () -> Void
     let onEditSettings: () -> Void
+    let onRemove: () -> Void
 
     @State private var isPlayHovered = false
     private let menuIconSize: CGFloat = 18
@@ -260,6 +373,11 @@ struct VMRowView: View {
             onShowInFinder()
         }
 
+        Button("Remove from List") {
+            onRemove()
+        }
+        .disabled(isBusy || entry.isRunning)
+
         Divider()
 
         Button("Delete", role: .destructive) {
@@ -281,6 +399,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private let userDefaults = UserDefaults.standard
     private var vmRootDirectory: URL
     private let controller: VMController
+    private let library: VMLibrary
     private let viewModel = VMListViewModel()
     private let recognizedBundleExtension = "virtualmachine"
 
@@ -295,7 +414,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var installSessions: [String: InstallProgressSession] = [:]
     private var runningProcesses: [RunningProcess] = []
     private var managedSessions: [String: EmbeddedVMSession] = [:]
-    private var pendingLaunchNames: Set<String> = []
+    private var pendingLaunchPaths: Set<String> = []
     private var awaitingQuitConfirmation = false
 
     private struct RunningProcess {
@@ -317,6 +436,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     private struct EditForm {
         let name: String
+        let bundleURL: URL
         let panel: NSPanel
         let cpuField: NSTextField
         let memoryField: NSTextField
@@ -332,6 +452,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     }
 
     private struct InstallProgressSession {
+        let bundleURL: URL
         let name: String
         let window: NSWindow
         let progressIndicator: NSProgressIndicator
@@ -346,13 +467,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             cliURL = executableURL.deletingLastPathComponent().appendingPathComponent("vmctl")
         }
 
-        let storedPath = UserDefaults.standard.string(forKey: VMCTLApp.vmRootDefaultsKey)
+        let storedPath = userDefaults.string(forKey: VMCTLApp.vmRootDefaultsKey)
         if let path = storedPath, !path.isEmpty {
             vmRootDirectory = URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL
         } else {
             vmRootDirectory = VMCTLApp.defaultVMRootDirectory
         }
         controller = VMController(rootDirectory: vmRootDirectory)
+        library = VMLibrary(defaults: userDefaults)
+        library.addBundles(in: vmRootDirectory)
         super.init()
     }
 
@@ -397,7 +520,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
 
-        let names = activeSessions.keys.sorted().joined(separator: ", ")
+        let names = activeSessions.values.map { $0.name }.sorted().joined(separator: ", ")
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Suspend running virtual machines before quitting?"
@@ -443,22 +566,24 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     // MARK: - Menu & Interface
 
     private func handleOpenRequests(_ urls: [URL]) {
-        var needsRefresh = false
+        var didAddNewBundle = false
+        var recognized = false
         for rawURL in urls {
             let standardized = rawURL.standardizedFileURL
             guard isRecognizedVMBundle(standardized) else { continue }
-            let name = standardized.deletingPathExtension().lastPathComponent
-            pendingLaunchNames.insert(name)
-
-            let parent = standardized.deletingLastPathComponent()
-            if parent.standardizedFileURL != vmRootDirectory.standardizedFileURL {
-                applyVMRootDirectory(parent)
-            } else {
-                needsRefresh = true
+            recognized = true
+            if library.addBundle(standardized) {
+                didAddNewBundle = true
             }
+            pendingLaunchPaths.insert(standardized.path)
         }
-        if needsRefresh {
+
+        guard recognized else { return }
+
+        if didAddNewBundle {
             refreshVMs()
+        } else {
+            startPendingLaunchesIfNeeded()
         }
     }
 
@@ -468,31 +593,31 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     }
 
     private func startPendingLaunchesIfNeeded() {
-        guard !pendingLaunchNames.isEmpty else { return }
+        guard !pendingLaunchPaths.isEmpty else { return }
         let entries = viewModel.entries
         var handled: [String] = []
 
-        for name in pendingLaunchNames {
-            guard let entry = entries.first(where: { $0.name == name }) else {
+        for path in pendingLaunchPaths {
+            guard let entry = entries.first(where: { $0.bundleURL.path == path }) else {
                 continue
             }
-            handled.append(name)
+            handled.append(path)
 
-            if let session = managedSessions[name] {
+            if let session = managedSessions[path] {
                 session.bringToFront()
                 continue
             }
 
             guard entry.installed else {
-                viewModel.statusMessage = "\(name) is not installed."
-                presentErrorAlert(message: "Cannot Start VM", informative: "\(name) is not installed. Install macOS before launching.")
+                viewModel.statusMessage = "\(entry.name) is not installed."
+                presentErrorAlert(message: "Cannot Start VM", informative: "\(entry.name) is not installed. Install macOS before launching.")
                 continue
             }
 
-            startEmbeddedVM(named: name)
+            startEmbeddedVM(entry: entry)
         }
 
-        handled.forEach { pendingLaunchNames.remove($0) }
+        handled.forEach { pendingLaunchPaths.remove($0) }
     }
 
     private func setupMenus() {
@@ -574,7 +699,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             onInstall: { [weak self] entry in self?.installVM(entry: entry) },
             onDelete: { [weak self] entry in self?.confirmDelete(entry: entry) },
             onShowInFinder: { [weak self] entry in self?.showInFinder(entry: entry) },
-            onEditSettings: { [weak self] entry in self?.presentEditSettings(for: entry) }
+            onEditSettings: { [weak self] entry in self?.presentEditSettings(for: entry) },
+            onRemove: { [weak self] entry in self?.removeFromList(entry: entry) }
         )
 
         let hostingView = NSHostingView(rootView: content)
@@ -593,51 +719,60 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     }
 
     private func refreshVMs() {
+        let trackedBundles = library.bundleURLs
+        guard !trackedBundles.isEmpty else {
+            viewModel.entries = []
+            viewModel.emptyMessage = "No virtual machines tracked. Create one or open an existing bundle."
+            viewModel.statusMessage = "Ready."
+            return
+        }
+
         viewModel.statusMessage = "Refreshing…"
         commandQueue.async { [weak self] in
             guard let self else { return }
-            do {
-                let list = try self.controller.listVMs()
-                DispatchQueue.main.async {
-                    if list.isEmpty {
-                        self.viewModel.emptyMessage = "No virtual machines found under ~/VMs."
-                    } else {
-                        self.viewModel.emptyMessage = nil
-                    }
-                    self.viewModel.entries = list
-                    self.viewModel.statusMessage = "Ready."
-                    self.startPendingLaunchesIfNeeded()
+            let entries = self.controller.listVMs(at: trackedBundles)
+            let validPaths = Set(entries.map { $0.bundleURL.standardizedFileURL.path })
+            let trackedPaths = trackedBundles.map { $0.standardizedFileURL.path }
+            let missingPaths = trackedPaths.filter { !validPaths.contains($0) }
+
+            DispatchQueue.main.async {
+                if entries.isEmpty {
+                    self.viewModel.emptyMessage = "No virtual machines found. They may have been moved or deleted."
+                } else {
+                    self.viewModel.emptyMessage = nil
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    self.viewModel.entries = []
-                    self.viewModel.emptyMessage = "Failed to load VMs: \(error.localizedDescription)"
-                    self.viewModel.statusMessage = "Error refreshing VMs."
+                self.viewModel.entries = entries
+                self.viewModel.statusMessage = "Ready."
+                if !missingPaths.isEmpty {
+                    let urls = missingPaths.map { URL(fileURLWithPath: $0) }
+                    self.library.removeBundles(at: urls)
                 }
+                self.startPendingLaunchesIfNeeded()
             }
         }
     }
 
     private func toggleVM(entry: VMController.VMListEntry) {
-        if viewModel.busyNames.contains(entry.name) { return }
+        let bundlePath = entry.bundleURL.path
+        if viewModel.busyBundlePaths.contains(bundlePath) { return }
 
-        if let session = managedSessions[entry.name] {
+        if let session = managedSessions[bundlePath] {
             viewModel.statusMessage = "Stopping \(entry.name)…"
             session.requestStop()
             return
         }
 
         if entry.isRunning {
-            viewModel.busyNames.insert(entry.name)
+            viewModel.busyBundlePaths.insert(bundlePath)
             viewModel.statusMessage = "Stopping \(entry.name)…"
-            runCommand(["stop", entry.name], waitForTermination: true, associatedName: entry.name, completion: { [weak self] in
-                self?.viewModel.busyNames.remove(entry.name)
+            runCommand(["stop", bundlePath], waitForTermination: true, completion: { [weak self] in
+                self?.viewModel.busyBundlePaths.remove(bundlePath)
                 self?.refreshVMs()
             })
             return
         }
 
-        startEmbeddedVM(named: entry.name)
+        startEmbeddedVM(entry: entry)
     }
 
     private func confirmDelete(entry: VMController.VMListEntry) {
@@ -654,7 +789,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self else { return }
             if response == .alertFirstButtonReturn {
-                self.deleteVM(name: entry.name)
+                self.deleteVM(entry: entry)
             } else {
                 self.refreshVMs()
             }
@@ -666,43 +801,57 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         viewModel.statusMessage = "Revealed \(entry.name) in Finder."
     }
 
+    private func removeFromList(entry: VMController.VMListEntry) {
+        let bundlePath = entry.bundleURL.path
+        if entry.isRunning || managedSessions[bundlePath] != nil {
+            presentErrorAlert(message: "VM Running", informative: "Stop \(entry.name) before removing it from the list.")
+            return
+        }
+        if library.removeBundle(entry.bundleURL) {
+            viewModel.statusMessage = "Removed \(entry.name) from list."
+        }
+        refreshVMs()
+    }
+
     // MARK: - Install Workflow
 
     private func installVM(entry: VMController.VMListEntry) {
         let name = entry.name
+        let bundleURL = entry.bundleURL
+        let bundlePath = bundleURL.path
+
         if entry.installed {
             presentErrorAlert(message: "Already Installed", informative: "\(name) already has macOS installed.")
             return
         }
-        if entry.isRunning || managedSessions[name] != nil {
+        if entry.isRunning || managedSessions[bundlePath] != nil {
             presentErrorAlert(message: "VM Running", informative: "Stop \(name) before running the installer.")
             return
         }
-        if let session = installSessions[name] {
+        if let session = installSessions[bundlePath] {
             session.window.makeKeyAndOrderFront(nil)
             return
         }
 
-        let session = makeInstallProgressSession(name: name)
-        installSessions[name] = session
+        let session = makeInstallProgressSession(name: name, bundleURL: bundleURL)
+        installSessions[bundlePath] = session
         session.window.makeKeyAndOrderFront(nil)
 
-        viewModel.busyNames.insert(name)
+        viewModel.busyBundlePaths.insert(bundlePath)
         viewModel.statusMessage = "Installing \(name)…"
 
         runCommand(
-            ["install", name],
+            ["install", bundlePath],
             waitForTermination: false,
-            associatedName: name,
             outputHandler: { [weak self] chunk in
-                self?.appendInstallLog(for: name, chunk: chunk)
+                self?.appendInstallLog(for: bundlePath, chunk: chunk)
             },
             terminationHandler: { [weak self] status in
                 guard let self else { return }
                 let success = (status == 0)
                 let finalLine = success ? "Installation completed successfully." : "Installation failed (exit status \(status))."
-                self.appendInstallLog(for: name, chunk: "\n\(finalLine)\n")
-                self.finishInstallSession(name: name, succeeded: success)
+                self.appendInstallLog(for: bundlePath, chunk: "\n\(finalLine)\n")
+                self.finishInstallSession(bundlePath: bundlePath, succeeded: success)
                 if success {
                     self.viewModel.statusMessage = "\(name) installed."
                 } else {
@@ -712,13 +861,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             },
             completion: { [weak self] in
                 guard let self else { return }
-                self.viewModel.busyNames.remove(name)
+                self.viewModel.busyBundlePaths.remove(bundlePath)
                 self.refreshVMs()
             }
         )
     }
 
-    private func makeInstallProgressSession(name: String) -> InstallProgressSession {
+    private func makeInstallProgressSession(name: String, bundleURL: URL) -> InstallProgressSession {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 360),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -783,6 +932,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         stack.addArrangedSubview(scrollView)
 
         return InstallProgressSession(
+            bundleURL: bundleURL,
             name: name,
             window: window,
             progressIndicator: progressIndicator,
@@ -790,8 +940,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         )
     }
 
-    private func appendInstallLog(for name: String, chunk: String) {
-        guard let session = installSessions[name] else { return }
+    private func appendInstallLog(for bundlePath: String, chunk: String) {
+        guard let session = installSessions[bundlePath] else { return }
         let sanitized = chunk.replacingOccurrences(of: "\r", with: "\n")
         if let storage = session.logTextView.textStorage {
             storage.append(NSAttributedString(string: sanitized))
@@ -801,30 +951,34 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         session.logTextView.scrollToEndOfDocument(nil)
     }
 
-    private func finishInstallSession(name: String, succeeded: Bool) {
-        guard let session = installSessions[name] else { return }
+    private func finishInstallSession(bundlePath: String, succeeded: Bool) {
+        guard let session = installSessions[bundlePath] else { return }
         session.progressIndicator.stopAnimation(nil)
         session.progressIndicator.isHidden = true
-        session.window.title = succeeded ? "Installed \(name)" : "Install Failed – \(name)"
-        installSessions.removeValue(forKey: name)
+        session.window.title = succeeded ? "Installed \(session.name)" : "Install Failed – \(session.name)"
+        installSessions.removeValue(forKey: bundlePath)
     }
 
-    private func deleteVM(name: String) {
-        viewModel.busyNames.insert(name)
+    private func deleteVM(entry: VMController.VMListEntry) {
+        let name = entry.name
+        let bundleURL = entry.bundleURL
+        let bundlePath = bundleURL.path
+        viewModel.busyBundlePaths.insert(bundlePath)
         viewModel.statusMessage = "Moving \(name) to Trash…"
         commandQueue.async { [weak self] in
             guard let self else { return }
             do {
-                try self.controller.moveVMToTrash(name: name)
+                try self.controller.moveVMToTrash(bundleURL: bundleURL)
                 DispatchQueue.main.async {
+                    self.library.removeBundle(bundleURL)
                     self.viewModel.statusMessage = "\(name) moved to Trash."
-                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.busyBundlePaths.remove(bundlePath)
                     self.refreshVMs()
                 }
             } catch {
                 DispatchQueue.main.async {
                     self.viewModel.statusMessage = "Delete failed: \(error.localizedDescription)"
-                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.busyBundlePaths.remove(bundlePath)
                     self.presentErrorAlert(message: "Failed to Delete VM", informative: error.localizedDescription)
                     self.refreshVMs()
                 }
@@ -834,21 +988,26 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     // MARK: - Embedded VM Management
 
-    private func startEmbeddedVM(named name: String) {
-        if let existing = managedSessions[name] {
+    private func startEmbeddedVM(entry: VMController.VMListEntry) {
+        startEmbeddedVM(bundleURL: entry.bundleURL, displayName: entry.name)
+    }
+
+    private func startEmbeddedVM(bundleURL: URL, displayName name: String) {
+        let bundlePath = bundleURL.path
+        if let existing = managedSessions[bundlePath] {
             existing.bringToFront()
             return
         }
 
-        viewModel.busyNames.insert(name)
+        viewModel.busyBundlePaths.insert(bundlePath)
         viewModel.statusMessage = "Starting \(name)…"
 
         commandQueue.async { [weak self] in
             guard let self else { return }
             do {
-                let session = try self.controller.makeEmbeddedSession(name: name, runtimeSharedFolder: nil)
+                let session = try self.controller.makeEmbeddedSession(bundleURL: bundleURL, runtimeSharedFolder: nil)
                 DispatchQueue.main.async {
-                    self.register(session: session, for: name)
+                    self.register(session: session, for: bundlePath)
                     session.start { [weak self] result in
                         guard let self else { return }
                         switch result {
@@ -856,9 +1015,9 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                             self.viewModel.statusMessage = "\(name) started."
                             self.refreshVMs()
                         case .failure(let error):
-                            self.managedSessions.removeValue(forKey: name)
+                            self.managedSessions.removeValue(forKey: bundlePath)
                             self.viewModel.statusMessage = "Failed to start \(name): \(error.localizedDescription)"
-                            self.viewModel.busyNames.remove(name)
+                            self.viewModel.busyBundlePaths.remove(bundlePath)
                             self.presentErrorAlert(message: "Failed to Start VM", informative: error.localizedDescription)
                             self.refreshVMs()
                         }
@@ -866,7 +1025,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.busyBundlePaths.remove(bundlePath)
                     self.viewModel.statusMessage = "Failed to start \(name): \(error.localizedDescription)"
                     self.presentErrorAlert(message: "Failed to Start VM", informative: error.localizedDescription)
                     self.refreshVMs()
@@ -875,17 +1034,18 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func register(session: EmbeddedVMSession, for name: String) {
-        managedSessions[name] = session
+    private func register(session: EmbeddedVMSession, for bundlePath: String) {
+        managedSessions[bundlePath] = session
+        let displayName = session.name
 
         session.stateDidChange = { [weak self] state in
             DispatchQueue.main.async {
                 guard let self else { return }
                 switch state {
                 case .starting, .stopping:
-                    self.viewModel.busyNames.insert(name)
+                    self.viewModel.busyBundlePaths.insert(bundlePath)
                 default:
-                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.busyBundlePaths.remove(bundlePath)
                 }
             }
         }
@@ -898,15 +1058,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
         session.terminationHandler = { [weak self] result in
             guard let self else { return }
-            self.managedSessions.removeValue(forKey: name)
+            self.managedSessions.removeValue(forKey: bundlePath)
             switch result {
             case .success:
-                self.viewModel.statusMessage = "\(name) stopped."
+                self.viewModel.statusMessage = "\(displayName) stopped."
             case .failure(let error):
-                self.viewModel.statusMessage = "\(name) stopped with error: \(error.localizedDescription)"
+                self.viewModel.statusMessage = "\(displayName) stopped with error: \(error.localizedDescription)"
                 self.presentErrorAlert(message: "Virtual Machine Error", informative: error.localizedDescription)
             }
-            self.viewModel.busyNames.remove(name)
+            self.viewModel.busyBundlePaths.remove(bundlePath)
             self.refreshVMs()
         }
     }
@@ -1117,14 +1277,41 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             options.sharedFolderWritable = (form.sharedWritableCheckbox.state == .on)
         }
 
-        window?.endSheet(form.panel)
+        let savePanel = NSSavePanel()
+        savePanel.directoryURL = vmRootDirectory
+        savePanel.canCreateDirectories = true
+        savePanel.prompt = "Create"
+        savePanel.nameFieldStringValue = "\(name).\(VMController.bundleExtension)"
+        if #available(macOS 11.0, *) {
+            if let bundleType = UTType(filenameExtension: VMController.bundleExtension.lowercased()) {
+                savePanel.allowedContentTypes = [bundleType]
+            }
+        } else {
+            savePanel.allowedFileTypes = [VMController.bundleExtension]
+        }
 
+        savePanel.beginSheetModal(for: form.panel) { [weak self] response in
+            guard let self else { return }
+            guard response == .OK, var destination = savePanel.url else { return }
+            if destination.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
+                destination.deletePathExtension()
+                destination.appendPathExtension(VMController.bundleExtension)
+            }
+            self.window?.endSheet(form.panel)
+            self.createForm = nil
+            self.createSheet = nil
+            self.createVM(at: destination, name: name, options: options)
+        }
+    }
+
+    private func createVM(at bundleURL: URL, name: String, options: InitOptions) {
         viewModel.statusMessage = "Creating \(name)…"
         commandQueue.async { [weak self] in
             guard let self else { return }
             do {
-                try self.controller.initVM(name: name, options: options)
+                try self.controller.initVM(at: bundleURL, preferredName: name, options: options)
                 DispatchQueue.main.async {
+                    self.library.addBundle(bundleURL)
                     self.viewModel.statusMessage = "Created VM '\(name)'."
                     self.refreshVMs()
                 }
@@ -1155,10 +1342,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         commandQueue.async { [weak self] in
             guard let self else { return }
             do {
-                let config = try self.controller.storedConfig(for: entry.name)
+                let config = try self.controller.storedConfig(at: entry.bundleURL)
                 DispatchQueue.main.async {
                     self.viewModel.statusMessage = "Ready."
-                    self.showEditSheet(for: entry.name, config: config)
+                    self.showEditSheet(for: entry.name, bundleURL: entry.bundleURL, config: config)
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -1169,7 +1356,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showEditSheet(for name: String, config: VMStoredConfig) {
+    private func showEditSheet(for name: String, bundleURL: URL, config: VMStoredConfig) {
         guard let window = self.window else { return }
 
         let panel = NSPanel(
@@ -1289,6 +1476,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
         editForm = EditForm(
             name: name,
+            bundleURL: bundleURL,
             panel: panel,
             cpuField: cpuField,
             memoryField: memoryField,
@@ -1335,30 +1523,32 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         window?.endSheet(form.panel)
 
         let name = form.name
+        let bundleURL = form.bundleURL
+        let bundlePath = bundleURL.path
         let sharedPath = sharedPathValue.isEmpty ? nil : sharedPathValue
         let writable = (form.sharedWritableCheckbox.state == .on)
 
-        viewModel.busyNames.insert(name)
+        viewModel.busyBundlePaths.insert(bundlePath)
         viewModel.statusMessage = "Updating \(name)…"
 
         commandQueue.async { [weak self] in
             guard let self else { return }
             do {
                 try self.controller.updateVMSettings(
-                    name: name,
+                    bundleURL: bundleURL,
                     cpus: cpus,
                     memoryGiB: memoryValue,
                     sharedFolderPath: sharedPath,
                     sharedFolderWritable: writable
                 )
                 DispatchQueue.main.async {
-                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.busyBundlePaths.remove(bundlePath)
                     self.viewModel.statusMessage = "Updated \(name)."
                     self.refreshVMs()
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.viewModel.busyNames.remove(name)
+                    self.viewModel.busyBundlePaths.remove(bundlePath)
                     self.viewModel.statusMessage = "Update failed: \(error.localizedDescription)"
                     self.presentErrorAlert(message: "Failed to Update VM", informative: error.localizedDescription)
                     self.refreshVMs()
@@ -1530,6 +1720,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private func applyVMRootDirectory(_ url: URL) {
         vmRootDirectory = url
         controller.updateRootDirectory(url)
+        library.addBundles(in: url)
         userDefaults.set(url.path, forKey: VMCTLApp.vmRootDefaultsKey)
         viewModel.statusMessage = "Using VMs folder at \(url.path)"
         refreshVMs()
@@ -1583,7 +1774,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private func runCommand(
         _ arguments: [String],
         waitForTermination: Bool,
-        associatedName: String? = nil,
         outputHandler: ((String) -> Void)? = nil,
         terminationHandler: ((Int32) -> Void)? = nil,
         completion: (() -> Void)? = nil

@@ -437,8 +437,8 @@ struct RuntimeSharedFolderOverride {
 }
 
 final class VMController {
-    private static let bundleExtension = "VirtualMachine"
-    private static let bundleExtensionLowercased = bundleExtension.lowercased()
+    static let bundleExtension = "VirtualMachine"
+    static let bundleExtensionLowercased = bundleExtension.lowercased()
 
     private let fileManager = FileManager.default
     private var rootDirectory: URL
@@ -453,6 +453,29 @@ final class VMController {
 
     func updateRootDirectory(_ url: URL) {
         rootDirectory = url
+    }
+
+    private func layoutForExistingBundle(at bundleURL: URL) throws -> VMFileLayout {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: bundleURL.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw VMError.message("VM bundle '\(bundleURL.path)' does not exist.")
+        }
+        return VMFileLayout(bundleURL: bundleURL)
+    }
+
+    private func defaultName(for bundleURL: URL) -> String {
+        let candidate = bundleURL.deletingPathExtension().lastPathComponent
+        if candidate.isEmpty {
+            return bundleURL.lastPathComponent
+        }
+        return candidate
+    }
+
+    private func displayName(for bundleURL: URL) -> String {
+        if let config = try? storedConfig(at: bundleURL) {
+            return config.name
+        }
+        return defaultName(for: bundleURL)
     }
 
     struct VMListEntry {
@@ -500,54 +523,92 @@ final class VMController {
     }
 
     func listVMs() throws -> [VMListEntry] {
-        guard fileManager.fileExists(atPath: rootDirectory.path) else {
+        return try listVMs(in: rootDirectory)
+    }
+
+    func listVMs(in directory: URL) throws -> [VMListEntry] {
+        guard fileManager.fileExists(atPath: directory.path) else {
             return []
         }
 
-        let contents = try fileManager.contentsOfDirectory(at: rootDirectory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+        let contents = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
         var entries: [VMListEntry] = []
 
         for item in contents where isSupportedBundleURL(item) {
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: item.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                continue
+            if let entry = try? loadEntry(for: item) {
+                entries.append(entry)
             }
-
-            let layout = VMFileLayout(bundleURL: item)
-            guard fileManager.fileExists(atPath: layout.configURL.path) else {
-                continue
-            }
-
-            let store = VMConfigStore(layout: layout)
-            guard let config = try? store.load() else {
-                continue
-            }
-
-            var running: pid_t?
-            var managedInProcess = false
-            if let owner = readVMLockOwner(from: layout.pidFileURL) {
-                if kill(owner.pid, 0) == 0 {
-                    running = owner.pid
-                    managedInProcess = owner.isEmbedded
-                } else {
-                    removeVMLock(at: layout.pidFileURL)
-                }
-            }
-
-            let entry = VMListEntry(
-                name: config.name,
-                bundleURL: item,
-                installed: config.installed,
-                runningPID: running,
-                managedInProcess: managedInProcess,
-                cpuCount: config.cpus,
-                memoryBytes: config.memoryBytes,
-                diskBytes: config.diskBytes
-            )
-            entries.append(entry)
         }
 
-        return entries.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return sortEntries(entries)
+    }
+
+    func listVMs(at bundleURLs: [URL]) -> [VMListEntry] {
+        var entries: [VMListEntry] = []
+        var seen: Set<String> = []
+        for url in bundleURLs {
+            let standardized = url.standardizedFileURL
+            guard isSupportedBundleURL(standardized) else { continue }
+            let path = standardized.path
+            guard !seen.contains(path) else { continue }
+            if let entry = try? loadEntry(for: standardized) {
+                entries.append(entry)
+                seen.insert(path)
+            }
+        }
+        return sortEntries(entries)
+    }
+
+    private func sortEntries(_ entries: [VMListEntry]) -> [VMListEntry] {
+        return entries.sorted {
+            let comparison = $0.name.localizedCaseInsensitiveCompare($1.name)
+            if comparison == .orderedSame {
+                return $0.bundleURL.path < $1.bundleURL.path
+            }
+            return comparison == .orderedAscending
+        }
+    }
+
+    func loadEntry(for bundleURL: URL) throws -> VMListEntry {
+        let standardized = bundleURL.standardizedFileURL
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: standardized.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw VMError.message("VM bundle '\(standardized.path)' does not exist or is not a directory.")
+        }
+
+        guard isSupportedBundleURL(standardized) else {
+            throw VMError.message("'\(standardized.lastPathComponent)' is not a .\(VMController.bundleExtension) bundle.")
+        }
+
+        let layout = VMFileLayout(bundleURL: standardized)
+        guard fileManager.fileExists(atPath: layout.configURL.path) else {
+            throw VMError.message("Missing config.json inside '\(standardized.path)'.")
+        }
+
+        let store = VMConfigStore(layout: layout)
+        let config = try store.load()
+
+        var running: pid_t?
+        var managedInProcess = false
+        if let owner = readVMLockOwner(from: layout.pidFileURL) {
+            if kill(owner.pid, 0) == 0 {
+                running = owner.pid
+                managedInProcess = owner.isEmbedded
+            } else {
+                removeVMLock(at: layout.pidFileURL)
+            }
+        }
+
+        return VMListEntry(
+            name: config.name,
+            bundleURL: standardized,
+            installed: config.installed,
+            runningPID: running,
+            managedInProcess: managedInProcess,
+            cpuCount: config.cpus,
+            memoryBytes: config.memoryBytes,
+            diskBytes: config.diskBytes
+        )
     }
 
     func bundleURL(for name: String) -> URL {
@@ -559,28 +620,24 @@ final class VMController {
         return ext == VMController.bundleExtensionLowercased
     }
 
-    func storedConfig(for name: String) throws -> VMStoredConfig {
-        let bundleURL = bundleURL(for: name)
-        guard fileManager.fileExists(atPath: bundleURL.path) else {
-            throw VMError.message("VM '\(name)' does not exist.")
-        }
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func storedConfig(at bundleURL: URL) throws -> VMStoredConfig {
+        let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         return try store.load()
     }
 
-    func updateVMSettings(name: String, cpus: Int, memoryGiB: UInt64, sharedFolderPath: String?, sharedFolderWritable: Bool) throws {
-        let bundleURL = bundleURL(for: name)
-        guard fileManager.fileExists(atPath: bundleURL.path) else {
-            throw VMError.message("VM '\(name)' does not exist.")
-        }
+    func storedConfig(for name: String) throws -> VMStoredConfig {
+        return try storedConfig(at: bundleURL(for: name))
+    }
 
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func updateVMSettings(bundleURL: URL, cpus: Int, memoryGiB: UInt64, sharedFolderPath: String?, sharedFolderWritable: Bool) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let vmName = displayName(for: bundleURL)
         guard !isVMProcessRunning(layout: layout) else {
-            throw VMError.message("Stop VM '\(name)' before editing its settings.")
+            throw VMError.message("Stop VM '\(vmName)' before editing its settings.")
         }
 
-        var config = try storedConfig(for: name)
+        var config = try storedConfig(at: bundleURL)
 
         let minimumCPUs = max(Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount), 1)
         guard cpus >= minimumCPUs else {
@@ -619,19 +676,41 @@ final class VMController {
         try store.save(config)
     }
 
-    func initVM(name: String, options: InitOptions) throws {
+    func updateVMSettings(name: String, cpus: Int, memoryGiB: UInt64, sharedFolderPath: String?, sharedFolderWritable: Bool) throws {
+        try updateVMSettings(bundleURL: bundleURL(for: name), cpus: cpus, memoryGiB: memoryGiB, sharedFolderPath: sharedFolderPath, sharedFolderWritable: sharedFolderWritable)
+    }
+
+    func initVM(at providedBundleURL: URL, preferredName: String? = nil, options: InitOptions) throws {
         guard VZVirtualMachine.isSupported else {
             throw VMError.message("Virtualization is not supported on this host. Ensure you are on Apple Silicon and virtualization is enabled.")
         }
 
-        let bundleURL = bundleURL(for: name)
-        let layout = VMFileLayout(bundleURL: bundleURL)
-        if fileManager.fileExists(atPath: bundleURL.path) {
+        var bundleURL = providedBundleURL.standardizedFileURL
+        if bundleURL.pathExtension.isEmpty {
+            bundleURL.appendPathExtension(VMController.bundleExtension)
+        } else if bundleURL.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
+            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
+        }
+
+        let vmName: String
+        if let preferred = preferredName?.trimmingCharacters(in: .whitespacesAndNewlines), !preferred.isEmpty {
+            vmName = preferred
+        } else {
+            vmName = defaultName(for: bundleURL)
+        }
+
+        guard !vmName.isEmpty else {
+            throw VMError.message("VM name cannot be empty.")
+        }
+
+        var isDirectory: ObjCBool = false
+        if fileManager.fileExists(atPath: bundleURL.path, isDirectory: &isDirectory) {
             throw VMError.message("Bundle \(bundleURL.path) already exists.")
         }
+
+        let layout = VMFileLayout(bundleURL: bundleURL)
         try layout.ensureBundleDirectory()
 
-        // Either use the provided restore image or autodiscover it from known locations.
         let restoreImageURL = try discoverRestoreImage(explicitPath: options.restoreImagePath)
         let restoreImage = try loadRestoreImage(from: restoreImageURL)
 
@@ -667,13 +746,11 @@ final class VMController {
         try writeData(machineIdentifier.dataRepresentation, to: layout.machineIdentifierURL)
 
         do {
-            // Creating auxiliary storage is potentially expensive; keep a strong reference until end of scope.
             _ = try VZMacAuxiliaryStorage(creatingStorageAt: layout.auxiliaryStorageURL, hardwareModel: hardwareModel, options: [.allowOverwrite])
         } catch {
             throw VMError.message("Failed to create auxiliary storage: \(error.localizedDescription)")
         }
 
-        // Sparse raw disk backed by the host filesystem; macOS installer expects a blank device.
         if !fileManager.createFile(atPath: layout.diskURL.path, contents: nil, attributes: nil) {
             throw VMError.message("Failed to create disk image at \(layout.diskURL.path).")
         }
@@ -694,7 +771,7 @@ final class VMController {
 
         let config = VMStoredConfig(
             version: 1,
-            name: name,
+            name: vmName,
             createdAt: Date(),
             modifiedAt: Date(),
             cpus: options.cpus,
@@ -716,24 +793,24 @@ final class VMController {
         let store = VMConfigStore(layout: layout)
         try store.save(config)
 
-        print("Initialized macOS VM '\(name)' at \(bundleURL.path).")
+        print("Initialized macOS VM '\(vmName)' at \(bundleURL.path).")
         print("Restore image: \(restoreImageURL.path)")
         print("Hardware model saved to \(layout.hardwareModelURL.path)")
         print("Disk size: \(options.diskGiB) GiB, Memory: \(options.memoryGiB) GiB, vCPUs: \(options.cpus)")
     }
 
-    func moveVMToTrash(name: String) throws {
-        let bundleURL = bundleURL(for: name)
-        guard fileManager.fileExists(atPath: bundleURL.path) else {
-            throw VMError.message("VM '\(name)' does not exist.")
-        }
+    func initVM(name: String, options: InitOptions) throws {
+        try initVM(at: bundleURL(for: name), preferredName: name, options: options)
+    }
 
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func moveVMToTrash(bundleURL: URL) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let vmName = displayName(for: bundleURL)
         if let owner = readVMLockOwner(from: layout.pidFileURL), kill(owner.pid, 0) == 0 {
             if owner.isEmbedded {
-                throw VMError.message("VM '\(name)' is running inside Virtual Machine Manager. Stop it before deleting.")
+                throw VMError.message("VM '\(vmName)' is running inside Virtual Machine Manager. Stop it before deleting.")
             }
-            throw VMError.message("VM '\(name)' is running. Stop it before deleting.")
+            throw VMError.message("VM '\(vmName)' is running. Stop it before deleting.")
         }
 
         do {
@@ -743,14 +820,18 @@ final class VMController {
         }
     }
 
-    func installVM(name: String) throws {
-        let bundleURL = bundleURL(for: name)
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func moveVMToTrash(name: String) throws {
+        try moveVMToTrash(bundleURL: bundleURL(for: name))
+    }
+
+    func installVM(bundleURL: URL) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         var config = try store.load()
+        let vmName = config.name
 
         guard !isVMProcessRunning(layout: layout) else {
-            throw VMError.message("VM '\(name)' appears to be running. Stop it before installing.")
+            throw VMError.message("VM '\(vmName)' appears to be running. Stop it before installing.")
         }
 
         let restoreImageURL = URL(fileURLWithPath: config.restoreImagePath)
@@ -759,7 +840,7 @@ final class VMController {
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
         let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: true, runtimeSharedFolder: nil)
 
-        let vmQueue = DispatchQueue(label: "vmctl.install.\(name)")
+        let vmQueue = DispatchQueue(label: "vmctl.install.\(vmName)")
         let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
 
         let installer: VZMacOSInstaller = vmQueue.sync {
@@ -803,22 +884,26 @@ final class VMController {
         config.lastInstallDate = Date()
         try store.save(config)
 
-        print("Metadata updated. Consider enabling Remote Login (SSH) inside the guest for headless workflows.")
+        print("Metadata updated for \(vmName). Consider enabling Remote Login (SSH) inside the guest for headless workflows.")
         print("Reminder: Apple’s EULA requires macOS guests to run on Apple-branded hardware.")
     }
 
-    func startVM(name: String, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
-        let bundleURL = bundleURL(for: name)
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func installVM(name: String) throws {
+        try installVM(bundleURL: bundleURL(for: name))
+    }
+
+    func startVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
+        let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         let config = try store.load()
+        let vmName = config.name
 
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
                 if owner.isEmbedded {
-                    throw VMError.message("VM '\(name)' is running inside Virtual Machine Manager (PID \(owner.pid)). Stop it there before starting via CLI.")
+                    throw VMError.message("VM '\(vmName)' is running inside Virtual Machine Manager (PID \(owner.pid)). Stop it there before starting via CLI.")
                 } else {
-                    throw VMError.message("VM '\(name)' is already running under PID \(owner.pid).")
+                    throw VMError.message("VM '\(vmName)' is already running under PID \(owner.pid).")
                 }
             } else {
                 removeVMLock(at: layout.pidFileURL)
@@ -827,7 +912,7 @@ final class VMController {
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
         let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
-        let vmQueue = DispatchQueue(label: "vmctl.run.\(name)")
+        let vmQueue = DispatchQueue(label: "vmctl.run.\(vmName)")
         let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
         let pid = getpid()
         try writeVMLockOwner(.cli(pid), to: layout.pidFileURL)
@@ -865,7 +950,7 @@ final class VMController {
             virtualMachine.start { result in
                 switch result {
                 case .success:
-                    print("VM started. PID \(pid). Press Ctrl+C to shut down.")
+                    print("VM '\(vmName)' started. PID \(pid). Press Ctrl+C to shut down.")
                     startGroup.leave()
                 case .failure(let error):
                     print("Failed to start VM: \(error.localizedDescription)")
@@ -923,7 +1008,7 @@ final class VMController {
                     backing: .buffered,
                     defer: false
                 )
-                window.title = "vmctl – \(name)"
+                window.title = "vmctl – \(vmName)"
                 let vmView = VZVirtualMachineView()
                 vmView.virtualMachine = virtualMachine
                 if #available(macOS 14.0, *) {
@@ -979,17 +1064,21 @@ final class VMController {
         cleanupAndExit(0)
     }
 
-    func stopVM(name: String, timeout: TimeInterval = 30) throws {
-        let bundleURL = bundleURL(for: name)
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func startVM(name: String, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
+        try startVM(bundleURL: bundleURL(for: name), headless: headless, runtimeSharedFolder: runtimeSharedFolder)
+    }
+
+    func stopVM(bundleURL: URL, timeout: TimeInterval = 30) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let vmName = displayName(for: bundleURL)
         guard let owner = readVMLockOwner(from: layout.pidFileURL) else {
-            print("VM '\(name)' does not appear to be running.")
+            print("VM '\(vmName)' does not appear to be running.")
             return
         }
         let pid = owner.pid
 
         if owner.isEmbedded {
-            print("VM '\(name)' is running inside Virtual Machine Manager (PID \(pid)). Stop it from the app.")
+            print("VM '\(vmName)' is running inside Virtual Machine Manager (PID \(pid)). Stop it from the app.")
             return
         }
 
@@ -999,7 +1088,7 @@ final class VMController {
             return
         }
 
-        print("Sending SIGTERM to VM process \(pid) for graceful shutdown.")
+        print("Sending SIGTERM to VM '\(vmName)' (PID \(pid)) for graceful shutdown.")
         kill(pid, SIGTERM)
 
         let deadline = Date().addingTimeInterval(timeout)
@@ -1012,17 +1101,20 @@ final class VMController {
             Thread.sleep(forTimeInterval: 1)
         }
 
-        print("Graceful shutdown timed out. Sending SIGKILL.")
+        print("Graceful shutdown timed out for '\(vmName)'. Sending SIGKILL.")
         kill(pid, SIGKILL)
         removeVMLock(at: layout.pidFileURL)
     }
 
-    func status(name: String) throws {
-        let bundleURL = bundleURL(for: name)
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func stopVM(name: String, timeout: TimeInterval = 30) throws {
+        try stopVM(bundleURL: bundleURL(for: name), timeout: timeout)
+    }
+
+    func status(bundleURL: URL) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         guard fileManager.fileExists(atPath: layout.configURL.path) else {
-            throw VMError.message("VM '\(name)' does not exist.")
+            throw VMError.message("VM bundle '\(bundleURL.path)' is missing config.json.")
         }
         let config = try store.load()
         let lockOwner = readVMLockOwner(from: layout.pidFileURL)
@@ -1058,13 +1150,17 @@ final class VMController {
         if config.installed {
             print("Installed build: \(config.lastInstallBuild ?? "unknown") (\(config.lastInstallVersion ?? "unknown")), last install: \(config.lastInstallDate?.description ?? "unknown")")
         } else {
-            print("Installation status: not installed (run 'vmctl install \(name)')")
+            print("Installation status: not installed (run 'vmctl install \(bundleURL.path)')")
         }
     }
 
-    func snapshot(name: String, subcommand: String, snapshotName: String) throws {
-        let bundleURL = bundleURL(for: name)
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func status(name: String) throws {
+        try status(bundleURL: bundleURL(for: name))
+    }
+
+    func snapshot(bundleURL: URL, subcommand: String, snapshotName: String) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let vmName = displayName(for: bundleURL)
         let sanitized = try sanitizedSnapshotName(snapshotName)
         let snapshotDir = layout.snapshotsDirectoryURL.appendingPathComponent(sanitized, isDirectory: true)
 
@@ -1074,11 +1170,10 @@ final class VMController {
                 throw VMError.message("Stop the VM before taking a snapshot to avoid inconsistent state.")
             }
             if fileManager.fileExists(atPath: snapshotDir.path) {
-                throw VMError.message("Snapshot '\(sanitized)' already exists.")
+                throw VMError.message("Snapshot '\(sanitized)' already exists for '\(vmName)'.")
             }
             try fileManager.createDirectory(at: snapshotDir, withIntermediateDirectories: true, attributes: nil)
 
-            // Snapshots are implemented by duplicating the bundle assets. This is coarse-grained but easy to reason about.
             let itemsToCopy = [
                 ("config.json", layout.configURL),
                 ("disk.img", layout.diskURL),
@@ -1092,20 +1187,19 @@ final class VMController {
                 try copyItem(from: sourceURL, to: dest)
             }
 
-            print("Snapshot '\(sanitized)' created at \(snapshotDir.path). (Coarse-grained copy of bundle files.)")
+            print("Snapshot '\(sanitized)' created for '\(vmName)' at \(snapshotDir.path). (Coarse-grained copy of bundle files.)")
 
         case "revert":
             guard fileManager.fileExists(atPath: snapshotDir.path) else {
-                throw VMError.message("Snapshot '\(sanitized)' does not exist.")
+                throw VMError.message("Snapshot '\(sanitized)' does not exist for '\(vmName)'.")
             }
             guard !isVMProcessRunning(layout: layout) else {
-                throw VMError.message("Stop the VM before reverting a snapshot.")
+                throw VMError.message("Stop '\(vmName)' before reverting a snapshot.")
             }
 
             let tempDir = bundleURL.appendingPathComponent(".revert-temp-\(UUID().uuidString)", isDirectory: true)
             try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: nil)
 
-            // First back up the current state so we can recover if the copy fails mid-way.
             let items = [
                 ("config.json", layout.configURL),
                 ("disk.img", layout.diskURL),
@@ -1124,11 +1218,15 @@ final class VMController {
             }
 
             try fileManager.removeItem(at: tempDir)
-            print("Reverted VM '\(name)' to snapshot '\(sanitized)'.")
+            print("Reverted VM '\(vmName)' to snapshot '\(sanitized)'.")
 
         default:
             throw VMError.message("Unknown snapshot subcommand '\(subcommand)'. Use 'create' or 'revert'.")
         }
+    }
+
+    func snapshot(name: String, subcommand: String, snapshotName: String) throws {
+        try snapshot(bundleURL: bundleURL(for: name), subcommand: subcommand, snapshotName: snapshotName)
     }
 
     private func isVMProcessRunning(layout: VMFileLayout) -> Bool {
@@ -1144,15 +1242,11 @@ final class VMController {
 
 #if VMCTL_APP
 extension VMController {
-    func makeEmbeddedSession(name: String, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> EmbeddedVMSession {
-        let bundleURL = bundleURL(for: name)
-        guard FileManager.default.fileExists(atPath: bundleURL.path) else {
-            throw VMError.message("VM '\(name)' does not exist.")
-        }
-
-        let layout = VMFileLayout(bundleURL: bundleURL)
+    func makeEmbeddedSession(bundleURL: URL, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> EmbeddedVMSession {
+        let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         let config = try store.load()
+        let name = config.name
 
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
@@ -1166,7 +1260,11 @@ extension VMController {
             }
         }
 
-        return try EmbeddedVMSession(name: name, layout: layout, storedConfig: config, runtimeSharedFolder: runtimeSharedFolder)
+        return try EmbeddedVMSession(name: name, bundleURL: bundleURL, layout: layout, storedConfig: config, runtimeSharedFolder: runtimeSharedFolder)
+    }
+
+    func makeEmbeddedSession(name: String, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> EmbeddedVMSession {
+        return try makeEmbeddedSession(bundleURL: bundleURL(for: name), runtimeSharedFolder: runtimeSharedFolder)
     }
 }
 
@@ -1180,6 +1278,7 @@ final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachineDeleg
     }
 
     let name: String
+    let bundlePath: String
     let window: NSWindow
     var stateDidChange: ((State) -> Void)?
     var statusChanged: ((String) -> Void)?
@@ -1203,8 +1302,9 @@ final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachineDeleg
     private var didTerminate = false
     private var stopContinuations: [(Result<Void, Error>) -> Void] = []
 
-    init(name: String, layout: VMFileLayout, storedConfig: VMStoredConfig, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
+    init(name: String, bundleURL: URL, layout: VMFileLayout, storedConfig: VMStoredConfig, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
         self.name = name
+        self.bundlePath = bundleURL.path
         self.layout = layout
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
         let configuration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
@@ -1508,10 +1608,30 @@ struct CLI {
         }
     }
 
-    private func handleInit(arguments: [String]) throws {
-        guard let name = arguments.first else {
-            throw VMError.message("Usage: vmctl init <name> [options]")
+    private func resolveBundleURL(argument: String, mustExist: Bool) throws -> URL {
+        let expanded = (argument as NSString).expandingTildeInPath
+        var url = URL(fileURLWithPath: expanded).standardizedFileURL
+        if url.pathExtension.isEmpty {
+            url.appendPathExtension(VMController.bundleExtension)
+        } else if url.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
+            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
         }
+
+        if mustExist {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("VM bundle '\(url.path)' does not exist.")
+            }
+        }
+
+        return url
+    }
+
+    private func handleInit(arguments: [String]) throws {
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl init <bundle-path> [options]")
+        }
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: false)
         var opts = InitOptions()
         var index = 1
         while index < arguments.count {
@@ -1554,19 +1674,20 @@ struct CLI {
             }
             index += 1
         }
-        try controller.initVM(name: name, options: opts)
+        try controller.initVM(at: bundleURL, preferredName: nil, options: opts)
     }
 
     private func handleInstall(arguments: [String]) throws {
-        guard let name = arguments.first else {
-            throw VMError.message("Usage: vmctl install <name>")
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl install <bundle-path>")
         }
-        try controller.installVM(name: name)
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
+        try controller.installVM(bundleURL: bundleURL)
     }
 
     private func handleStart(arguments: [String]) throws {
-        guard let name = arguments.first else {
-            throw VMError.message("Usage: vmctl start <name> [--headless] [--shared-folder PATH] [--writable|--read-only]")
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]")
         }
         var headless = false
         var sharedFolderPath: String?
@@ -1603,31 +1724,34 @@ struct CLI {
             runtimeSharedFolder = RuntimeSharedFolderOverride(path: path, readOnly: readOnly)
         }
 
-        try controller.startVM(name: name, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
+        try controller.startVM(bundleURL: bundleURL, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
     }
 
     private func handleStop(arguments: [String]) throws {
-        guard let name = arguments.first else {
-            throw VMError.message("Usage: vmctl stop <name>")
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl stop <bundle-path>")
         }
-        try controller.stopVM(name: name)
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
+        try controller.stopVM(bundleURL: bundleURL)
     }
 
     private func handleStatus(arguments: [String]) throws {
-        guard let name = arguments.first else {
-            throw VMError.message("Usage: vmctl status <name>")
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl status <bundle-path>")
         }
-        try controller.status(name: name)
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
+        try controller.status(bundleURL: bundleURL)
     }
 
     private func handleSnapshot(arguments: [String]) throws {
         guard arguments.count >= 3 else {
-            throw VMError.message("Usage: vmctl snapshot <name> <create|revert> <snapshot>")
+            throw VMError.message("Usage: vmctl snapshot <bundle-path> <create|revert> <snapshot>")
         }
-        let name = arguments[0]
+        let bundleURL = try resolveBundleURL(argument: arguments[0], mustExist: true)
         let subcommand = arguments[1]
         let snapshotName = arguments[2]
-        try controller.snapshot(name: name, subcommand: subcommand, snapshotName: snapshotName)
+        try controller.snapshot(bundleURL: bundleURL, subcommand: subcommand, snapshotName: snapshotName)
     }
 
     private func showHelp(exitCode: Int32) -> Never {
@@ -1635,23 +1759,23 @@ struct CLI {
 Usage: vmctl <command> [options]
 
 Commands:
-  init <name> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
-  install <name>
-  start <name> [--headless] [--shared-folder PATH] [--writable|--read-only]
-  stop <name>
-  status <name>
-  snapshot <name> <create|revert> <snapshot>
+  init <bundle-path> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
+  install <bundle-path>
+  start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
+  stop <bundle-path>
+  status <bundle-path>
+  snapshot <bundle-path> <create|revert> <snapshot>
 
 Examples:
-  vmctl init sandbox --cpus 6 --memory 16 --disk 128
-  vmctl install sandbox
-  vmctl start sandbox                                   # GUI
-  vmctl start sandbox --headless                        # headless (SSH after setup)
-  vmctl start sandbox --shared-folder ~/Projects --writable
-  vmctl stop sandbox
-  vmctl status sandbox
-  vmctl snapshot sandbox create clean
-  vmctl snapshot sandbox revert clean
+  vmctl init ~/VMs/sandbox.VirtualMachine --cpus 6 --memory 16 --disk 128
+  vmctl install ~/VMs/sandbox.VirtualMachine
+  vmctl start ~/VMs/sandbox.VirtualMachine                    # GUI
+  vmctl start ~/VMs/sandbox.VirtualMachine --headless         # headless (SSH after setup)
+  vmctl start ~/VMs/sandbox.VirtualMachine --shared-folder ~/Projects --writable
+  vmctl stop ~/VMs/sandbox.VirtualMachine
+  vmctl status ~/VMs/sandbox.VirtualMachine
+  vmctl snapshot ~/VMs/sandbox.VirtualMachine create clean
+  vmctl snapshot ~/VMs/sandbox.VirtualMachine revert clean
 
 Note: After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
       Apple’s EULA requires macOS guests to run on Apple-branded hardware.
