@@ -42,7 +42,8 @@ final class VMLibrary {
     @discardableResult
     func addBundle(_ url: URL) -> Bool {
         let normalized = normalize(url)
-        guard normalized.pathExtension.lowercased() == VMController.bundleExtensionLowercased else { return false }
+        let ext = normalized.pathExtension.lowercased()
+        guard ext == VMController.bundleExtensionLowercased else { return false }
         let path = normalized.path
         guard !storedPaths.contains(path) else { return false }
         storedPaths.append(path)
@@ -1180,7 +1181,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private let library: VMLibrary
     private let ipswLibrary: IPSWLibrary
     private let viewModel = VMListViewModel()
-    private let recognizedBundleExtension = "virtualmachine"
     private var cachedRestoreImages: [IPSWCachedImage] = []
 
     private var window: NSWindow!
@@ -1409,7 +1409,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     private func isRecognizedVMBundle(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == recognizedBundleExtension
+        return ext == VMController.bundleExtensionLowercased
     }
 
     private func registerBundles(_ urls: [URL], autoLaunch: Bool) {
@@ -2055,7 +2055,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         savePanel.directoryURL = vmRootDirectory
         savePanel.canCreateDirectories = true
         savePanel.prompt = "Create"
-        savePanel.nameFieldStringValue = "\(name).\(VMController.bundleExtension)"
+        // Let NSSavePanel/UTType add the extension to avoid double extensions.
+        savePanel.nameFieldStringValue = name
         if #available(macOS 11.0, *) {
             if let bundleType = UTType(filenameExtension: VMController.bundleExtension.lowercased()) {
                 savePanel.allowedContentTypes = [bundleType]
@@ -2069,10 +2070,12 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         savePanel.beginSheetModal(for: sheet) { [weak self] response in
             guard let self else { return }
             guard response == .OK, var destination = savePanel.url else { return }
-            if destination.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
-                destination.deletePathExtension()
-                destination.appendPathExtension(VMController.bundleExtension)
+            // Normalize to a single .GhostVM extension with canonical casing.
+            var base = destination.deletingPathExtension()
+            while base.pathExtension.lowercased() == VMController.bundleExtensionLowercased {
+                base = base.deletingPathExtension()
             }
+            destination = base.appendingPathExtension(VMController.bundleExtension)
             self.window?.endSheet(sheet)
             self.createSheet = nil
             self.createViewModel = nil

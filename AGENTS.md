@@ -43,12 +43,12 @@ A PR *MUST* already exist, otherwise ABORT.
 </READONLY>
 <Agent>
 
-This repository ships two cooperating surfaces—a command-line tool (`vmctl`) and a SwiftUI/macOS App (`GhostVM.app`)—that orchestrate Apple’s `Virtualization.framework` to provision, install, and run `.VirtualMachine` bundles. The codebase is organized around a handful of long-lived “agents”, each with clear responsibilities and collaboration patterns. This document captures those agents, their inputs/outputs, and the execution flows they participate in so new contributors can reason about changes without re-reading the entire Swift codebase.
+This repository ships two cooperating surfaces—a command-line tool (`vmctl`) and a SwiftUI/macOS App (`GhostVM.app`)—that orchestrate Apple’s `Virtualization.framework` to provision, install, and run `.GhostVM` bundles. The codebase is organized around a handful of long-lived “agents”, each with clear responsibilities and collaboration patterns. This document captures those agents, their inputs/outputs, and the execution flows they participate in so new contributors can reason about changes without re-reading the entire Swift codebase.
 
 Shared Concepts
 ---------------
 
-* **Bundle layout (`vmctl.swift` – `VMFileLayout`)** – Every VM lives in a user-specified directory (default `~/VMs/<name>.VirtualMachine`). `VMFileLayout` centralizes paths for `config.json`, `disk.img`, hardware blobs, PID file, and `Snapshots/`.
+* **Bundle layout (`vmctl.swift` – `VMFileLayout`)** – Every VM lives in a user-specified directory (default `~/VMs/<name>.GhostVM`). `VMFileLayout` centralizes paths for `config.json`, `disk.img`, hardware blobs, PID file, and `Snapshots/`.
 * **Persisted configuration (`VMStoredConfig`)** – JSON saved via `VMConfigStore` containing hardware sizing, shared folder defaults, restore image metadata, install history, etc. This structure is the contract between CLI/App sessions.
 * **Runtime policy** – Apple Silicon + macOS 15+, virtualization entitlement, NAT networking (`VZNATNetworkDeviceAttachment`), Virtio block/file system devices, optional shared folders.
 * **Locking & ownership (`vmctl.swift` – PID helpers)** – A simple `vmctl.pid` file encodes which process (CLI vs embedded app) currently owns a VM to prevent concurrent starts.

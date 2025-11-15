@@ -40,7 +40,6 @@ enum VMError: Error, CustomStringConvertible {
 // Persisted VM metadata. Everything lives in config.json inside the bundle.
 struct VMStoredConfig: Codable {
     var version: Int
-    var name: String
     var createdAt: Date
     var modifiedAt: Date
     var cpus: Int
@@ -57,6 +56,101 @@ struct VMStoredConfig: Codable {
     var lastInstallBuild: String?
     var lastInstallVersion: String?
     var lastInstallDate: Date?
+    var legacyName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case createdAt
+        case modifiedAt
+        case cpus
+        case memoryBytes
+        case diskBytes
+        case restoreImagePath
+        case hardwareModelPath
+        case machineIdentifierPath
+        case auxiliaryStoragePath
+        case diskPath
+        case sharedFolderPath
+        case sharedFolderReadOnly
+        case installed
+        case lastInstallBuild
+        case lastInstallVersion
+        case lastInstallDate
+        case legacyName = "name"
+    }
+
+    mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
+        var changed = false
+        let basePath = layout.bundleURL.standardizedFileURL.path
+
+        func makeRelative(_ path: String) -> (String, Bool) {
+            guard path.hasPrefix("/") else { return (path, false) }
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            if standardized.hasPrefix(basePath + "/") {
+                let relative = String(standardized.dropFirst(basePath.count + 1))
+                if relative != path {
+                    return (relative, true)
+                }
+            }
+            let filename = URL(fileURLWithPath: path).lastPathComponent
+            if filename != path {
+                return (filename, true)
+            }
+            return (path, false)
+        }
+
+        func makeAbsolute(_ path: String) -> (String, Bool) {
+            let expanded = (path as NSString).expandingTildeInPath
+            let resolved = expanded.isEmpty ? path : expanded
+            let absolute = URL(fileURLWithPath: resolved).standardizedFileURL.path
+            if absolute != path {
+                return (absolute, true)
+            }
+            return (path, false)
+        }
+
+        let relPaths = [
+            ("auxiliaryStoragePath", auxiliaryStoragePath),
+            ("diskPath", diskPath),
+            ("hardwareModelPath", hardwareModelPath),
+            ("machineIdentifierPath", machineIdentifierPath)
+        ]
+
+        for (key, value) in relPaths {
+            let (relative, didChange) = makeRelative(value)
+            if didChange {
+                changed = true
+            }
+            switch key {
+            case "auxiliaryStoragePath": auxiliaryStoragePath = relative
+            case "diskPath": diskPath = relative
+            case "hardwareModelPath": hardwareModelPath = relative
+            case "machineIdentifierPath": machineIdentifierPath = relative
+            default: break
+            }
+        }
+
+        let (absoluteRestore, restoreChanged) = makeAbsolute(restoreImagePath)
+        if restoreChanged {
+            restoreImagePath = absoluteRestore
+            changed = true
+        }
+
+        if let shared = sharedFolderPath {
+            let (absoluteShared, sharedChanged) = makeAbsolute(shared)
+            if sharedChanged {
+                sharedFolderPath = absoluteShared
+                changed = true
+            }
+        }
+
+        if legacyName != nil {
+            legacyName = nil
+            changed = true
+        }
+
+        return changed
+    }
 }
 
 final class VMFileLayout {
@@ -108,12 +202,17 @@ final class VMConfigStore {
         let data = try Data(contentsOf: layout.configURL)
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(VMStoredConfig.self, from: data)
+        var config = try decoder.decode(VMStoredConfig.self, from: data)
+        if config.normalize(relativeTo: layout) {
+            try save(config)
+        }
+        return config
     }
 
     func save(_ config: VMStoredConfig) throws {
         var updated = config
         updated.modifiedAt = Date()
+        _ = updated.normalize(relativeTo: layout)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -152,6 +251,12 @@ func parseBytes(from argument: String, defaultUnit: UInt64 = 1) throws -> UInt64
         }
     }
     throw VMError.message("Unrecognized size '\(argument)'. Use values like 64G, 8192M, or 65536.")
+}
+
+func standardizedAbsolutePath(_ path: String) -> String {
+    let expanded = (path as NSString).expandingTildeInPath
+    let resolved = expanded.isEmpty ? path : expanded
+    return URL(fileURLWithPath: resolved).standardizedFileURL.path
 }
 
 // MARK: - Restore Image Discovery
@@ -437,7 +542,7 @@ struct RuntimeSharedFolderOverride {
 }
 
 final class VMController {
-    static let bundleExtension = "VirtualMachine"
+    static let bundleExtension = "GhostVM"
     static let bundleExtensionLowercased = bundleExtension.lowercased()
 
     private let fileManager = FileManager.default
@@ -472,9 +577,6 @@ final class VMController {
     }
 
     private func displayName(for bundleURL: URL) -> String {
-        if let config = try? storedConfig(at: bundleURL) {
-            return config.name
-        }
         return defaultName(for: bundleURL)
     }
 
@@ -600,7 +702,7 @@ final class VMController {
         }
 
         return VMListEntry(
-            name: config.name,
+            name: displayName(for: standardized),
             bundleURL: standardized,
             installed: config.installed,
             runningPID: running,
@@ -656,11 +758,12 @@ final class VMController {
 
         var sanitizedSharedPath: String?
         if let path = sharedFolderPath?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            let absolutePath = standardizedAbsolutePath(path)
             var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            guard fileManager.fileExists(atPath: absolutePath, isDirectory: &isDirectory), isDirectory.boolValue else {
                 throw VMError.message("Shared folder path \(path) does not exist or is not a directory.")
             }
-            sanitizedSharedPath = path
+            sanitizedSharedPath = absolutePath
         }
 
         config.cpus = cpus
@@ -686,9 +789,10 @@ final class VMController {
         }
 
         var bundleURL = providedBundleURL.standardizedFileURL
-        if bundleURL.pathExtension.isEmpty {
+        let ext = bundleURL.pathExtension.lowercased()
+        if ext.isEmpty {
             bundleURL.appendPathExtension(VMController.bundleExtension)
-        } else if bundleURL.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
+        } else if ext != VMController.bundleExtensionLowercased {
             throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
         }
 
@@ -758,11 +862,14 @@ final class VMController {
         try handle.truncate(atOffset: requestedDiskBytes)
         try handle.close()
 
+        var sharedFolderAbsolute: String?
         if let sharedPath = options.sharedFolderPath {
+            let absoluteShared = standardizedAbsolutePath(sharedPath)
             var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: sharedPath, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw VMError.message("Shared folder path \(sharedPath) does not exist or is not a directory.")
+            guard fileManager.fileExists(atPath: absoluteShared, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("Shared folder path \(absoluteShared) does not exist or is not a directory.")
             }
+            sharedFolderAbsolute = absoluteShared
         }
 
         if !fileManager.fileExists(atPath: layout.snapshotsDirectoryURL.path) {
@@ -771,23 +878,23 @@ final class VMController {
 
         let config = VMStoredConfig(
             version: 1,
-            name: vmName,
             createdAt: Date(),
             modifiedAt: Date(),
             cpus: options.cpus,
             memoryBytes: requestedMemoryBytes,
             diskBytes: requestedDiskBytes,
-            restoreImagePath: restoreImageURL.path,
-            hardwareModelPath: layout.hardwareModelURL.path,
-            machineIdentifierPath: layout.machineIdentifierURL.path,
-            auxiliaryStoragePath: layout.auxiliaryStorageURL.path,
-            diskPath: layout.diskURL.path,
-            sharedFolderPath: options.sharedFolderPath,
+            restoreImagePath: restoreImageURL.standardizedFileURL.path,
+            hardwareModelPath: layout.hardwareModelURL.lastPathComponent,
+            machineIdentifierPath: layout.machineIdentifierURL.lastPathComponent,
+            auxiliaryStoragePath: layout.auxiliaryStorageURL.lastPathComponent,
+            diskPath: layout.diskURL.lastPathComponent,
+            sharedFolderPath: sharedFolderAbsolute,
             sharedFolderReadOnly: !options.sharedFolderWritable,
             installed: false,
             lastInstallBuild: nil,
             lastInstallVersion: nil,
-            lastInstallDate: nil
+            lastInstallDate: nil,
+            legacyName: nil
         )
 
         let store = VMConfigStore(layout: layout)
@@ -828,7 +935,7 @@ final class VMController {
         let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         var config = try store.load()
-        let vmName = config.name
+        let vmName = displayName(for: bundleURL)
 
         guard !isVMProcessRunning(layout: layout) else {
             throw VMError.message("VM '\(vmName)' appears to be running. Stop it before installing.")
@@ -896,7 +1003,7 @@ final class VMController {
         let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         let config = try store.load()
-        let vmName = config.name
+        let vmName = displayName(for: bundleURL)
 
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
@@ -1131,7 +1238,7 @@ final class VMController {
             }
         }
 
-        print("Name: \(config.name)")
+        print("Name: \(displayName(for: bundleURL))")
         print("Bundle: \(bundleURL.path)")
         if isRunning {
             if managedInProcess {
@@ -1246,7 +1353,7 @@ extension VMController {
         let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         let config = try store.load()
-        let name = config.name
+        let name = displayName(for: bundleURL)
 
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
@@ -1611,9 +1718,10 @@ struct CLI {
     private func resolveBundleURL(argument: String, mustExist: Bool) throws -> URL {
         let expanded = (argument as NSString).expandingTildeInPath
         var url = URL(fileURLWithPath: expanded).standardizedFileURL
-        if url.pathExtension.isEmpty {
+        let ext = url.pathExtension.lowercased()
+        if ext.isEmpty {
             url.appendPathExtension(VMController.bundleExtension)
-        } else if url.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
+        } else if ext != VMController.bundleExtensionLowercased {
             throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
         }
 
@@ -1767,15 +1875,15 @@ Commands:
   snapshot <bundle-path> <create|revert> <snapshot>
 
 Examples:
-  vmctl init ~/VMs/sandbox.VirtualMachine --cpus 6 --memory 16 --disk 128
-  vmctl install ~/VMs/sandbox.VirtualMachine
-  vmctl start ~/VMs/sandbox.VirtualMachine                    # GUI
-  vmctl start ~/VMs/sandbox.VirtualMachine --headless         # headless (SSH after setup)
-  vmctl start ~/VMs/sandbox.VirtualMachine --shared-folder ~/Projects --writable
-  vmctl stop ~/VMs/sandbox.VirtualMachine
-  vmctl status ~/VMs/sandbox.VirtualMachine
-  vmctl snapshot ~/VMs/sandbox.VirtualMachine create clean
-  vmctl snapshot ~/VMs/sandbox.VirtualMachine revert clean
+  vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+  vmctl install ~/VMs/sandbox.GhostVM
+  vmctl start ~/VMs/sandbox.GhostVM                    # GUI
+  vmctl start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
+  vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
+  vmctl stop ~/VMs/sandbox.GhostVM
+  vmctl status ~/VMs/sandbox.GhostVM
+  vmctl snapshot ~/VMs/sandbox.GhostVM create clean
+  vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
 
 Note: After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
       Apple’s EULA requires macOS guests to run on Apple-branded hardware.

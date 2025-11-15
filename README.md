@@ -1,6 +1,6 @@
 # GhostVM
 
-GhostVM ships both a native macOS app (`GhostVM.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained `.VirtualMachine` bundles wherever you choose to store them (the app defaults to `~/VMs` but any writable location works). The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
+GhostVM ships both a native macOS app (`GhostVM.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained `.GhostVM` bundles wherever you choose to store them (the app defaults to `~/VMs` but any writable location works). The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
 
 ## Requirements
 
@@ -13,7 +13,7 @@ GhostVM ships both a native macOS app (`GhostVM.app`) and the accompanying `vmct
 ### Using the Command Line Tool
 
 - Same runtime requirements as the app.
-- Run commands against the full path to a `.VirtualMachine` bundle, no matter where it lives.
+- Run commands against the full path to a `.GhostVM` bundle, no matter where it lives.
 
 ### Building From Source
 
@@ -63,7 +63,7 @@ Alternatively, omit `NOTARY_KEYCHAIN_PROFILE` and provide `NOTARY_APPLE_ID`, `NO
 ./vmctl --help
 ```
 
-Key commands (all expect a full path to `*.VirtualMachine`):
+Key commands (all expect a full path to `*.GhostVM`):
 
 - `init <bundle-path>` – Create a new VM bundle, generate hardware identifiers, auxiliary storage, empty disk, and config. Options: `--cpus`, `--memory`, `--disk`, `--restore-image`, `--shared-folder`, `--writable`.
 - `install <bundle-path>` – Boot the VM with `VZMacOSInstaller` using the restore image. Progress updates print to stdout.
@@ -90,14 +90,14 @@ After installation, enable Remote Login (SSH) inside the guest for comfortable h
 
 ```bash
 make
-./vmctl init ~/VMs/sandbox.VirtualMachine --cpus 6 --memory 16 --disk 128
-./vmctl install ~/VMs/sandbox.VirtualMachine
-./vmctl start ~/VMs/sandbox.VirtualMachine          # GUI
-./vmctl start ~/VMs/sandbox.VirtualMachine --headless
-./vmctl start ~/VMs/sandbox.VirtualMachine --shared-folder ~/Projects --writable
-./vmctl snapshot ~/VMs/sandbox.VirtualMachine create clean
-./vmctl stop ~/VMs/sandbox.VirtualMachine
-./vmctl snapshot ~/VMs/sandbox.VirtualMachine revert clean
+./vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+./vmctl install ~/VMs/sandbox.GhostVM
+./vmctl start ~/VMs/sandbox.GhostVM          # GUI
+./vmctl start ~/VMs/sandbox.GhostVM --headless
+./vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
+./vmctl snapshot ~/VMs/sandbox.GhostVM create clean
+./vmctl stop ~/VMs/sandbox.GhostVM
+./vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
 ```
 
 Enjoy experimenting with macOS VMs on Apple Silicon!

@@ -59,7 +59,21 @@ app: build
 	$(SWIFTC) $(SWIFTFLAGS) -DVMCTL_APP -o $(APP_BUNDLE)/Contents/MacOS/$(APP_TARGET) $(APP_SOURCES) $(FRAMEWORKS)
 	cp $(TARGET) $(APP_BUNDLE)/Contents/MacOS/vmctl
 	cp ghostvm.png $(APP_BUNDLE)/Contents/Resources/ghostvm.png
-	cp vm.png $(APP_BUNDLE)/Contents/Resources/vm.png
+	# Build a proper .icns for GhostVM bundles from GhostVMIcon.png
+	rm -rf build/GhostVMIcon.iconset
+	mkdir -p build/GhostVMIcon.iconset
+	sips -z 16 16 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_16x16.png >/dev/null
+	sips -z 32 32 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_16x16@2x.png >/dev/null
+	sips -z 32 32 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_32x32.png >/dev/null
+	sips -z 64 64 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_32x32@2x.png >/dev/null
+	sips -z 128 128 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_128x128.png >/dev/null
+	sips -z 256 256 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_128x128@2x.png >/dev/null
+	sips -z 256 256 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_256x256.png >/dev/null
+	sips -z 512 512 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_256x256@2x.png >/dev/null
+	sips -z 512 512 GhostVMIcon.png --out build/GhostVMIcon.iconset/icon_512x512.png >/dev/null
+	cp GhostVMIcon.png build/GhostVMIcon.iconset/icon_512x512@2x.png
+	iconutil -c icns build/GhostVMIcon.iconset -o build/GhostVMIcon.icns
+	cp build/GhostVMIcon.icns $(APP_BUNDLE)/Contents/Resources/GhostVMIcon.icns
 	@if [ "$(CODESIGN_ID)" = "-" ]; then \
 		echo "Codesigning $(APP_BUNDLE) with ad-hoc identity to apply entitlements."; \
 	fi
