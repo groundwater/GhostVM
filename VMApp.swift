@@ -883,18 +883,33 @@ private struct CreateVMView: View {
             }
 
             labeledRow("CPUs") {
-                TextField("Number of vCPUs", text: $model.cpuCount)
-                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 8) {
+                    TextField("Number of vCPUs", text: $model.cpuCount)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("cores")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             labeledRow("Memory") {
-                TextField("GiB", text: $model.memoryGiB)
-                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 8) {
+                    TextField("GiB", text: $model.memoryGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             labeledRow("Disk") {
-                TextField("GiB (minimum 20)", text: $model.diskGiB)
-                    .textFieldStyle(.roundedBorder)
+                HStack(spacing: 8) {
+                    TextField("GiB (minimum 20)", text: $model.diskGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             labeledRow("Restore Image*") {
@@ -983,6 +998,85 @@ private struct CreateVMView: View {
     }
 }
 
+private struct EditSettingsView: View {
+    @ObservedObject var model: VMCTLApp.EditSettingsViewModel
+    let browseSharedFolder: () -> Void
+    let cancel: () -> Void
+    let save: () -> Void
+
+    private let labelWidth: CGFloat = 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Adjust CPU, memory, and shared folder settings. Changes apply the next time the VM starts.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("Name") {
+                Text(model.name)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            labeledRow("CPUs") {
+                HStack(spacing: 8) {
+                    TextField("Number of vCPUs", text: $model.cpuCount)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("cores")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Memory") {
+                HStack(spacing: 8) {
+                    TextField("GiB", text: $model.memoryGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Disk") {
+                Text(model.diskDescription)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            labeledRow("Shared Folder") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        TextField("Optional shared folder path", text: $model.sharedFolderPath)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Browse…", action: browseSharedFolder)
+                    }
+                    Toggle("Allow writes to shared folder", isOn: $model.sharedFolderWritable)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 // MARK: - App Delegate
 
 @main
@@ -1007,7 +1101,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private weak var editSheet: NSPanel?
     private weak var settingsSheet: NSPanel?
     private var createViewModel: CreateVMViewModel?
-    private var editForm: EditForm?
+    private var editViewModel: EditSettingsViewModel?
     private var settingsForm: SettingsForm?
     private var installSessions: [String: InstallProgressSession] = [:]
     private var runningProcesses: [RunningProcess] = []
@@ -1061,16 +1155,32 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private struct EditForm {
+    final class EditSettingsViewModel: ObservableObject {
         let name: String
         let bundleURL: URL
-        let panel: NSPanel
-        let cpuField: NSTextField
-        let memoryField: NSTextField
-        let diskField: NSTextField
-        let sharedFolderField: NSTextField
-        let sharedWritableCheckbox: NSButton
-        let saveButton: NSButton
+        @Published var cpuCount: String
+        @Published var memoryGiB: String
+        let diskDescription: String
+        @Published var sharedFolderPath: String
+        @Published var sharedFolderWritable: Bool
+
+        init(
+            name: String,
+            bundleURL: URL,
+            cpuCount: String,
+            memoryGiB: String,
+            diskDescription: String,
+            sharedFolderPath: String,
+            sharedFolderWritable: Bool
+        ) {
+            self.name = name
+            self.bundleURL = bundleURL
+            self.cpuCount = cpuCount
+            self.memoryGiB = memoryGiB
+            self.diskDescription = diskDescription
+            self.sharedFolderPath = sharedFolderPath
+            self.sharedFolderWritable = sharedFolderWritable
+        }
     }
 
     private struct SettingsForm {
@@ -1932,7 +2042,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         guard let window = self.window else { return }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 320),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -1943,147 +2053,62 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.center()
 
-        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
-        panel.contentView = contentView
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
-
-        contentView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-        ])
-
-        let descriptionLabel = NSTextField(labelWithString: "Adjust CPU, memory, and shared folder settings. Changes apply the next time the VM starts.")
-        descriptionLabel.lineBreakMode = .byWordWrapping
-        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        stack.addArrangedSubview(descriptionLabel)
-
-        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
-
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.distribution = .fill
-
-            control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(control)
-            if let trailing = trailing {
-                row.addArrangedSubview(trailing)
-            }
-
-            return row
-        }
-
-        let nameField = NSTextField(string: name)
-        nameField.isEnabled = false
-        stack.addArrangedSubview(labeledRow("Name", control: nameField))
-
-        let cpuField = NSTextField(string: "\(config.cpus)")
-        cpuField.placeholderString = "Number of vCPUs"
-        stack.addArrangedSubview(labeledRow("CPUs", control: cpuField))
-
         let memoryGiB = max(1, Int((config.memoryBytes + ((1 << 30) - 1)) >> 30))
-        let memoryField = NSTextField(string: "\(memoryGiB)")
-        memoryField.placeholderString = "GiB"
-        stack.addArrangedSubview(labeledRow("Memory", control: memoryField))
-
         let diskFormatter = ByteCountFormatter()
         diskFormatter.allowedUnits = [.useGB]
         diskFormatter.countStyle = .file
         diskFormatter.includesUnit = true
         let diskDisplay = diskFormatter.string(fromByteCount: Int64(config.diskBytes))
-        let diskField = NSTextField(string: diskDisplay)
-        diskField.isEnabled = false
-        stack.addArrangedSubview(labeledRow("Disk", control: diskField))
+        let sharedPath = config.sharedFolderPath ?? ""
+        let sharedWritableDefault = sharedPath.isEmpty ? false : !config.sharedFolderReadOnly
 
-        let sharedField = NSTextField(string: config.sharedFolderPath ?? "")
-        sharedField.placeholderString = "Optional shared folder path"
-        let sharedBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseSharedFolder))
-        stack.addArrangedSubview(labeledRow("Shared Folder", control: sharedField, trailing: sharedBrowse))
-
-        let sharedWritable = NSButton(checkboxWithTitle: "Allow writes to shared folder", target: nil, action: nil)
-        if let sharedPath = config.sharedFolderPath, !sharedPath.isEmpty {
-            sharedWritable.state = config.sharedFolderReadOnly ? .off : .on
-        } else {
-            sharedWritable.state = .off
-        }
-        stack.addArrangedSubview(sharedWritable)
-
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillProportionally
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelEditSheet))
-        cancelButton.bezelStyle = .rounded
-
-        let saveButton = NSButton(title: "Save", target: self, action: #selector(confirmEditSheet))
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"
-
-        buttonRow.addArrangedSubview(spacer)
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(saveButton)
-        stack.addArrangedSubview(buttonRow)
-
-        editForm = EditForm(
+        let model = EditSettingsViewModel(
             name: name,
             bundleURL: bundleURL,
-            panel: panel,
-            cpuField: cpuField,
-            memoryField: memoryField,
-            diskField: diskField,
-            sharedFolderField: sharedField,
-            sharedWritableCheckbox: sharedWritable,
-            saveButton: saveButton
+            cpuCount: "\(config.cpus)",
+            memoryGiB: "\(memoryGiB)",
+            diskDescription: diskDisplay,
+            sharedFolderPath: sharedPath,
+            sharedFolderWritable: sharedWritableDefault
         )
+        editViewModel = model
+
+        let rootView = EditSettingsView(
+            model: model,
+            browseSharedFolder: { [weak self] in self?.browseSharedFolderFromEditSheet() },
+            cancel: { [weak self] in self?.cancelEditSheet(nil) },
+            save: { [weak self] in self?.confirmEditSheet(nil) }
+        )
+
+        let hosting = NSHostingController(rootView: rootView)
+        panel.contentViewController = hosting
 
         editSheet = panel
         window.beginSheet(panel) { [weak self] _ in
             self?.editSheet = nil
-            self?.editForm = nil
+            self?.editViewModel = nil
         }
     }
 
     @objc private func cancelEditSheet(_ sender: Any?) {
-        guard let panel = editForm?.panel else { return }
+        guard let panel = editSheet else { return }
         window?.endSheet(panel)
     }
 
     @objc private func confirmEditSheet(_ sender: Any?) {
-        guard let form = editForm else { return }
+        guard let model = editViewModel, let panel = editSheet else { return }
 
-        guard let cpus = Int(form.cpuField.stringValue), cpus > 0 else {
+        guard let cpus = Int(model.cpuCount), cpus > 0 else {
             presentErrorAlert(message: "Invalid CPU Count", informative: "Enter a positive integer for vCPU count.")
             return
         }
 
-        guard let memoryValue = UInt64(form.memoryField.stringValue), memoryValue > 0 else {
+        guard let memoryValue = UInt64(model.memoryGiB), memoryValue > 0 else {
             presentErrorAlert(message: "Invalid Memory", informative: "Enter memory in GiB (positive number).")
             return
         }
 
-        let sharedPathValue = form.sharedFolderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sharedPathValue = model.sharedFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sharedPathValue.isEmpty {
             var isDirectory: ObjCBool = false
             if !FileManager.default.fileExists(atPath: sharedPathValue, isDirectory: &isDirectory) || !isDirectory.boolValue {
@@ -2092,13 +2117,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        window?.endSheet(form.panel)
+        window?.endSheet(panel)
 
-        let name = form.name
-        let bundleURL = form.bundleURL
+        let name = model.name
+        let bundleURL = model.bundleURL
         let bundlePath = bundleURL.path
         let sharedPath = sharedPathValue.isEmpty ? nil : sharedPathValue
-        let writable = (form.sharedWritableCheckbox.state == .on)
+        let writable = model.sharedFolderWritable
 
         viewModel.busyBundlePaths.insert(bundlePath)
         viewModel.statusMessage = "Updating \(name)…"
@@ -2461,13 +2486,18 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func browseSharedFolderFromEditSheet() {
+        guard let panel = editSheet, let viewModel = editViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.sharedFolderPath = path
+        }
+    }
+
     @objc private func browseSharedFolder(_ sender: Any?) {
         if createViewModel != nil {
             browseSharedFolderFromCreateSheet()
-        } else if let form = editForm {
-            presentSharedFolderPicker(attachedTo: form.panel) { path in
-                form.sharedFolderField.stringValue = path
-            }
+        } else if editViewModel != nil {
+            browseSharedFolderFromEditSheet()
         }
     }
 
