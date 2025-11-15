@@ -1,3 +1,4 @@
 vmctl
 *.app
 *.dmg
+.env

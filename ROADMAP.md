@@ -1,55 +1,62 @@
-ROADMAP
-=======
+# ROADMAP
 
-This roadmap groups suggested improvements by timeline so contributors can reason about what to tackle next. Each item references the current implementation to highlight why the feature matters.
+- [ ] Host Agent
+  - [ ] Install from DMG
+  - [ ] Copy/Paste
+  - [ ] Drag'n Drop
+  - [ ] Network Drives
+  - [ ] Inject HIDs
+- [ ] Suspend-Resume
 
-Near-Term (P0–P1)
------------------
+## Virtualization Framework Configuration Surface
 
-### 1. Bring CLI to Parity with Controller Capabilities
-- **Motivation** – `VMController` already exposes inventory data via `listVMs()` and deletion/update helpers (`vmctl.swift:525`, `vmctl.swift:633`), but the CLI only offers `init/install/start/stop/status/snapshot`.
-- **Scope** – Ship `vmctl list`, `vmctl delete`, and `vmctl config` commands that wrap the existing controller APIs so users can manage bundles without the GUI.
-- **Notes** – Keeps CLI output aligned with `VMApp` by reusing `VMListEntry.statusDescription`; minimal risk because the logic already exists in the library layer.
-
-### 2. Restore-Image Lifecycle Manager
-- **Motivation** – `discoverRestoreImage()` currently scans `~/Downloads` and `/Applications` for IPSW/installer artifacts (`vmctl.swift:138`), failing hard if nothing is found.
-- **Scope** – Add `vmctl images fetch/list/prune` commands (and matching UI affordances) that download, cache, and validate restore images via Apple’s softwareupdate/notary endpoints.
-- **Notes** – Improves onboarding by baking in the otherwise manual download step and enables the UI to present “Get Restore Image” when none are detected.
-
-### 3. Multi Shared-Folder Profiles
-- **Motivation** – `VMStoredConfig` persists only a single `sharedFolderPath` plus a Boolean for read-only state (`vmctl.swift:54`), limiting workflows that need separate project folders.
-- **Scope** – Allow multiple named shares per VM with read/write flags, expose them in the Edit Settings sheet, and let `vmctl start` override subsets.
-- **Notes** – Requires expanding the config schema (e.g., `[SharedDirectory]`) and updating both CLI parser and SwiftUI forms; migration code should keep legacy single-folder configs working.
-
-### 4. Disk Resize & Clone Templates
-- **Motivation** – `InitOptions` locks disk size at creation time (`vmctl.swift:430`), so resizing requires manual disk replacement and reinstalling macOS. Likewise, creating similar VMs forces repeated installs.
-- **Scope** – Provide `vmctl disk resize` to grow sparse images safely and add “Clone VM / Save as Template” options in both CLI and UI that duplicate bundles while regenerating hardware IDs.
-- **Notes** – Resizing can reuse APFS sparse file utilities; cloning should hook into `VMController.initVM` to avoid sharing identifiers.
-
-Mid-Term (P2)
--------------
-
-### 5. Space-Efficient Snapshots
-- **Motivation** – Snapshotting currently copies every artifact into `Snapshots/<name>` (`vmctl.swift:1161`), which is reliable but slow and storage-heavy.
-- **Scope** – Investigate APFS clone APIs or `diskutil apfs snapshot` integration to create copy-on-write checkpoints, plus UI to list/restore them.
-- **Notes** – Keep the existing coarse implementation as a fallback for external volumes that do not support cloning.
-
-### 6. Advanced Networking Options
-- **Motivation** – Every VM uses NAT via `VZNATNetworkDeviceAttachment` (`vmctl.swift:273`), so bridged networking, shared VLANs, or port forwarding require external tools.
-- **Scope** – Surface configuration for bridged interfaces, static MACs, and simple port-forwarding rules (especially for headless VMs) inside both the CLI and UI.
-- **Notes** – Requires new UI controls and validation to ensure the selected interface supports bridging; should default to NAT to preserve today’s behavior.
-
-Exploratory
------------
-
-### 7. Telemetry & Health Reporting
-- **Motivation** – The app already tails installer logs via pipes (`VMApp.swift:1360`), but there’s no persistent log viewer, uptime tracker, or guest heartbeat monitor once a VM is running.
-- **Scope** – Add an optional background agent that collects vmctl/app logs, exposes per-VM uptime, and notifies when a guest shuts down unexpectedly; consider exporting Prometheus-friendly stats.
-- **Notes** – This unlocks richer status cards in the SwiftUI list and makes the CLI more automation-friendly by exposing `vmctl status --json`.
-
-### 8. Automated Release & Update Channel
-- **Motivation** – The Makefile handles builds, signing, and notarization manually; there’s no documented channel for distributing new builds or auto-updating installed apps.
-- **Scope** – Define a GitHub Releases workflow (CI build, notarize, publish DMG) and optionally integrate Sparkle or `softwareupdate`-style feeds so the app can self-update.
-- **Notes** – Requires CI secrets management and careful notarization handling but dramatically lowers the friction to ship fixes.
-
-Revisit and reprioritize items as the project evolves; each feature above maps directly to existing code paths, making it straightforward to break them into actionable issues.
+- **Boot & platform**
+  - `VZMacOSBootLoader` + `VZMacPlatformConfiguration` boot macOS restore images using hardware model, machine identifier, auxiliary storage, and SE blobs.
+  - `VZLinuxBootLoader` loads a kernel, initrd, and command line for Linux guests; `VZGenericPlatformConfiguration` supplies a paravirtualized hardware model.
+  - For Windows/Linux UEFI flows, embed a custom firmware bundle and set `bootLoader` to `VZEFIBootLoader`.
+- **CPU & memory sizing**
+  - Tune `VZVirtualMachineConfiguration.cpuCount` and `memorySize` within host limits; Virtualization validates the combo before launch.
+  - Add `VZVirtioTraditionalMemoryBalloonDeviceConfiguration` to let the host reclaim guest memory dynamically.
+  - Configure NUMA-like behavior via multiple `VZVirtioMemoryBalloonDeviceConfiguration` objects when future APIs allow.
+- **Storage devices**
+  - Back `VZVirtioBlockDeviceConfiguration` with `VZDiskImageStorageDeviceAttachment` (raw/sparse files, read-only or read-write).
+  - Attach `VZUSBMassStorageDeviceConfiguration` for removable disks; the guest sees them as hot-pluggable USB drives.
+  - Use multiple block devices to model separate boot/data disks or to pass through prebuilt VHDX/RAW images.
+- **Shared folders & file systems**
+  - `VZVirtioFileSystemDeviceConfiguration` + `VZSingleDirectoryShare` expose one host directory; `VZMultipleDirectoryShare` maps multiple host paths under different tags.
+  - Control permissions with `readOnly` flags; combine with sandbox bookmarks to keep TCC happy.
+  - Linux guests can mount these via 9p (`mount -t virtiofs <tag> /mnt/...`) while macOS uses Finder’s shared folder UI.
+- **Networking**
+  - `VZNATNetworkDeviceAttachment` gives outbound-only internet via host NAT; minimal setup, good default.
+  - `VZBridgedNetworkDeviceAttachment` bridges the VM to a selected physical interface for LAN presence with its own DHCP lease.
+  - `VZFileHandleNetworkDeviceAttachment` lets you proxy packets through a tap device or custom process (VPN, firewall, host-only).
+- **Graphics & display**
+  - macOS guests: `VZMacGraphicsDeviceConfiguration` plus one or more `VZMacGraphicsDisplayConfiguration` entries controlling resolution and pixels-per-inch (mirrors real displays).
+  - Linux guests: `VZVirtioGraphicsDeviceConfiguration` with multiple scanouts, each specifying width/height for multi-monitor setups.
+  - Combine with `VZMacAuxiliaryStorage` / GPU entitlements to unlock high-res rendering and Metal acceleration.
+- **Input devices**
+  - `VZUSBKeyboardConfiguration` emulates a standard USB keyboard; supports international layouts.
+  - `VZUSBPointingDeviceConfiguration` offers relative mouse input; `VZUSBScreenCoordinatePointingDeviceConfiguration` maps host coordinates for touchpad-like behavior.
+  - Additional HID devices (gamepads, pens) arrive via `VZUSBDeviceShareConfiguration` when the host grants access.
+- **Audio**
+  - `VZVirtioSoundDeviceConfiguration` exposes output and input streams; each stream targets a host `AVAudioDevice`.
+  - Configure multiple outputs (speakers + headphones) or isolate inputs for conferencing tests.
+  - Optionally route audio through virtual loopback devices to capture/inspect samples.
+- **Serial & console**
+  - `VZVirtioConsoleDeviceSerialPortConfiguration` with `VZFileHandleSerialPortAttachment` pipes serial traffic to file handles, sockets, or pipes for automation.
+  - `VZSpiceAgentPortAttachment` (via `VZVirtioConsoleDeviceSpicePortConfiguration`) enables SPICE agent comms for clipboard and resolution sync in supporting guests.
+  - Multiple console ports let you split kernel logs, management shells, and guest agents.
+- **Entropy & RNG**
+  - `VZVirtioEntropyDeviceConfiguration` injects host randomness, improving cryptographic strength in fresh guests.
+  - Required for compliance scenarios where `/dev/random` quality matters.
+- **VSock / host-guest IPC**
+  - `VZVirtioSocketDeviceConfiguration` creates an AF_VSOCK transport; useful for RPC, file sync, agent comms without opening network ports.
+  - Combine with `NWConnection` or gRPC to build custom control planes.
+- **USB passthrough**
+  - `VZUSBMassStorageDeviceConfiguration` mounts disk images as thumb drives; hot-plug/hot-unplug by adding/removing devices.
+  - On macOS 15+, `VZUSBDeviceShareConfiguration` forwards real USB devices (HID, serial, etc.) when the host grants entitlement and user consent.
+  - Policy controls allow read-only vs read-write exposure per device.
+- **Installer workflows**
+  - `VZMacOSInstaller` automates macOS restore images, reporting progress callbacks for UI/CLI integration.
+  - Linux: `VZLinuxBootLoader` passes kernel arguments (`init=/sbin/init`, `console=ttyS0`) and initrd paths to boot installers directly.
+  - Windows/other OSes can boot via UEFI + ISO/VHDX images, scripted with unattended answer files through virtual CD/DVD attachments.
