@@ -657,6 +657,7 @@ struct MainView: View {
                 }
             }
             .listStyle(.plain)
+            .environment(\.defaultMinListRowHeight, 96)
             .padding(.horizontal, -16)
             .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: handleDrop)
         }
@@ -795,6 +796,7 @@ struct VMRowView: View {
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
         // Let the system draw selected row highlight (blue/gray). Do not override background.
         .contextMenu { actionMenuItems() }
     }
@@ -1077,6 +1079,92 @@ private struct EditSettingsView: View {
     }
 }
 
+private struct SettingsView: View {
+    @ObservedObject var model: VMCTLApp.SettingsViewModel
+    let browseVMFolder: () -> Void
+    let browseIPSWFolder: () -> Void
+    let verifyFeed: () -> Void
+    let resetDefaults: () -> Void
+    let cancel: () -> Void
+    let save: () -> Void
+
+    private let labelWidth: CGFloat = 130
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Choose where GhostVM stores virtual machines and IPSW downloads, and configure the IPSW feed. Changes apply immediately.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("VMs Folder") {
+                HStack(spacing: 8) {
+                    TextField("Path to virtual machines", text: $model.vmPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…", action: browseVMFolder)
+                }
+            }
+
+            labeledRow("IPSW Cache") {
+                HStack(spacing: 8) {
+                    TextField("Path to IPSW cache", text: $model.ipswPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…", action: browseIPSWFolder)
+                }
+            }
+
+            labeledRow("IPSW Feed URL") {
+                HStack(spacing: 8) {
+                    TextField(IPSWLibrary.defaultFeedURL.absoluteString, text: $model.feedURLString)
+                        .textFieldStyle(.roundedBorder)
+                    Button(action: verifyFeed) {
+                        if model.isVerifying {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                        } else {
+                            Text("Verify")
+                        }
+                    }
+                    .disabled(model.isVerifying)
+                }
+            }
+
+            if let message = model.verificationMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: model.verificationWasSuccessful == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(model.verificationWasSuccessful == true ? Color.green : Color.orange)
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, labelWidth + 4)
+            }
+
+            HStack {
+                Button("Reset to Default", action: resetDefaults)
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 // MARK: - App Delegate
 
 @main
@@ -1102,7 +1190,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private weak var settingsSheet: NSPanel?
     private var createViewModel: CreateVMViewModel?
     private var editViewModel: EditSettingsViewModel?
-    private var settingsForm: SettingsForm?
+    private var settingsViewModel: SettingsViewModel?
     private var installSessions: [String: InstallProgressSession] = [:]
     private var runningProcesses: [RunningProcess] = []
     private var managedSessions: [String: EmbeddedVMSession] = [:]
@@ -1183,13 +1271,19 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    private struct SettingsForm {
-        let panel: NSPanel
-        let pathField: NSTextField
-        let ipswPathField: NSTextField
-        let feedField: NSTextField
-        let verifyButton: NSButton
-        let verifyIndicator: NSImageView
+    final class SettingsViewModel: ObservableObject {
+        @Published var vmPath: String
+        @Published var ipswPath: String
+        @Published var feedURLString: String
+        @Published var verificationMessage: String?
+        @Published var verificationWasSuccessful: Bool?
+        @Published var isVerifying: Bool = false
+
+        init(vmPath: String, ipswPath: String, feedURLString: String) {
+            self.vmPath = vmPath
+            self.ipswPath = ipswPath
+            self.feedURLString = feedURLString
+        }
     }
 
     private struct InstallProgressSession {
@@ -2169,7 +2263,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 260),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -2180,136 +2274,44 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.center()
 
-        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
-        panel.contentView = contentView
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
-
-        contentView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-        ])
-
-        let descriptionLabel = NSTextField(labelWithString: "Choose where GhostVM stores .VirtualMachine bundles and IPSW downloads, and configure the IPSW feed used for restore image downloads. Changes take effect immediately.")
-        descriptionLabel.lineBreakMode = .byWordWrapping
-        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        stack.addArrangedSubview(descriptionLabel)
-
-        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
-
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.distribution = .fill
-
-            control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
-
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(control)
-            if let trailing = trailing {
-                row.addArrangedSubview(trailing)
-            }
-            return row
-        }
-
-        let pathField = NSTextField(string: vmRootDirectory.path)
-        pathField.placeholderString = VMCTLApp.defaultVMRootDirectory.path
-        let browseButton = NSButton(title: "Browse…", target: self, action: #selector(browseVMFolder(_:)))
-        stack.addArrangedSubview(labeledRow("VMs Folder", control: pathField, trailing: browseButton))
-
-        let ipswPathField = NSTextField(string: ipswLibrary.cacheDirectoryURL.path)
-        ipswPathField.placeholderString = IPSWLibrary.defaultCacheDirectory().path
-        let ipswBrowseButton = NSButton(title: "Browse…", target: self, action: #selector(browseIPSWFolder(_:)))
-        stack.addArrangedSubview(labeledRow("IPSW Cache", control: ipswPathField, trailing: ipswBrowseButton))
-
-        let feedField = NSTextField(string: ipswLibrary.feedURL.absoluteString)
-        feedField.placeholderString = IPSWLibrary.defaultFeedURL.absoluteString
-
-        let verifyButton = NSButton(title: "Verify", target: self, action: #selector(verifyFeedURL(_:)))
-        verifyButton.bezelStyle = .rounded
-
-        let verifyIndicator = NSImageView()
-        verifyIndicator.translatesAutoresizingMaskIntoConstraints = false
-        verifyIndicator.imageScaling = .scaleProportionallyDown
-        verifyIndicator.isHidden = true
-        verifyIndicator.widthAnchor.constraint(equalToConstant: 18).isActive = true
-        verifyIndicator.heightAnchor.constraint(equalToConstant: 18).isActive = true
-
-        let feedStack = NSStackView()
-        feedStack.orientation = .horizontal
-        feedStack.alignment = .centerY
-        feedStack.spacing = 6
-        feedField.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        feedStack.addArrangedSubview(feedField)
-        feedStack.addArrangedSubview(verifyButton)
-        feedStack.addArrangedSubview(verifyIndicator)
-
-        stack.addArrangedSubview(labeledRow("IPSW Feed URL", control: feedStack))
-
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillProportionally
-
-        let resetButton = NSButton(title: "Reset to Default", target: self, action: #selector(resetDirectoriesToDefault(_:)))
-        resetButton.bezelStyle = .rounded
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelSettingsSheet(_:)))
-        cancelButton.bezelStyle = .rounded
-
-        let saveButton = NSButton(title: "Save", target: self, action: #selector(confirmSettingsSheet(_:)))
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"
-
-        buttonRow.addArrangedSubview(resetButton)
-        buttonRow.addArrangedSubview(spacer)
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(saveButton)
-        stack.addArrangedSubview(buttonRow)
-
-        settingsForm = SettingsForm(
-            panel: panel,
-            pathField: pathField,
-            ipswPathField: ipswPathField,
-            feedField: feedField,
-            verifyButton: verifyButton,
-            verifyIndicator: verifyIndicator
+        let model = SettingsViewModel(
+            vmPath: vmRootDirectory.path,
+            ipswPath: ipswLibrary.cacheDirectoryURL.path,
+            feedURLString: ipswLibrary.feedURL.absoluteString
         )
+        settingsViewModel = model
+
+        let rootView = SettingsView(
+            model: model,
+            browseVMFolder: { [weak self] in self?.browseVMFolder() },
+            browseIPSWFolder: { [weak self] in self?.browseIPSWFolder() },
+            verifyFeed: { [weak self] in self?.verifyFeedURL() },
+            resetDefaults: { [weak self] in self?.resetDirectoriesToDefault() },
+            cancel: { [weak self] in self?.cancelSettingsSheet() },
+            save: { [weak self] in self?.confirmSettingsSheet() }
+        )
+
+        let hosting = NSHostingController(rootView: rootView)
+        panel.contentViewController = hosting
         settingsSheet = panel
 
         window.beginSheet(panel) { [weak self] _ in
             self?.settingsSheet = nil
-            self?.settingsForm = nil
+            self?.settingsViewModel = nil
         }
     }
 
-    @objc private func cancelSettingsSheet(_ sender: Any?) {
-        guard let panel = settingsForm?.panel else { return }
+    private func cancelSettingsSheet() {
+        pendingFeedVerificationTask?.cancel()
+        settingsViewModel?.isVerifying = false
+        guard let panel = settingsSheet else { return }
         window?.endSheet(panel)
     }
 
-    @objc private func confirmSettingsSheet(_ sender: Any?) {
-        guard let form = settingsForm else { return }
+    private func confirmSettingsSheet() {
+        guard let viewModel = settingsViewModel, let panel = settingsSheet else { return }
 
-        let rawPath = form.pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawPath = viewModel.vmPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawPath.isEmpty else {
             presentErrorAlert(message: "Folder Required", informative: "Enter or choose a folder to store your virtual machines.")
             return
@@ -2335,7 +2337,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        let rawIPSWPath = form.ipswPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawIPSWPath = viewModel.ipswPath.trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackIPSWPath = IPSWLibrary.defaultCacheDirectory().path
         let ipswInputPath = rawIPSWPath.isEmpty ? fallbackIPSWPath : rawIPSWPath
         let ipswExpanded = (ipswInputPath as NSString).expandingTildeInPath
@@ -2356,7 +2358,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        let trimmedFeed = form.feedField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedFeed = viewModel.feedURLString.trimmingCharacters(in: .whitespacesAndNewlines)
         let chosenFeedURL: URL
         if trimmedFeed.isEmpty {
             chosenFeedURL = IPSWLibrary.defaultFeedURL
@@ -2376,34 +2378,35 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        window?.endSheet(form.panel)
+        window?.endSheet(panel)
+        settingsViewModel = nil
         applyVMRootDirectory(selectedURL)
         ipswLibrary.feedURL = chosenFeedURL
         ipswManagerController?.feedURLDidChange()
     }
 
-    @objc private func browseVMFolder(_ sender: Any?) {
-        guard let form = settingsForm else { return }
-        presentSharedFolderPicker(attachedTo: form.panel) { path in
-            form.pathField.stringValue = path
+    private func browseVMFolder() {
+        guard let panel = settingsSheet, let viewModel = settingsViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.vmPath = path
         }
     }
 
-    @objc private func browseIPSWFolder(_ sender: Any?) {
-        guard let form = settingsForm else { return }
-        presentSharedFolderPicker(attachedTo: form.panel) { path in
-            form.ipswPathField.stringValue = path
+    private func browseIPSWFolder() {
+        guard let panel = settingsSheet, let viewModel = settingsViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.ipswPath = path
         }
     }
 
-    @objc private func resetDirectoriesToDefault(_ sender: Any?) {
-        settingsForm?.pathField.stringValue = VMCTLApp.defaultVMRootDirectory.path
-        settingsForm?.ipswPathField.stringValue = IPSWLibrary.defaultCacheDirectory().path
+    private func resetDirectoriesToDefault() {
+        settingsViewModel?.vmPath = VMCTLApp.defaultVMRootDirectory.path
+        settingsViewModel?.ipswPath = IPSWLibrary.defaultCacheDirectory().path
     }
 
-    @objc private func verifyFeedURL(_ sender: Any?) {
-        guard let form = settingsForm else { return }
-        let rawValue = form.feedField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    private func verifyFeedURL() {
+        guard let viewModel = settingsViewModel else { return }
+        let rawValue = viewModel.feedURLString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawValue.isEmpty else {
             presentErrorAlert(message: "Feed URL Required", informative: "Enter an IPSW feed URL before verifying.")
             return
@@ -2414,31 +2417,24 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
 
         pendingFeedVerificationTask?.cancel()
-        form.verifyIndicator.isHidden = true
-        let previousTitle = form.verifyButton.title
-        form.verifyButton.title = "Verifying…"
-        form.verifyButton.isEnabled = false
+        viewModel.isVerifying = true
+        viewModel.verificationMessage = nil
+        viewModel.verificationWasSuccessful = nil
 
         pendingFeedVerificationTask = ipswLibrary.verifyFeed(at: parsed) { [weak self] result in
             guard let self else { return }
             self.pendingFeedVerificationTask = nil
-            guard let currentForm = self.settingsForm else { return }
-            currentForm.verifyButton.title = previousTitle
-            currentForm.verifyButton.isEnabled = true
+            guard let currentModel = self.settingsViewModel else { return }
+            currentModel.isVerifying = false
 
             switch result {
             case .success(let entries):
-                if let indicator = self.settingsForm?.verifyIndicator {
-                    indicator.image = self.verificationSymbol(success: true)
-                    if #available(macOS 10.14, *) {
-                        indicator.contentTintColor = .systemGreen
-                    }
-                    indicator.toolTip = "Feed verified (\(entries.count) versions)."
-                    indicator.isHidden = false
-                }
+                currentModel.verificationWasSuccessful = true
+                currentModel.verificationMessage = "Feed verified (\(entries.count) versions)."
             case .failure(let error):
-                self.settingsForm?.verifyIndicator.isHidden = true
                 self.presentErrorAlert(message: "Failed to Verify Feed", informative: error.localizedDescription)
+                currentModel.verificationWasSuccessful = false
+                currentModel.verificationMessage = "Verification failed."
             }
         }
     }
@@ -2493,14 +2489,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func browseSharedFolder(_ sender: Any?) {
-        if createViewModel != nil {
-            browseSharedFolderFromCreateSheet()
-        } else if editViewModel != nil {
-            browseSharedFolderFromEditSheet()
-        }
-    }
-
     private func presentSharedFolderPicker(attachedTo panel: NSPanel, update: @escaping (String) -> Void) {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = false
@@ -2528,14 +2516,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     @objc private func showIPSWManagerFromMenu(_ sender: Any?) {
         presentIPSWManager()
-    }
-
-    private func verificationSymbol(success: Bool) -> NSImage? {
-        if #available(macOS 11.0, *) {
-            let name = success ? "checkmark.circle.fill" : "xmark.octagon.fill"
-            return NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        }
-        return NSImage(named: success ? NSImage.statusAvailableName : NSImage.statusUnavailableName)
     }
 
     // MARK: - IPSW Manager Window
