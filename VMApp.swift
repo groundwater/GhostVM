@@ -124,6 +124,267 @@ final class VMLibrary {
     }
 }
 
+private struct IPSWFeedEntry: Hashable {
+    let firmwareURL: URL
+    let productVersion: String
+    let buildVersion: String
+    let sha1: String?
+    let documentationURL: URL?
+
+    var identifier: String { firmwareURL.absoluteString }
+    var filename: String { firmwareURL.lastPathComponent }
+
+    var displayName: String {
+        return "macOS \(productVersion) (\(buildVersion))"
+    }
+
+    var detailDescription: String {
+        return filename
+    }
+}
+
+private struct IPSWCachedImage: Hashable {
+    let fileURL: URL
+    let sizeBytes: Int64?
+
+    var displayName: String {
+        if let sizeBytes {
+            return "\(fileURL.lastPathComponent) (\(Self.sizeFormatter.string(fromByteCount: sizeBytes)))"
+        }
+        return fileURL.lastPathComponent
+    }
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        return formatter
+    }()
+}
+
+final class IPSWLibrary {
+    private enum LibraryError: Error {
+        case feedUnavailable
+        case invalidResponse
+    }
+
+    private static let feedURLDefaultsKey = "VMCTLIPSWFeedURL"
+    static let defaultFeedURL = URL(string: "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml")!
+
+    private let defaults: UserDefaults
+    private let fileManager = FileManager.default
+    private let cacheDirectory: URL
+    private let session: URLSession
+
+    init(defaults: UserDefaults = .standard, session: URLSession = .shared) {
+        self.defaults = defaults
+        self.session = session
+        if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            cacheDirectory = supportDirectory.appendingPathComponent("VirtualMachineManager/IPSW", isDirectory: true)
+        } else {
+            cacheDirectory = fileManager.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/VirtualMachineManager/IPSW", isDirectory: true)
+        }
+    }
+
+    var feedURL: URL {
+        get {
+            if let stored = defaults.string(forKey: Self.feedURLDefaultsKey), let url = URL(string: stored) {
+                return url
+            }
+            return Self.defaultFeedURL
+        }
+        set {
+            defaults.set(newValue.absoluteString, forKey: Self.feedURLDefaultsKey)
+        }
+    }
+
+    func cachedImages() -> [IPSWCachedImage] {
+        ensureCacheDirectoryIfNeeded()
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        var images: [IPSWCachedImage] = []
+        for url in contents where url.pathExtension.lowercased() == "ipsw" {
+            if let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+               values.isRegularFile == true {
+                let size = values.fileSize.map { Int64($0) }
+                images.append(IPSWCachedImage(fileURL: url, sizeBytes: size))
+            }
+        }
+        return images.sorted { $0.fileURL.lastPathComponent.localizedCaseInsensitiveCompare($1.fileURL.lastPathComponent) == .orderedAscending }
+    }
+
+    @discardableResult
+    func fetchFeed(completion: @escaping (Result<[IPSWFeedEntry], Error>) -> Void) -> URLSessionDataTask {
+        var request = URLRequest(url: feedURL)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 60
+        let task = session.dataTask(with: request) { data, response, error in
+            if let error {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+                return
+            }
+            guard
+                let http = response as? HTTPURLResponse,
+                (200..<300).contains(http.statusCode),
+                let data
+            else {
+                DispatchQueue.main.async {
+                    completion(.failure(LibraryError.invalidResponse))
+                }
+                return
+            }
+            do {
+                let entries = try self.parseFeedEntries(data: data)
+                DispatchQueue.main.async {
+                    completion(.success(entries))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+        task.resume()
+        return task
+    }
+
+    @discardableResult
+    func download(entry: IPSWFeedEntry, completion: @escaping (Result<IPSWCachedImage, Error>) -> Void) -> URLSessionDownloadTask {
+        ensureCacheDirectoryIfNeeded()
+        let destination = cacheDirectory.appendingPathComponent(entry.filename, isDirectory: false)
+        let task = session.downloadTask(with: entry.firmwareURL) { [weak self] tempURL, _, error in
+            guard let self else { return }
+            if let error {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+                return
+            }
+            guard let tempURL else {
+                DispatchQueue.main.async {
+                    completion(.failure(LibraryError.feedUnavailable))
+                }
+                return
+            }
+            do {
+                try self.ensureCacheDirectory()
+                if self.fileManager.fileExists(atPath: destination.path) {
+                    try self.fileManager.removeItem(at: destination)
+                }
+                try self.fileManager.moveItem(at: tempURL, to: destination)
+                let values = try destination.resourceValues(forKeys: [.fileSizeKey])
+                let cached = IPSWCachedImage(fileURL: destination, sizeBytes: values.fileSize.map { Int64($0) })
+                DispatchQueue.main.async {
+                    completion(.success(cached))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+        task.resume()
+        return task
+    }
+
+    func deleteImage(at url: URL) throws {
+        try fileManager.removeItem(at: url)
+    }
+
+    private func ensureCacheDirectoryIfNeeded() {
+        if !fileManager.fileExists(atPath: cacheDirectory.path) {
+            try? ensureCacheDirectory()
+        }
+    }
+
+    private func ensureCacheDirectory() throws {
+        if !fileManager.fileExists(atPath: cacheDirectory.path) {
+            try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true, attributes: nil)
+        }
+    }
+
+    private func parseFeedEntries(data: Data) throws -> [IPSWFeedEntry] {
+        let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        let restoreDictionaries = collectRestoreDictionaries(from: plist)
+        var deduped: [String: IPSWFeedEntry] = [:]
+        for restore in restoreDictionaries {
+            guard
+                let firmwareString = restore["FirmwareURL"] as? String,
+                let firmwareURL = URL(string: firmwareString),
+                let productVersion = restore["ProductVersion"] as? String,
+                let buildVersion = restore["BuildVersion"] as? String
+            else {
+                continue
+            }
+            let sha1 = restore["FirmwareSHA1"] as? String
+            let documentationURL = (restore["DocumentationURL"] as? String).flatMap { URL(string: $0) }
+            let entry = IPSWFeedEntry(
+                firmwareURL: firmwareURL,
+                productVersion: productVersion,
+                buildVersion: buildVersion,
+                sha1: sha1,
+                documentationURL: documentationURL
+            )
+            deduped[entry.identifier] = entry
+        }
+        let sorted = deduped.values.sorted { lhs, rhs in
+            let leftParts = versionComponents(lhs.productVersion)
+            let rightParts = versionComponents(rhs.productVersion)
+            if leftParts != rightParts {
+                return compareVersionParts(leftParts, rightParts) > 0
+            }
+            if lhs.buildVersion != rhs.buildVersion {
+                return lhs.buildVersion > rhs.buildVersion
+            }
+            return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
+        }
+        return sorted
+    }
+
+    private func collectRestoreDictionaries(from object: Any) -> [[String: Any]] {
+        var restores: [[String: Any]] = []
+        if let dict = object as? [String: Any] {
+            for (key, value) in dict {
+                if key == "Restore", let restoreDict = value as? [String: Any] {
+                    restores.append(restoreDict)
+                } else {
+                    restores.append(contentsOf: collectRestoreDictionaries(from: value))
+                }
+            }
+        } else if let array = object as? [Any] {
+            for element in array {
+                restores.append(contentsOf: collectRestoreDictionaries(from: element))
+            }
+        }
+        return restores
+    }
+
+    private func versionComponents(_ version: String) -> [Int] {
+        return version.split(separator: ".").compactMap { Int($0) }
+    }
+
+    private func compareVersionParts(_ lhs: [Int], _ rhs: [Int]) -> Int {
+        let maxCount = max(lhs.count, rhs.count)
+        for index in 0..<maxCount {
+            let left = index < lhs.count ? lhs[index] : 0
+            let right = index < rhs.count ? rhs[index] : 0
+            if left != right {
+                return left - right
+            }
+        }
+        return 0
+    }
+}
+
 private func statusColor(for entry: VMController.VMListEntry) -> Color {
     if entry.isRunning {
         return Color(nsColor: .systemGreen)
@@ -444,8 +705,11 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var vmRootDirectory: URL
     private let controller: VMController
     private let library: VMLibrary
+    private let ipswLibrary: IPSWLibrary
     private let viewModel = VMListViewModel()
     private let recognizedBundleExtension = "virtualmachine"
+    private let restoreManageMenuTag = -9000
+    private var cachedRestoreImages: [IPSWCachedImage] = []
 
     private var window: NSWindow!
     private var statusTimer: Timer?
@@ -460,6 +724,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var managedSessions: [String: EmbeddedVMSession] = [:]
     private var pendingLaunchPaths: Set<String> = []
     private var awaitingQuitConfirmation = false
+    private var ipswManagerController: IPSWManagerWindowController?
 
     private struct RunningProcess {
         let process: Process
@@ -472,10 +737,12 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let cpuField: NSTextField
         let memoryField: NSTextField
         let diskField: NSTextField
-        let restoreImageField: NSTextField
+        let restoreSelectionPopUp: NSPopUpButton
         let sharedFolderField: NSTextField
         let sharedWritableCheckbox: NSButton
         let createButton: NSButton
+        var customRestoreURL: URL?
+        var selectedRestorePath: String?
     }
 
     private struct EditForm {
@@ -493,6 +760,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private struct SettingsForm {
         let panel: NSPanel
         let pathField: NSTextField
+        let feedField: NSTextField
     }
 
     private struct InstallProgressSession {
@@ -520,6 +788,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
         controller = VMController(rootDirectory: vmRootDirectory)
         library = VMLibrary(defaults: userDefaults)
+        ipswLibrary = IPSWLibrary(defaults: userDefaults)
+        cachedRestoreImages = ipswLibrary.cachedImages()
         library.addBundles(in: vmRootDirectory)
         super.init()
     }
@@ -1234,10 +1504,12 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         diskField.placeholderString = "GiB (minimum 20)"
         stack.addArrangedSubview(labeledRow("Disk", control: diskField))
 
-        let restoreField = NSTextField(string: "")
-        restoreField.placeholderString = "Path to macOS .ipsw restore image"
+        let restoreMenu = NSPopUpButton(frame: .zero, pullsDown: false)
+        restoreMenu.autoenablesItems = false
+        restoreMenu.target = self
+        restoreMenu.action = #selector(restoreSelectionChanged(_:))
         let restoreBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseRestoreImage))
-        stack.addArrangedSubview(labeledRow("Restore Image*", control: restoreField, trailing: restoreBrowse))
+        stack.addArrangedSubview(labeledRow("Restore Image*", control: restoreMenu, trailing: restoreBrowse))
 
         let sharedField = NSTextField(string: "")
         sharedField.placeholderString = "Optional shared folder path"
@@ -1276,16 +1548,100 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             cpuField: cpuField,
             memoryField: memoryField,
             diskField: diskField,
-            restoreImageField: restoreField,
+            restoreSelectionPopUp: restoreMenu,
             sharedFolderField: sharedField,
             sharedWritableCheckbox: sharedWritable,
-            createButton: createButton
+            createButton: createButton,
+            customRestoreURL: nil,
+            selectedRestorePath: nil
         )
         createSheet = panel
+
+        refreshRestoreSelections()
 
         window.beginSheet(panel) { [weak self] _ in
             self?.createSheet = nil
             self?.createForm = nil
+        }
+    }
+
+    private func refreshRestoreSelections(selecting path: String? = nil) {
+        guard let form = createForm else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        var firstSelectableItem: NSMenuItem?
+        var placeholderItem: NSMenuItem?
+
+        if let customURL = form.customRestoreURL {
+            let customItem = NSMenuItem(title: "Custom: \(customURL.lastPathComponent)", action: nil, keyEquivalent: "")
+            customItem.representedObject = customURL.path
+            customItem.toolTip = customURL.path
+            menu.addItem(customItem)
+            firstSelectableItem = customItem
+        }
+
+        for image in cachedRestoreImages {
+            let item = NSMenuItem(title: image.displayName, action: nil, keyEquivalent: "")
+            item.representedObject = image.fileURL.path
+            item.toolTip = image.fileURL.path
+            menu.addItem(item)
+            if firstSelectableItem == nil {
+                firstSelectableItem = item
+            }
+        }
+
+        if firstSelectableItem == nil {
+            let placeholder = NSMenuItem(title: "No cached restore images", action: nil, keyEquivalent: "")
+            placeholder.isEnabled = false
+            menu.addItem(placeholder)
+            placeholderItem = placeholder
+        }
+
+        menu.addItem(NSMenuItem.separator())
+        let manageItem = NSMenuItem(title: "Manage…", action: nil, keyEquivalent: "")
+        manageItem.tag = restoreManageMenuTag
+        menu.addItem(manageItem)
+
+        form.restoreSelectionPopUp.menu = menu
+        form.restoreSelectionPopUp.target = self
+        form.restoreSelectionPopUp.action = #selector(restoreSelectionChanged(_:))
+
+        let desiredPath = path ?? form.selectedRestorePath
+        if let desiredPath,
+           let targetItem = menu.items.first(where: { ($0.representedObject as? String) == desiredPath }) {
+            let index = menu.index(of: targetItem)
+            form.restoreSelectionPopUp.selectItem(at: index)
+            createForm?.selectedRestorePath = desiredPath
+        } else if let first = firstSelectableItem {
+            let index = menu.index(of: first)
+            form.restoreSelectionPopUp.selectItem(at: index)
+            createForm?.selectedRestorePath = first.representedObject as? String
+        } else if let placeholder = placeholderItem {
+            let index = menu.index(of: placeholder)
+            form.restoreSelectionPopUp.selectItem(at: index)
+            createForm?.selectedRestorePath = nil
+        } else {
+            form.restoreSelectionPopUp.select(nil)
+            createForm?.selectedRestorePath = nil
+        }
+    }
+
+    @objc private func restoreSelectionChanged(_ sender: NSPopUpButton) {
+        guard let item = sender.selectedItem else {
+            createForm?.selectedRestorePath = nil
+            return
+        }
+        if item.tag == restoreManageMenuTag {
+            let previousPath = createForm?.selectedRestorePath
+            presentIPSWManager()
+            refreshRestoreSelections(selecting: previousPath)
+            return
+        }
+        if let path = item.representedObject as? String {
+            createForm?.selectedRestorePath = path
+        } else {
+            createForm?.selectedRestorePath = nil
         }
     }
 
@@ -1318,9 +1674,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             return
         }
 
-        let restorePath = form.restoreImageField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !restorePath.isEmpty else {
-            presentErrorAlert(message: "Restore Image Required", informative: "Select a macOS .ipsw restore image before creating the VM.")
+        guard let selectedRestorePath = form.selectedRestorePath else {
+            presentErrorAlert(message: "Restore Image Required", informative: "Select or browse for a macOS .ipsw restore image before creating the VM.")
+            return
+        }
+        let normalizedRestorePath = (selectedRestorePath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: normalizedRestorePath) else {
+            presentErrorAlert(message: "Restore Image Missing", informative: "The selected restore image could not be found at \(normalizedRestorePath).")
+            refreshRestoreSelections()
             return
         }
 
@@ -1328,7 +1689,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         options.cpus = cpus
         options.memoryGiB = UInt64(memory)
         options.diskGiB = UInt64(disk)
-        options.restoreImagePath = restorePath
+        options.restoreImagePath = normalizedRestorePath
 
         let sharedPath = form.sharedFolderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sharedPath.isEmpty {
@@ -1661,7 +2022,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
 
-        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .VirtualMachine bundles. Changes take effect immediately.")
+        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .VirtualMachine bundles and configure the IPSW feed used for restore image downloads. Changes take effect immediately.")
         descriptionLabel.lineBreakMode = .byWordWrapping
         descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(descriptionLabel)
@@ -1692,6 +2053,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let browseButton = NSButton(title: "Browse…", target: self, action: #selector(browseVMFolder(_:)))
         stack.addArrangedSubview(labeledRow("VMs Folder", control: pathField, trailing: browseButton))
 
+        let feedField = NSTextField(string: ipswLibrary.feedURL.absoluteString)
+        feedField.placeholderString = IPSWLibrary.defaultFeedURL.absoluteString
+        stack.addArrangedSubview(labeledRow("IPSW Feed URL", control: feedField))
+
         let buttonRow = NSStackView()
         buttonRow.orientation = .horizontal
         buttonRow.alignment = .centerY
@@ -1718,7 +2083,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         buttonRow.addArrangedSubview(saveButton)
         stack.addArrangedSubview(buttonRow)
 
-        settingsForm = SettingsForm(panel: panel, pathField: pathField)
+        settingsForm = SettingsForm(panel: panel, pathField: pathField, feedField: feedField)
         settingsSheet = panel
 
         window.beginSheet(panel) { [weak self] _ in
@@ -1761,8 +2126,21 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
         }
 
+        let trimmedFeed = form.feedField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosenFeedURL: URL
+        if trimmedFeed.isEmpty {
+            chosenFeedURL = IPSWLibrary.defaultFeedURL
+        } else if let parsed = URL(string: trimmedFeed), let scheme = parsed.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+            chosenFeedURL = parsed
+        } else {
+            presentErrorAlert(message: "Invalid Feed URL", informative: "Enter a valid HTTP or HTTPS URL for the IPSW feed.")
+            return
+        }
+
         window?.endSheet(form.panel)
         applyVMRootDirectory(selectedURL)
+        ipswLibrary.feedURL = chosenFeedURL
+        ipswManagerController?.feedURLDidChange()
     }
 
     @objc private func browseVMFolder(_ sender: Any?) {
@@ -1785,6 +2163,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         refreshVMs()
     }
 
+    private func refreshCachedRestoreImages() {
+        cachedRestoreImages = ipswLibrary.cachedImages()
+        if createForm != nil {
+            refreshRestoreSelections()
+        }
+    }
+
     @objc private func browseRestoreImage(_ sender: Any?) {
         guard let form = createForm else { return }
         let panel = NSOpenPanel()
@@ -1796,9 +2181,12 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
         panel.title = "Select Restore Image"
         panel.prompt = "Choose"
-        panel.beginSheetModal(for: form.panel) { response in
+        panel.beginSheetModal(for: form.panel) { [weak self] response in
+            guard let self else { return }
             if response == .OK, let url = panel.url {
-                form.restoreImageField.stringValue = url.path
+                self.createForm?.customRestoreURL = url
+                self.createForm?.selectedRestorePath = url.path
+                self.refreshRestoreSelections(selecting: url.path)
             }
         }
     }
@@ -1825,6 +2213,415 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             if response == .OK, let url = openPanel.url {
                 update(url.path)
             }
+        }
+    }
+
+    private func presentIPSWManager() {
+        if ipswManagerController == nil {
+            ipswManagerController = IPSWManagerWindowController(library: ipswLibrary) { [weak self] in
+                self?.refreshCachedRestoreImages()
+            }
+        }
+        if let window = ipswManagerController?.window {
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
+
+    // MARK: - IPSW Manager Window
+
+    private final class IPSWManagerWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+        private let library: IPSWLibrary
+        private let onCacheChanged: () -> Void
+
+        private let tableView = NSTableView(frame: .zero)
+        private let statusLabel = NSTextField(labelWithString: "")
+        private let spinner = NSProgressIndicator()
+        private let reloadButton = NSButton(title: "Reload", target: nil, action: nil)
+        private let contextMenu = NSMenu()
+
+        private var entries: [IPSWFeedEntry] = []
+        private var cachedByFilename: [String: IPSWCachedImage] = [:]
+        private var downloading: Set<String> = []
+        private var feedTask: URLSessionDataTask?
+        private var contextRow: Int = -1
+
+        private let infoColumnIdentifier = NSUserInterfaceItemIdentifier("ipsw.info")
+        private let actionColumnIdentifier = NSUserInterfaceItemIdentifier("ipsw.action")
+        private let infoCellIdentifier = NSUserInterfaceItemIdentifier("ipsw.info.cell")
+        private let actionCellIdentifier = NSUserInterfaceItemIdentifier("ipsw.action.cell")
+
+        init(library: IPSWLibrary, onCacheChanged: @escaping () -> Void) {
+            self.library = library
+            self.onCacheChanged = onCacheChanged
+            super.init(window: nil)
+            buildWindow()
+            reloadCachedImages()
+            refreshFeed()
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        func feedURLDidChange() {
+            feedTask?.cancel()
+            refreshFeed()
+        }
+
+        // MARK: - UI Construction
+
+        private func buildWindow() {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 620, height: 420),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Manage Restore Images"
+            window.minSize = NSSize(width: 520, height: 360)
+
+            let contentView = NSView(frame: window.contentRect(forFrameRect: window.frame))
+            window.contentView = contentView
+
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 12
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
+            contentView.addSubview(stack)
+
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+                stack.topAnchor.constraint(equalTo: contentView.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
+            ])
+
+            let descriptionRow = NSStackView()
+            descriptionRow.orientation = .horizontal
+            descriptionRow.alignment = .centerY
+            descriptionRow.spacing = 8
+
+            let descriptionLabel = NSTextField(labelWithString: "Browse available macOS restore images from your configured feed. Download images for offline creation or delete cached copies.")
+            descriptionLabel.lineBreakMode = .byWordWrapping
+            descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isDisplayedWhenStopped = false
+
+            reloadButton.target = self
+            reloadButton.action = #selector(reloadFeed(_:))
+            reloadButton.bezelStyle = .rounded
+
+            let spacer = NSView()
+            spacer.translatesAutoresizingMaskIntoConstraints = false
+            spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+            descriptionRow.addArrangedSubview(descriptionLabel)
+            descriptionRow.addArrangedSubview(spinner)
+            descriptionRow.addArrangedSubview(spacer)
+            descriptionRow.addArrangedSubview(reloadButton)
+            stack.addArrangedSubview(descriptionRow)
+
+            let scrollView = NSScrollView()
+            scrollView.translatesAutoresizingMaskIntoConstraints = false
+            scrollView.hasVerticalScroller = true
+            scrollView.documentView = tableView
+            scrollView.drawsBackground = false
+
+            tableView.translatesAutoresizingMaskIntoConstraints = false
+            tableView.delegate = self
+            tableView.dataSource = self
+            tableView.headerView = nil
+            tableView.usesAlternatingRowBackgroundColors = true
+            tableView.selectionHighlightStyle = .none
+            tableView.intercellSpacing = NSSize(width: 0, height: 6)
+            tableView.rowHeight = 58
+            tableView.columnAutoresizingStyle = .uniformColumnResizingStyle
+
+            let infoColumn = NSTableColumn(identifier: infoColumnIdentifier)
+            infoColumn.title = ""
+            infoColumn.minWidth = 320
+            infoColumn.resizingMask = .autoresizingMask
+            tableView.addTableColumn(infoColumn)
+
+            let actionColumn = NSTableColumn(identifier: actionColumnIdentifier)
+            actionColumn.title = ""
+            actionColumn.width = 140
+            actionColumn.minWidth = 110
+            actionColumn.maxWidth = 160
+            actionColumn.resizingMask = []
+            tableView.addTableColumn(actionColumn)
+
+            stack.addArrangedSubview(scrollView)
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
+
+            statusLabel.textColor = .secondaryLabelColor
+            statusLabel.lineBreakMode = .byWordWrapping
+            stack.addArrangedSubview(statusLabel)
+
+            contextMenu.delegate = self
+            contextMenu.autoenablesItems = false
+            tableView.menu = contextMenu
+
+            self.window = window
+        }
+
+        // MARK: - Actions
+
+        @objc private func reloadFeed(_ sender: Any?) {
+            refreshFeed()
+        }
+
+        @objc private func handleActionButton(_ sender: NSButton) {
+            guard let entry = sender.representedObject as? IPSWFeedEntry else { return }
+            if cachedByFilename[entry.filename] != nil {
+                deleteEntry(for: entry)
+            } else {
+                startDownload(for: entry)
+            }
+        }
+
+        @objc private func deleteFromMenu(_ sender: Any?) {
+            guard contextRow >= 0, contextRow < entries.count else { return }
+            let entry = entries[contextRow]
+            deleteEntry(for: entry)
+        }
+
+        @objc private func revealFromMenu(_ sender: Any?) {
+            guard contextRow >= 0, contextRow < entries.count else { return }
+            let entry = entries[contextRow]
+            guard let cached = cachedByFilename[entry.filename] else { return }
+            NSWorkspace.shared.activateFileViewerSelecting([cached.fileURL])
+        }
+
+        // MARK: - Menu Delegate
+
+        func menuNeedsUpdate(_ menu: NSMenu) {
+            menu.removeAllItems()
+            contextRow = tableView.clickedRow
+            guard contextRow >= 0, contextRow < entries.count else { return }
+            let entry = entries[contextRow]
+            guard cachedByFilename[entry.filename] != nil else { return }
+            let deleteItem = NSMenuItem(title: "Delete", action: #selector(deleteFromMenu(_:)), keyEquivalent: "")
+            deleteItem.target = self
+            menu.addItem(deleteItem)
+            let revealItem = NSMenuItem(title: "Show in Finder", action: #selector(revealFromMenu(_:)), keyEquivalent: "")
+            revealItem.target = self
+            menu.addItem(revealItem)
+        }
+
+        // MARK: - Table View
+
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            return entries.count
+        }
+
+        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+            return false
+        }
+
+        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
+            return 58
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard row < entries.count else { return nil }
+            let entry = entries[row]
+            if tableColumn?.identifier == infoColumnIdentifier {
+                let view = (tableView.makeView(withIdentifier: infoCellIdentifier, owner: self) as? IPSWInfoCellView) ?? IPSWInfoCellView()
+                view.identifier = infoCellIdentifier
+                view.configure(with: entry, cached: cachedByFilename[entry.filename] != nil)
+                return view
+            }
+            if tableColumn?.identifier == actionColumnIdentifier {
+                let view = (tableView.makeView(withIdentifier: actionCellIdentifier, owner: self) as? IPSWActionCellView) ?? IPSWActionCellView()
+                view.identifier = actionCellIdentifier
+                let isCached = cachedByFilename[entry.filename] != nil
+                let isDownloading = downloading.contains(entry.identifier)
+                view.button.target = self
+                view.button.action = #selector(handleActionButton(_:))
+                view.button.representedObject = entry
+                view.configure(isCached: isCached, isDownloading: isDownloading)
+                return view
+            }
+            return nil
+        }
+
+        // MARK: - Data Handling
+
+        private func reloadCachedImages() {
+            let cached = library.cachedImages()
+            cachedByFilename = Dictionary(uniqueKeysWithValues: cached.map { ($0.fileURL.lastPathComponent, $0) })
+        }
+
+        private func refreshFeed() {
+            feedTask?.cancel()
+            setLoading(true)
+            updateStatus("Loading restore images…")
+            feedTask = library.fetchFeed { [weak self] result in
+                guard let self else { return }
+                self.setLoading(false)
+                switch result {
+                case .success(let entries):
+                    self.entries = entries
+                    self.updateStatus("Showing \(entries.count) restore images from \(self.library.feedURL.host ?? self.library.feedURL.absoluteString).")
+                case .failure(let error):
+                    self.entries = []
+                    self.updateStatus("Failed to load restore images: \(error.localizedDescription)")
+                }
+                self.tableView.reloadData()
+            }
+        }
+
+        private func startDownload(for entry: IPSWFeedEntry) {
+            guard !downloading.contains(entry.identifier) else { return }
+            downloading.insert(entry.identifier)
+            tableView.reloadData()
+            updateStatus("Downloading \(entry.filename)…")
+            library.download(entry: entry) { [weak self] result in
+                guard let self else { return }
+                self.downloading.remove(entry.identifier)
+                switch result {
+                case .success:
+                    self.reloadCachedImages()
+                    self.tableView.reloadData()
+                    self.updateStatus("Downloaded \(entry.filename).")
+                    self.onCacheChanged()
+                case .failure(let error):
+                    self.tableView.reloadData()
+                    self.updateStatus("Failed to download \(entry.filename): \(error.localizedDescription)")
+                }
+            }
+        }
+
+        private func deleteEntry(for entry: IPSWFeedEntry) {
+            guard let cached = cachedByFilename[entry.filename] else { return }
+            do {
+                try library.deleteImage(at: cached.fileURL)
+                reloadCachedImages()
+                tableView.reloadData()
+                updateStatus("Deleted \(cached.fileURL.lastPathComponent).")
+                onCacheChanged()
+            } catch {
+                updateStatus("Failed to delete \(cached.fileURL.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        private func setLoading(_ loading: Bool) {
+            if loading {
+                spinner.startAnimation(nil)
+                reloadButton.isEnabled = false
+            } else {
+                spinner.stopAnimation(nil)
+                reloadButton.isEnabled = true
+            }
+        }
+
+        private func updateStatus(_ message: String) {
+            statusLabel.stringValue = message
+        }
+    }
+
+    private final class IPSWInfoCellView: NSTableCellView {
+        private let titleField = NSTextField(labelWithString: "")
+        private let detailField = NSTextField(labelWithString: "")
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            setup()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            setup()
+        }
+
+        private func setup() {
+            titleField.font = .systemFont(ofSize: 13, weight: .medium)
+            titleField.lineBreakMode = .byTruncatingTail
+            detailField.font = .systemFont(ofSize: 11)
+            detailField.textColor = .secondaryLabelColor
+            detailField.lineBreakMode = .byTruncatingTail
+
+            let stack = NSStackView()
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 2
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(titleField)
+            stack.addArrangedSubview(detailField)
+            addSubview(stack)
+
+            NSLayoutConstraint.activate([
+                stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+                stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+                stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+        }
+
+        func configure(with entry: IPSWFeedEntry, cached: Bool) {
+            titleField.stringValue = entry.displayName
+            if cached {
+                detailField.stringValue = "\(entry.detailDescription) · Cached"
+            } else {
+                detailField.stringValue = entry.detailDescription
+            }
+        }
+    }
+
+    private final class IPSWActionCellView: NSTableCellView {
+        let button = NSButton(title: "Download", target: nil, action: nil)
+        let spinner = NSProgressIndicator()
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            setup()
+        }
+
+        required init?(coder: NSCoder) {
+            super.init(coder: coder)
+            setup()
+        }
+
+        private func setup() {
+            button.bezelStyle = .rounded
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isDisplayedWhenStopped = false
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+
+            let stack = NSStackView()
+            stack.orientation = .horizontal
+            stack.alignment = .centerY
+            stack.spacing = 8
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            stack.addArrangedSubview(button)
+            stack.addArrangedSubview(spinner)
+            addSubview(stack)
+
+            NSLayoutConstraint.activate([
+                stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+                stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+            ])
+        }
+
+        func configure(isCached: Bool, isDownloading: Bool) {
+            if isDownloading {
+                button.title = "Download"
+                button.isEnabled = false
+                spinner.startAnimation(nil)
+                spinner.isHidden = false
+                return
+            }
+            spinner.stopAnimation(nil)
+            spinner.isHidden = true
+            button.isEnabled = true
+            button.title = isCached ? "Delete" : "Download"
         }
     }
 
