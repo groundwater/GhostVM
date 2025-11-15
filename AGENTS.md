@@ -13,7 +13,7 @@ Your mission, if you choose to accept it:
   - Add comments if you make changes to the original scope, with an explaination of why.
 
 <IMPORTANT>
-When done any task, run: `terminal-notifier -title "$TITLE" -message "$MESSAGE" -sound default` with appropriate text.
+When done any task, run: `terminal-notifier -title "$TITLE" -message "$MESSAGE" -sound default -sender com.apple.Terminal` with appropriate text.
 </IMPORTANT>
 
 ## GitHub URL

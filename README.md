@@ -26,10 +26,36 @@ Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.ap
 ```bash
 make            # builds ./vmctl (codesigned ad-hoc with entitlements)
 make app        # builds VirtualMachineManager.app alongside vmctl
+make dmg        # produces a signed, notarized DMG ready for distribution
 make clean      # removes the binary and app bundle
 ```
 
 The `make` targets rely on `swiftc` to compile both targets and link against the system frameworks in `/System/Library/Frameworks`. By default the binaries are ad-hoc signed so the virtualization entitlement is present. Override `CODESIGN_ID` with a Developer ID or other identity if you prefer. You can also override `SWIFTC`, `TARGET`, or `APP_TARGET` for custom toolchains or names.
+
+### Packaging, Signing, and Notarization
+
+Local builds (`make`/`make app`) intentionally default to ad-hoc codesigning (`CODESIGN_ID=-`) so you can iterate without touching Apple’s notarization services. When you’re ready to ship the app elsewhere, run `make dmg`. That target:
+
+1. Re-signs the compiled app bundle (including the embedded `vmctl`) with Hardened Runtime using `RELEASE_CODESIGN_ID`.
+2. Creates a traditional `/Applications`-style DMG via `hdiutil`.
+3. Submits the DMG to Apple with `xcrun notarytool`, waits for approval, and staples the ticket to both the `.app` and `.dmg`.
+
+Run `make notary-info` at any time to see the Developer ID identity and Team ID discovered on your machine plus the exact `notarytool store-credentials` command to create a reusable profile. If a profile already exists, `make dmg` will auto-populate `RELEASE_CODESIGN_ID`, `NOTARY_KEYCHAIN_PROFILE`, and `NOTARY_TEAM_ID` so you only need to set overrides when using a different identity.
+
+To use it, set a Developer ID identity and either a `notarytool` keychain profile or direct credentials:
+
+```bash
+# One-time: store credentials so notarytool can use a profile
+xcrun notarytool store-credentials vm-manager-notary --apple-id "you@example.com" \
+  --team-id ABCDE12345 --password "app-specific-password"
+
+# Release build
+RELEASE_CODESIGN_ID="Developer ID Application: Your Name (ABCDE12345)" \
+NOTARY_KEYCHAIN_PROFILE=vm-manager-notary \
+make dmg
+```
+
+Alternatively, omit `NOTARY_KEYCHAIN_PROFILE` and provide `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, and `NOTARY_PASSWORD` env vars when invoking `make dmg`. The finished DMG appears at the repository root; `VirtualMachineManager.app` inside it is already stapled, so users can copy it directly into `/Applications` without Gatekeeper warnings.
 
 ## Usage
 

@@ -10,8 +10,19 @@ APP_SOURCES := VMApp.swift vmctl.swift
 APP_BUNDLE := $(APP_TARGET).app
 APP_PLIST := VMApp-Info.plist
 APP_DISPLAY_NAME ?= $(APP_TARGET)
+DMG ?= $(APP_TARGET).dmg
+DMG_VOLNAME ?= $(APP_DISPLAY_NAME)
+DMG_STAGING := build/dmg-root
+DEFAULT_DEVELOPER_ID := $(shell security find-identity -p codesigning -v 2>/dev/null | grep "Developer ID Application" | head -n1 | sed -E 's/.*"(Developer ID Application: [^"]+)".*/\1/' )
+DEFAULT_TEAM_ID := $(shell security find-identity -p codesigning -v 2>/dev/null | grep "Developer ID Application" | head -n1 | sed -E 's/.*Developer ID Application: .* \(([A-Z0-9]+)\)".*/\1/' )
+DEFAULT_NOTARY_PROFILE := $(shell xcrun notarytool list-profiles 2>/dev/null | awk 'NR>2 && $$1!="--" {print $$1; exit}')
+RELEASE_CODESIGN_ID ?= $(DEFAULT_DEVELOPER_ID)
+NOTARY_KEYCHAIN_PROFILE ?= $(DEFAULT_NOTARY_PROFILE)
+NOTARY_APPLE_ID ?=
+NOTARY_TEAM_ID ?= $(DEFAULT_TEAM_ID)
+NOTARY_PASSWORD ?=
 
-.PHONY: all build clean run app
+.PHONY: all build clean run app dmg notary-info
 
 all: build
 
@@ -41,6 +52,56 @@ app: build
 		echo "Codesigning $(APP_BUNDLE) with ad-hoc identity to apply entitlements."; \
 	fi
 	codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)"
+
+dmg: app
+	@if [ -z "$(RELEASE_CODESIGN_ID)" ] || [ "$(RELEASE_CODESIGN_ID)" = "-" ]; then \
+		echo "RELEASE_CODESIGN_ID must be set to a valid signing identity (e.g. 'Developer ID Application: Your Name (TEAMID)')."; \
+		echo "Run 'make notary-info' to see detected identities."; \
+		exit 1; \
+	fi
+	@echo "Re-signing app bundle with hardened runtime using $(RELEASE_CODESIGN_ID)"
+	codesign --force --options runtime --timestamp --sign "$(RELEASE_CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)/Contents/MacOS/$(APP_TARGET)"
+	codesign --force --options runtime --timestamp --sign "$(RELEASE_CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)/Contents/MacOS/vmctl"
+	codesign --force --options runtime --timestamp --sign "$(RELEASE_CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" --deep "$(APP_BUNDLE)"
+	codesign --verify --deep --strict "$(APP_BUNDLE)"
+	@echo "Creating staged DMG payload"
+	rm -rf "$(DMG_STAGING)"
+	mkdir -p "$(DMG_STAGING)"
+	cp -R "$(APP_BUNDLE)" "$(DMG_STAGING)/"
+	ln -sf /Applications "$(DMG_STAGING)/Applications"
+	hdiutil create -fs HFS+ -volname "$(DMG_VOLNAME)" -srcfolder "$(DMG_STAGING)" -format UDZO -ov "$(DMG)"
+	rm -rf "$(DMG_STAGING)"
+	@echo "Submitting $(DMG) for notarization"
+	@if [ -n "$(NOTARY_KEYCHAIN_PROFILE)" ]; then \
+		xcrun notarytool submit "$(DMG)" --keychain-profile "$(NOTARY_KEYCHAIN_PROFILE)" --wait; \
+	elif [ -n "$(NOTARY_APPLE_ID)" ] && [ -n "$(NOTARY_TEAM_ID)" ] && [ -n "$(NOTARY_PASSWORD)" ]; then \
+		xcrun notarytool submit "$(DMG)" --apple-id "$(NOTARY_APPLE_ID)" --team-id "$(NOTARY_TEAM_ID)" --password "$(NOTARY_PASSWORD)" --wait; \
+	else \
+		echo "Set NOTARY_KEYCHAIN_PROFILE or NOTARY_APPLE_ID/NOTARY_TEAM_ID/NOTARY_PASSWORD before running 'make dmg'."; \
+		echo "Run 'make notary-info' for commands that create these credentials."; \
+		rm -f "$(DMG)"; \
+		exit 1; \
+	fi
+	xcrun stapler staple "$(APP_BUNDLE)"
+	xcrun stapler staple "$(DMG)"
+	spctl --assess --type execute "$(APP_BUNDLE)"
+	@echo "DMG ready: $(DMG)"
+
+notary-info:
+	@echo "Detected Developer ID Application identity: $(if $(DEFAULT_DEVELOPER_ID),$(DEFAULT_DEVELOPER_ID),<none>)"
+	@echo "Detected Team ID: $(if $(DEFAULT_TEAM_ID),$(DEFAULT_TEAM_ID),<none>)"
+	@if [ -n "$(DEFAULT_NOTARY_PROFILE)" ]; then \
+		echo "Available notarytool profile: $(DEFAULT_NOTARY_PROFILE)"; \
+	else \
+		echo "No notarytool profiles found via 'xcrun notarytool list-profiles'."; \
+	fi
+	@echo
+	@echo "To create a profile (preferred):"
+	@echo '  xcrun notarytool store-credentials vm-manager-notary --apple-id "you@example.com" \'
+	@echo "      --team-id $(if $(DEFAULT_TEAM_ID),$(DEFAULT_TEAM_ID),TEAMID) --password \"<app-specific-password>\""
+	@echo "Then run: RELEASE_CODESIGN_ID=\"$$(security find-identity -p codesigning -v 2>/dev/null | grep 'Developer ID Application' | head -n1 | sed -E 's/.*\"(Developer ID Application: [^\"]+)\".*/\1/')\" NOTARY_KEYCHAIN_PROFILE=vm-manager-notary make dmg"
+	@echo
+	@echo "To skip profiles, export NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD (app-specific) before 'make dmg'."
 
 clean:
 	rm -f $(TARGET)
