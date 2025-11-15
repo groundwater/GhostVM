@@ -5,7 +5,7 @@ FRAMEWORKS := -framework Virtualization -framework AppKit
 SWIFTFLAGS := -parse-as-library
 CODESIGN_ID ?= -
 ENTITLEMENTS := entitlements.plist
-APP_TARGET ?= VirtualMachineManager
+APP_TARGET ?= GhostVM
 APP_SOURCES := VMApp.swift vmctl.swift
 APP_BUNDLE := $(APP_TARGET).app
 APP_PLIST := VMApp-Info.plist
@@ -46,7 +46,7 @@ app: build
 	/usr/libexec/PlistBuddy -c "Set :CFBundleName $(APP_DISPLAY_NAME)" $(APP_BUNDLE)/Contents/Info.plist
 	$(SWIFTC) $(SWIFTFLAGS) -DVMCTL_APP -o $(APP_BUNDLE)/Contents/MacOS/$(APP_TARGET) $(APP_SOURCES) $(FRAMEWORKS)
 	cp $(TARGET) $(APP_BUNDLE)/Contents/MacOS/vmctl
-	cp icon.png $(APP_BUNDLE)/Contents/Resources/icon.png
+	cp ghostvm.png $(APP_BUNDLE)/Contents/Resources/ghostvm.png
 	cp vm.png $(APP_BUNDLE)/Contents/Resources/vm.png
 	@if [ "$(CODESIGN_ID)" = "-" ]; then \
 		echo "Codesigning $(APP_BUNDLE) with ad-hoc identity to apply entitlements."; \

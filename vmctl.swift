@@ -808,7 +808,7 @@ final class VMController {
         let vmName = displayName(for: bundleURL)
         if let owner = readVMLockOwner(from: layout.pidFileURL), kill(owner.pid, 0) == 0 {
             if owner.isEmbedded {
-                throw VMError.message("VM '\(vmName)' is running inside Virtual Machine Manager. Stop it before deleting.")
+                throw VMError.message("VM '\(vmName)' is running inside GhostVM. Stop it before deleting.")
             }
             throw VMError.message("VM '\(vmName)' is running. Stop it before deleting.")
         }
@@ -901,7 +901,7 @@ final class VMController {
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
                 if owner.isEmbedded {
-                    throw VMError.message("VM '\(vmName)' is running inside Virtual Machine Manager (PID \(owner.pid)). Stop it there before starting via CLI.")
+                    throw VMError.message("VM '\(vmName)' is running inside GhostVM (PID \(owner.pid)). Stop it there before starting via CLI.")
                 } else {
                     throw VMError.message("VM '\(vmName)' is already running under PID \(owner.pid).")
                 }
@@ -1078,7 +1078,7 @@ final class VMController {
         let pid = owner.pid
 
         if owner.isEmbedded {
-            print("VM '\(vmName)' is running inside Virtual Machine Manager (PID \(pid)). Stop it from the app.")
+            print("VM '\(vmName)' is running inside GhostVM (PID \(pid)). Stop it from the app.")
             return
         }
 
@@ -1251,7 +1251,7 @@ extension VMController {
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
                 if owner.isEmbedded {
-                    throw VMError.message("VM '\(name)' is already running inside Virtual Machine Manager.")
+                    throw VMError.message("VM '\(name)' is already running inside GhostVM.")
                 } else {
                     throw VMError.message("VM '\(name)' is already running under PID \(owner.pid).")
                 }

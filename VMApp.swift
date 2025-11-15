@@ -206,10 +206,10 @@ final class IPSWLibrary: NSObject, URLSessionDownloadDelegate, @unchecked Sendab
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            cacheDirectory = supportDirectory.appendingPathComponent("VirtualMachineManager/IPSW", isDirectory: true)
+            cacheDirectory = supportDirectory.appendingPathComponent("GhostVM/IPSW", isDirectory: true)
         } else {
             cacheDirectory = fileManager.homeDirectoryForCurrentUser
-                .appendingPathComponent("Library/Application Support/VirtualMachineManager/IPSW", isDirectory: true)
+                .appendingPathComponent("Library/Application Support/GhostVM/IPSW", isDirectory: true)
         }
         super.init()
     }
@@ -1074,7 +1074,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.title = "Virtual Machine Manager"
+        window.title = "GhostVM"
 
         let content = MainView(
             model: viewModel,
@@ -2086,7 +2086,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
         ])
 
-        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .VirtualMachine bundles and configure the IPSW feed used for restore image downloads. Changes take effect immediately.")
+        let descriptionLabel = NSTextField(labelWithString: "Choose where GhostVM stores .VirtualMachine bundles and configure the IPSW feed used for restore image downloads. Changes take effect immediately.")
         descriptionLabel.lineBreakMode = .byWordWrapping
         descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(descriptionLabel)

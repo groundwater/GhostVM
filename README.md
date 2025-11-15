@@ -1,6 +1,6 @@
-# Virtual Machine Manager
+# GhostVM
 
-Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained `.VirtualMachine` bundles wherever you choose to store them (the app defaults to `~/VMs` but any writable location works). The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
+GhostVM ships both a native macOS app (`GhostVM.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained `.VirtualMachine` bundles wherever you choose to store them (the app defaults to `~/VMs` but any writable location works). The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
 
 ## Requirements
 
@@ -25,7 +25,7 @@ Virtual Machine Manager ships both a native macOS app (`VirtualMachineManager.ap
 
 ```bash
 make            # builds ./vmctl (codesigned ad-hoc with entitlements)
-make app        # builds VirtualMachineManager.app alongside vmctl
+make app        # builds GhostVM.app alongside vmctl
 make dmg        # produces a signed, notarized DMG ready for distribution
 make clean      # removes the binary and app bundle
 ```
@@ -46,16 +46,16 @@ To use it, set a Developer ID identity and either a `notarytool` keychain profil
 
 ```bash
 # One-time: store credentials so notarytool can use a profile
-xcrun notarytool store-credentials vm-manager-notary --apple-id "you@example.com" \
+xcrun notarytool store-credentials ghostvm-notary --apple-id "you@example.com" \
   --team-id ABCDE12345 --password "app-specific-password"
 
 # Release build
 RELEASE_CODESIGN_ID="Developer ID Application: Your Name (ABCDE12345)" \
-NOTARY_KEYCHAIN_PROFILE=vm-manager-notary \
+NOTARY_KEYCHAIN_PROFILE=ghostvm-notary \
 make dmg
 ```
 
-Alternatively, omit `NOTARY_KEYCHAIN_PROFILE` and provide `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, and `NOTARY_PASSWORD` env vars when invoking `make dmg`. The finished DMG appears at the repository root; `VirtualMachineManager.app` inside it is already stapled, so users can copy it directly into `/Applications` without Gatekeeper warnings.
+Alternatively, omit `NOTARY_KEYCHAIN_PROFILE` and provide `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, and `NOTARY_PASSWORD` env vars when invoking `make dmg`. The finished DMG appears at the repository root; `GhostVM.app` inside it is already stapled, so users can copy it directly into `/Applications` without Gatekeeper warnings.
 
 ## Usage
 

@@ -43,7 +43,7 @@ A PR *MUST* already exist, otherwise ABORT.
 </READONLY>
 <Agent>
 
-This repository ships two cooperating surfaces—a command-line tool (`vmctl`) and a SwiftUI/macOS App (`VirtualMachineManager.app`)—that orchestrate Apple’s `Virtualization.framework` to provision, install, and run `.VirtualMachine` bundles. The codebase is organized around a handful of long-lived “agents”, each with clear responsibilities and collaboration patterns. This document captures those agents, their inputs/outputs, and the execution flows they participate in so new contributors can reason about changes without re-reading the entire Swift codebase.
+This repository ships two cooperating surfaces—a command-line tool (`vmctl`) and a SwiftUI/macOS App (`GhostVM.app`)—that orchestrate Apple’s `Virtualization.framework` to provision, install, and run `.VirtualMachine` bundles. The codebase is organized around a handful of long-lived “agents”, each with clear responsibilities and collaboration patterns. This document captures those agents, their inputs/outputs, and the execution flows they participate in so new contributors can reason about changes without re-reading the entire Swift codebase.
 
 Shared Concepts
 ---------------
@@ -117,12 +117,12 @@ Agent Catalog
 
 * **Role** – Handles reproducible builds, entitlements, app/dmg packaging, and notarization helpers.
 * **Inputs** – Environment variables (`SWIFTC`, `TARGET`, `CODESIGN_ID`, `RELEASE_CODESIGN_ID`, notarization credentials).
-* **Outputs** – `vmctl` binary, `VirtualMachineManager.app`, signed/notarized `.dmg`.
+* **Outputs** – `vmctl` binary, `GhostVM.app`, signed/notarized `.dmg`.
 * **Behaviors** – Ad-hoc signing by default; optional Developer ID/resigning pathway; `make notary-info` prints helper info.
 
 ### 7. Restore Image Feed Agent (`VMApp.swift`: `IPSWLibrary`, `IPSWManagerWindowController`)
 
-* **Role** – Maintains the IPSW feed URL, downloads cache into `~/Library/Application Support/VirtualMachineManager/IPSW`, and exposes a management UI so users can fetch/delete restore images.
+* **Role** – Maintains the IPSW feed URL, downloads cache into `~/Library/Application Support/GhostVM/IPSW`, and exposes a management UI so users can fetch/delete restore images.
 * **Inputs** – UserDefaults-driven feed URL, Apple’s XML feed, cached `.ipsw` files.
 * **Outputs** – Downloaded restore images surfaced to the Create VM drop-down (`NSPopUpButton`), per-entry download/delete actions, Finder reveals.
 * **Behaviors** – Deduplicates feed entries by `FirmwareURL`, sorts by version/build, blocks concurrent downloads per entry, and notifies the Create VM sheet when the cache changes so menus stay in sync.
