@@ -15,7 +15,12 @@ DMG_VOLNAME ?= $(APP_DISPLAY_NAME)
 DMG_STAGING := build/dmg-root
 DEFAULT_DEVELOPER_ID := $(shell security find-identity -p codesigning -v 2>/dev/null | grep "Developer ID Application" | head -n1 | sed -E 's/.*"(Developer ID Application: [^"]+)".*/\1/' )
 DEFAULT_TEAM_ID := $(shell security find-identity -p codesigning -v 2>/dev/null | grep "Developer ID Application" | head -n1 | sed -E 's/.*Developer ID Application: .* \(([A-Z0-9]+)\)".*/\1/' )
+NOTARYTOOL_HAS_LIST_PROFILES := $(shell xcrun notarytool --help 2>/dev/null | grep -q "list-profiles" && echo 1 || echo 0)
+ifeq ($(NOTARYTOOL_HAS_LIST_PROFILES),1)
 DEFAULT_NOTARY_PROFILE := $(shell xcrun notarytool list-profiles 2>/dev/null | awk 'NR>2 && $$1!="--" {print $$1; exit}')
+else
+DEFAULT_NOTARY_PROFILE :=
+endif
 RELEASE_CODESIGN_ID ?= $(DEFAULT_DEVELOPER_ID)
 NOTARY_KEYCHAIN_PROFILE ?= $(DEFAULT_NOTARY_PROFILE)
 NOTARY_APPLE_ID ?=
@@ -90,16 +95,20 @@ dmg: app
 notary-info:
 	@echo "Detected Developer ID Application identity: $(if $(DEFAULT_DEVELOPER_ID),$(DEFAULT_DEVELOPER_ID),<none>)"
 	@echo "Detected Team ID: $(if $(DEFAULT_TEAM_ID),$(DEFAULT_TEAM_ID),<none>)"
-	@if [ -n "$(DEFAULT_NOTARY_PROFILE)" ]; then \
-		echo "Available notarytool profile: $(DEFAULT_NOTARY_PROFILE)"; \
-	else \
-		echo "No notarytool profiles found via 'xcrun notarytool list-profiles'."; \
-	fi
+		@if [ "$(NOTARYTOOL_HAS_LIST_PROFILES)" = "1" ]; then \
+			if [ -n "$(DEFAULT_NOTARY_PROFILE)" ]; then \
+				echo "Available notarytool profile: $(DEFAULT_NOTARY_PROFILE)"; \
+			else \
+				echo "No notarytool profiles found via 'xcrun notarytool list-profiles'."; \
+			fi; \
+		else \
+			echo "'xcrun notarytool' on this machine does not support 'list-profiles'; skipping auto-detection of profiles."; \
+		fi
 	@echo
-	@echo "To create a profile (preferred):"
-	@echo '  xcrun notarytool store-credentials vm-manager-notary --apple-id "you@example.com" \'
-	@echo "      --team-id $(if $(DEFAULT_TEAM_ID),$(DEFAULT_TEAM_ID),TEAMID) --password \"<app-specific-password>\""
-	@echo "Then run: RELEASE_CODESIGN_ID=\"$$(security find-identity -p codesigning -v 2>/dev/null | grep 'Developer ID Application' | head -n1 | sed -E 's/.*\"(Developer ID Application: [^\"]+)\".*/\1/')\" NOTARY_KEYCHAIN_PROFILE=vm-manager-notary make dmg"
+		@echo "To create a profile (preferred):"
+		@echo '  xcrun notarytool store-credentials ghostvm-notary --apple-id "you@example.com" \'
+		@echo "      --team-id $(if $(DEFAULT_TEAM_ID),$(DEFAULT_TEAM_ID),TEAMID) --password \"<app-specific-password>\""
+		@echo "Then run: RELEASE_CODESIGN_ID=\"$$(security find-identity -p codesigning -v 2>/dev/null | grep 'Developer ID Application' | head -n1 | sed -E 's/.*\"(Developer ID Application: [^\"]+)\".*/\1/')\" NOTARY_KEYCHAIN_PROFILE=ghostvm-notary make dmg"
 	@echo
 	@echo "To skip profiles, export NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD (app-specific) before 'make dmg'."
 
