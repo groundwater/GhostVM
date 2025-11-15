@@ -1,3 +1,10 @@
+# Load optional local secrets/overrides (e.g., NOTARY_* credentials) from .env.
+ifneq (,$(wildcard .env))
+ENV_VARS := $(shell sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' .env)
+include .env
+export $(ENV_VARS)
+endif
+
 SWIFTC ?= swiftc
 TARGET ?= vmctl
 SOURCES := vmctl.swift
