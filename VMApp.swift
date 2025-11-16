@@ -2427,16 +2427,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.delegate = self
-        if let mainWindow = window {
-            var frame = panel.frame
-            frame.origin = NSPoint(
-                x: mainWindow.frame.midX - frame.size.width / 2,
-                y: mainWindow.frame.midY - frame.size.height / 2
-            )
-            panel.setFrame(frame, display: false)
-        } else {
-            panel.center()
-        }
+        panel.center()
 
         let model = SettingsViewModel(
             vmPath: vmRootDirectory.path,
