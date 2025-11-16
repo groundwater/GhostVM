@@ -1666,6 +1666,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "Window")
         windowMenuItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         let ipswManagerItem = NSMenuItem(title: "Manage Restore Images", action: #selector(showIPSWManagerFromMenu(_:)), keyEquivalent: "")
