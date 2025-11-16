@@ -1168,6 +1168,17 @@ private struct SettingsView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
+            labeledRow("App Icon") {
+                Picker("", selection: $model.iconMode) {
+                    Text("System").tag(VMCTLApp.IconMode.system)
+                    Text("Light").tag(VMCTLApp.IconMode.light)
+                    Text("Dark").tag(VMCTLApp.IconMode.dark)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 260, alignment: .leading)
+            }
+
             HStack {
                 Button("Reset to Default", action: resetDefaults)
                 Spacer()
@@ -1199,13 +1210,21 @@ private struct SettingsView: View {
 final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let vmRootDefaultsKey = "VMCTLRootDirectoryPath"
     private static let showRacecarDefaultsKey = "VMCTLShowRacecarBackground"
+    private static let iconModeDefaultsKey = "VMCTLIconMode"
     private static let defaultVMRootDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)
+
+    enum IconMode: String {
+        case system
+        case light
+        case dark
+    }
 
     private let cliURL: URL
     private let commandQueue = DispatchQueue(label: "vmctl.app.command")
     private let userDefaults = UserDefaults.standard
     private var vmRootDirectory: URL
     private var showsRacecarBackground: Bool
+    private var iconMode: IconMode
     private let controller: VMController
     private let library: VMLibrary
     private let ipswLibrary: IPSWLibrary
@@ -1310,12 +1329,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         @Published var verificationWasSuccessful: Bool?
         @Published var isVerifying: Bool = false
         @Published var showRacecarBackground: Bool
+        @Published var iconMode: VMCTLApp.IconMode
 
-        init(vmPath: String, ipswPath: String, feedURLString: String, showRacecarBackground: Bool) {
+        init(vmPath: String, ipswPath: String, feedURLString: String, showRacecarBackground: Bool, iconMode: VMCTLApp.IconMode) {
             self.vmPath = vmPath
             self.ipswPath = ipswPath
             self.feedURLString = feedURLString
             self.showRacecarBackground = showRacecarBackground
+            self.iconMode = iconMode
         }
     }
 
@@ -1347,6 +1368,12 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             showsRacecarBackground = true
         }
+        if let storedIcon = userDefaults.string(forKey: VMCTLApp.iconModeDefaultsKey),
+           let parsed = IconMode(rawValue: storedIcon) {
+            iconMode = parsed
+        } else {
+            iconMode = .system
+        }
         controller = VMController(rootDirectory: vmRootDirectory)
         library = VMLibrary(defaults: userDefaults)
         ipswLibrary = IPSWLibrary(defaults: userDefaults)
@@ -1365,7 +1392,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func updateApplicationAndBundleIcons(for appearance: NSAppearance) {
-        let appearanceName = appearance.bestMatch(from: [.darkAqua, .aqua])
+        let appearanceName: NSAppearance.Name?
+        switch iconMode {
+        case .light:
+            appearanceName = .aqua
+        case .dark:
+            appearanceName = .darkAqua
+        case .system:
+            appearanceName = appearance.bestMatch(from: [.darkAqua, .aqua])
+        }
         let resourceName = (appearanceName == .darkAqua) ? "ghostvm-dark" : "ghostvm"
         guard let iconURL = Bundle.main.url(forResource: resourceName, withExtension: "png"),
               let image = NSImage(contentsOf: iconURL) else {
@@ -2380,7 +2415,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             vmPath: vmRootDirectory.path,
             ipswPath: ipswLibrary.cacheDirectoryURL.path,
             feedURLString: ipswLibrary.feedURL.absoluteString,
-            showRacecarBackground: showsRacecarBackground
+            showRacecarBackground: showsRacecarBackground,
+            iconMode: iconMode
         )
         settingsViewModel = model
 
@@ -2490,6 +2526,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         showsRacecarBackground = viewModel.showRacecarBackground
         userDefaults.set(showsRacecarBackground, forKey: VMCTLApp.showRacecarDefaultsKey)
         self.viewModel.showsRacecarBackground = showsRacecarBackground
+
+        iconMode = viewModel.iconMode
+        userDefaults.set(iconMode.rawValue, forKey: VMCTLApp.iconModeDefaultsKey)
+        updateApplicationAndBundleIcons(for: NSApplication.shared.effectiveAppearance)
     }
 
     private func browseVMFolder() {
