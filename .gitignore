@@ -2,3 +2,4 @@ vmctl
 *.app
 *.dmg
 .env
+build/
