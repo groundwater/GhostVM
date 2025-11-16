@@ -1245,7 +1245,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusTimer: Timer?
     private weak var createSheet: NSPanel?
     private weak var editSheet: NSPanel?
-    private weak var settingsWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var createViewModel: CreateVMViewModel?
     private var editViewModel: EditSettingsViewModel?
     private var settingsViewModel: SettingsViewModel?
@@ -2424,6 +2424,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         settingsWindow.title = "Settings"
         settingsWindow.delegate = self
+        settingsWindow.isReleasedWhenClosed = false
         settingsWindow.center()
 
         let model = SettingsViewModel(
