@@ -1221,7 +1221,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let vmRootDefaultsKey = "VMCTLRootDirectoryPath"
     private static let showRacecarDefaultsKey = "VMCTLShowRacecarBackground"
     private static let iconModeDefaultsKey = "VMCTLIconMode"
-    private static let settingsWindowFrameDefaultsKey = "VMCTLSettingsWindowFrame"
     private static let defaultVMRootDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)
 
     enum IconMode: String {
@@ -1509,8 +1508,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         if let closingWindow = notification.object as? NSWindow,
            closingWindow === settingsWindow {
-            let frameString = NSStringFromRect(closingWindow.frame)
-            userDefaults.set(frameString, forKey: VMCTLApp.settingsWindowFrameDefaultsKey)
             settingsWindow = nil
             settingsViewModel = nil
         }
@@ -2430,15 +2427,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.delegate = self
-        if let storedFrame = userDefaults.string(forKey: VMCTLApp.settingsWindowFrameDefaultsKey) {
-            let rect = NSRectFromString(storedFrame)
-            panel.setFrame(rect, display: false)
-        } else if let mainWindow = window {
-            panel.center()
-            panel.setFrameOrigin(NSPoint(
-                x: mainWindow.frame.midX - panel.frame.width / 2,
-                y: mainWindow.frame.midY - panel.frame.height / 2
-            ))
+        if let mainWindow = window {
+            var frame = panel.frame
+            frame.origin = NSPoint(
+                x: mainWindow.frame.midX - frame.size.width / 2,
+                y: mainWindow.frame.midY - frame.size.height / 2
+            )
+            panel.setFrame(frame, display: false)
         } else {
             panel.center()
         }
