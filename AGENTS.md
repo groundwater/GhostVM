@@ -165,6 +165,7 @@ Extending / Creating New Agents
 * **New UI features** – Prefer enhancing `VMListViewModel` or creating dedicated observable objects; route heavy lifting back through `VMController` or `vmctl` to avoid duplicating logic.
 * **Icons & appearance** – App and `.GhostVM` bundle icons are now driven by light/dark PNG resources (`ghostvm.png`, `ghostvm-dark.png`) wired in `VMCTLApp.applicationDidFinishLaunching` and copied via the `app` target in `Makefile`.
 * **Automation hooks** – The PID lock, snapshot layout, and `vmctl` textual output are the integration surface for external tooling (CI, scripts). Preserve backward compatibility when possible.
+* **App settings window** – Settings are a standalone window (not a sheet) and auto-apply changes as fields/toggles update; see `SettingsView` and `applySettingsChanges` in `VMApp.swift`.
 
 Reference Map
 -------------

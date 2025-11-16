@@ -1108,8 +1108,7 @@ private struct SettingsView: View {
     let browseIPSWFolder: () -> Void
     let verifyFeed: () -> Void
     let resetDefaults: () -> Void
-    let cancel: () -> Void
-    let save: () -> Void
+    let applyChanges: () -> Void
 
     private let labelWidth: CGFloat = 130
 
@@ -1182,14 +1181,25 @@ private struct SettingsView: View {
             HStack {
                 Button("Reset to Default", action: resetDefaults)
                 Spacer()
-                Button("Cancel", action: cancel)
-                    .keyboardShortcut(.cancelAction)
-                Button("Save", action: save)
-                    .keyboardShortcut(.defaultAction)
             }
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520)
+        .onChange(of: model.vmPath) { _, _ in
+            applyChanges()
+        }
+        .onChange(of: model.ipswPath) { _, _ in
+            applyChanges()
+        }
+        .onChange(of: model.feedURLString) { _, _ in
+            applyChanges()
+        }
+        .onChange(of: model.showRacecarBackground) { _, _ in
+            applyChanges()
+        }
+        .onChange(of: model.iconMode) { _, _ in
+            applyChanges()
+        }
     }
 
     @ViewBuilder
@@ -1235,7 +1245,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusTimer: Timer?
     private weak var createSheet: NSPanel?
     private weak var editSheet: NSPanel?
-    private weak var settingsSheet: NSPanel?
+    private weak var settingsWindow: NSPanel?
     private var createViewModel: CreateVMViewModel?
     private var editViewModel: EditSettingsViewModel?
     private var settingsViewModel: SettingsViewModel?
@@ -1493,6 +1503,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func windowDidResignKey(_ notification: Notification) {
         updateToolsMenuVisibility()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if let closingWindow = notification.object as? NSWindow,
+           closingWindow === settingsWindow {
+            settingsWindow = nil
+            settingsViewModel = nil
+        }
     }
 
     // MARK: - Menu & Interface
@@ -2392,10 +2410,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func presentSettingsSheet() {
-        guard let window = self.window else { return }
-
-        if let sheet = settingsSheet {
-            window.makeKeyAndOrderFront(sheet)
+        if let existing = settingsWindow {
+            existing.makeKeyAndOrderFront(nil)
             return
         }
 
@@ -2410,6 +2426,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.center()
+        panel.delegate = self
 
         let model = SettingsViewModel(
             vmPath: vmRootDirectory.path,
@@ -2426,29 +2443,19 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             browseIPSWFolder: { [weak self] in self?.browseIPSWFolder() },
             verifyFeed: { [weak self] in self?.verifyFeedURL() },
             resetDefaults: { [weak self] in self?.resetDirectoriesToDefault() },
-            cancel: { [weak self] in self?.cancelSettingsSheet() },
-            save: { [weak self] in self?.confirmSettingsSheet() }
+            applyChanges: { [weak self] in self?.applySettingsChanges() }
         )
 
         let hosting = NSHostingController(rootView: rootView)
         panel.contentViewController = hosting
-        settingsSheet = panel
+        settingsWindow = panel
 
-        window.beginSheet(panel) { [weak self] _ in
-            self?.settingsSheet = nil
-            self?.settingsViewModel = nil
-        }
+        panel.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
-    private func cancelSettingsSheet() {
-        pendingFeedVerificationTask?.cancel()
-        settingsViewModel?.isVerifying = false
-        guard let panel = settingsSheet else { return }
-        window?.endSheet(panel)
-    }
-
-    private func confirmSettingsSheet() {
-        guard let viewModel = settingsViewModel, let panel = settingsSheet else { return }
+    private func applySettingsChanges() {
+        guard let viewModel = settingsViewModel else { return }
 
         let rawPath = viewModel.vmPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawPath.isEmpty else {
@@ -2517,8 +2524,6 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        window?.endSheet(panel)
-        settingsViewModel = nil
         applyVMRootDirectory(selectedURL)
         ipswLibrary.feedURL = chosenFeedURL
         ipswManagerController?.feedURLDidChange()
@@ -2533,14 +2538,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func browseVMFolder() {
-        guard let panel = settingsSheet, let viewModel = settingsViewModel else { return }
+        guard let panel = settingsWindow, let viewModel = settingsViewModel else { return }
         presentSharedFolderPicker(attachedTo: panel) { path in
             viewModel.vmPath = path
         }
     }
 
     private func browseIPSWFolder() {
-        guard let panel = settingsSheet, let viewModel = settingsViewModel else { return }
+        guard let panel = settingsWindow, let viewModel = settingsViewModel else { return }
         presentSharedFolderPicker(attachedTo: panel) { path in
             viewModel.ipswPath = path
         }
@@ -2549,6 +2554,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func resetDirectoriesToDefault() {
         settingsViewModel?.vmPath = VMCTLApp.defaultVMRootDirectory.path
         settingsViewModel?.ipswPath = IPSWLibrary.defaultCacheDirectory().path
+        applySettingsChanges()
     }
 
     private func verifyFeedURL() {
