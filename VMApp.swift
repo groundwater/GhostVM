@@ -1245,7 +1245,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var statusTimer: Timer?
     private weak var createSheet: NSPanel?
     private weak var editSheet: NSPanel?
-    private weak var settingsWindow: NSPanel?
+    private weak var settingsWindow: NSWindow?
     private var createViewModel: CreateVMViewModel?
     private var editViewModel: EditSettingsViewModel?
     private var settingsViewModel: SettingsViewModel?
@@ -2416,18 +2416,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        let panel = NSPanel(
+        let settingsWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 540, height: 260),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        panel.title = "Settings"
-        panel.isFloatingPanel = false
-        panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.delegate = self
-        panel.center()
+        settingsWindow.title = "Settings"
+        settingsWindow.delegate = self
+        settingsWindow.center()
 
         let model = SettingsViewModel(
             vmPath: vmRootDirectory.path,
@@ -2448,10 +2445,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
 
         let hosting = NSHostingController(rootView: rootView)
-        panel.contentViewController = hosting
-        settingsWindow = panel
+        settingsWindow.contentViewController = hosting
+        self.settingsWindow = settingsWindow
 
-        panel.makeKeyAndOrderFront(nil)
+        settingsWindow.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
@@ -2564,15 +2561,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func browseVMFolder() {
-        guard let panel = settingsWindow, let viewModel = settingsViewModel else { return }
-        presentSharedFolderPicker(attachedTo: panel) { path in
+        guard let window = settingsWindow, let viewModel = settingsViewModel else { return }
+        presentSharedFolderPicker(attachedTo: window) { path in
             viewModel.vmPath = path
         }
     }
 
     private func browseIPSWFolder() {
-        guard let panel = settingsWindow, let viewModel = settingsViewModel else { return }
-        presentSharedFolderPicker(attachedTo: panel) { path in
+        guard let window = settingsWindow, let viewModel = settingsViewModel else { return }
+        presentSharedFolderPicker(attachedTo: window) { path in
             viewModel.ipswPath = path
         }
     }
@@ -2668,13 +2665,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    private func presentSharedFolderPicker(attachedTo panel: NSPanel, update: @escaping (String) -> Void) {
+    private func presentSharedFolderPicker(attachedTo window: NSWindow, update: @escaping (String) -> Void) {
         let openPanel = NSOpenPanel()
         openPanel.canChooseFiles = false
         openPanel.canChooseDirectories = true
         openPanel.allowsMultipleSelection = false
         openPanel.prompt = "Choose"
-        openPanel.beginSheetModal(for: panel) { response in
+        openPanel.beginSheetModal(for: window) { response in
             if response == .OK, let url = openPanel.url {
                 update(url.path)
             }
