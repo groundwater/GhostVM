@@ -684,8 +684,6 @@ struct MainView: View {
                 .aspectRatio(contentMode: .fit)
                 .frame(maxWidth: 260, maxHeight: 180)
                 .opacity(0.85)
-                // .padding(.trailing, 4)
-                // .padding(.bottom, 4)
                 .allowsHitTesting(false)
         }
     }
@@ -1366,15 +1364,27 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         app.run()
     }
 
+    private func updateApplicationAndBundleIcons(for appearance: NSAppearance) {
+        let appearanceName = appearance.bestMatch(from: [.darkAqua, .aqua])
+        let resourceName = (appearanceName == .darkAqua) ? "ghostvm-dark" : "ghostvm"
+        guard let iconURL = Bundle.main.url(forResource: resourceName, withExtension: "png"),
+              let image = NSImage(contentsOf: iconURL) else {
+            return
+        }
+        NSApplication.shared.applicationIconImage = image
+
+        let workspace = NSWorkspace.shared
+        for url in library.bundleURLs {
+            workspace.setIcon(image, forFile: url.path, options: [])
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenus()
         buildInterface()
         window.center()
         window.makeKeyAndOrderFront(nil)
-        if let iconURL = Bundle.main.url(forResource: "icon", withExtension: "png"),
-           let image = NSImage(contentsOf: iconURL) {
-            NSApplication.shared.applicationIconImage = image
-        }
+        updateApplicationAndBundleIcons(for: NSApplication.shared.effectiveAppearance)
         NSApplication.shared.activate(ignoringOtherApps: true)
         refreshVMs()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
