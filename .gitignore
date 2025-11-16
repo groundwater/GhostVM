@@ -1,4 +1,7 @@
 vmctl
 *.app
+*.dmg
+.env
+build/
 .claude/
 .vscode/

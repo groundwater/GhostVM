@@ -15,25 +15,23 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleIconFile</key>
-	<string>icon</string>
+	<string>ghostvm</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key>
-			<string>Virtual Machine Bundle</string>
+			<string>GhostVM Bundle</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
-			<key>CFBundleTypeIconFiles</key>
-			<array>
-				<string>vm</string>
-			</array>
+			<key>CFBundleTypeIconFile</key>
+			<string>GhostVMIcon</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.groundwater.virtualmachine</string>
+				<string>com.groundwater.ghostvm</string>
 			</array>
 			<key>LSTypeIsPackage</key>
 			<true/>
@@ -43,19 +41,21 @@
 	<array>
 		<dict>
 			<key>UTTypeIdentifier</key>
-			<string>com.groundwater.virtualmachine</string>
+			<string>com.groundwater.ghostvm</string>
 			<key>UTTypeDescription</key>
-			<string>VirtualMachine bundle</string>
+			<string>GhostVM bundle</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>com.apple.package</string>
 			</array>
+			<key>UTTypeIconFile</key>
+			<string>GhostVMIcon</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>VirtualMachine</string>
-					<string>virtualmachine</string>
+					<string>GhostVM</string>
+					<string>ghostvm</string>
 				</array>
 			</dict>
 		</dict>

@@ -2,6 +2,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import ImageIO
 
 // MARK: - View Model & Helpers
 
@@ -15,6 +16,7 @@ final class VMListViewModel: ObservableObject {
     @Published var busyBundlePaths: Set<String> = []
     @Published var emptyMessage: String? = "Loading…"
     @Published var selectedBundlePath: String?
+    @Published var showsRacecarBackground: Bool = false
 }
 
 final class VMLibrary {
@@ -42,7 +44,8 @@ final class VMLibrary {
     @discardableResult
     func addBundle(_ url: URL) -> Bool {
         let normalized = normalize(url)
-        guard normalized.pathExtension.lowercased() == VMController.bundleExtensionLowercased else { return false }
+        let ext = normalized.pathExtension.lowercased()
+        guard ext == VMController.bundleExtensionLowercased else { return false }
         let path = normalized.path
         guard !storedPaths.contains(path) else { return false }
         storedPaths.append(path)
@@ -124,6 +127,437 @@ final class VMLibrary {
     }
 }
 
+struct IPSWFeedEntry: Hashable {
+    let firmwareURL: URL
+    let productVersion: String
+    let buildVersion: String
+    let sha1: String?
+    let documentationURL: URL?
+
+    var identifier: String { firmwareURL.absoluteString }
+    var filename: String { firmwareURL.lastPathComponent }
+
+    var displayName: String {
+        return "macOS \(productVersion) (\(buildVersion))"
+    }
+
+    var detailDescription: String {
+        return filename
+    }
+}
+
+extension IPSWFeedEntry: Identifiable {
+    var id: String {
+        return "\(productVersion)|\(buildVersion)|\(firmwareURL.absoluteString)"
+    }
+}
+
+struct IPSWCachedImage: Hashable {
+    let fileURL: URL
+    let sizeBytes: Int64?
+
+    var displayName: String {
+        if let sizeBytes {
+            return "\(fileURL.lastPathComponent) (\(Self.sizeFormatter.string(fromByteCount: sizeBytes)))"
+        }
+        return fileURL.lastPathComponent
+    }
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        return formatter
+    }()
+}
+
+struct IPSWDownloadProgress {
+    let bytesWritten: Int64
+    let totalBytes: Int64
+    let speedBytesPerSecond: Double
+}
+
+final class IPSWLibrary: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private enum LibraryError: LocalizedError {
+        case feedUnavailable
+        case invalidResponse
+        case unableToPrepareDestination
+
+        var errorDescription: String? {
+            switch self {
+            case .feedUnavailable:
+                return "The IPSW feed is currently unavailable."
+            case .invalidResponse:
+                return "Received an invalid response from the IPSW feed."
+            case .unableToPrepareDestination:
+                return "Unable to prepare the IPSW download destination."
+            }
+        }
+    }
+
+    private static let feedURLDefaultsKey = "VMCTLIPSWFeedURL"
+    private static let cacheDirectoryDefaultsKey = "VMCTLIPSWCacheDirectoryPath"
+    static let defaultFeedURL = URL(string: "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml")!
+
+    private let defaults: UserDefaults
+    private let fileManager = FileManager.default
+    private var cacheDirectory: URL
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        configuration.waitsForConnectivity = true
+        configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 0
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+    private final class DownloadHandler {
+        let entry: IPSWFeedEntry
+        let finalURL: URL
+        let temporaryURL: URL
+        let fileHandle: FileHandle
+        let progress: ((IPSWDownloadProgress) -> Void)?
+        let completion: (Result<IPSWCachedImage, Error>) -> Void
+        var expectedBytes: Int64 = 0
+        var bytesWritten: Int64 = 0
+        let startDate = Date()
+
+        init(
+            entry: IPSWFeedEntry,
+            finalURL: URL,
+            temporaryURL: URL,
+            fileHandle: FileHandle,
+            progress: ((IPSWDownloadProgress) -> Void)?,
+            completion: @escaping (Result<IPSWCachedImage, Error>) -> Void
+        ) {
+            self.entry = entry
+            self.finalURL = finalURL
+            self.temporaryURL = temporaryURL
+            self.fileHandle = fileHandle
+            self.progress = progress
+            self.completion = completion
+        }
+    }
+    private var downloadHandlers: [Int: DownloadHandler] = [:]
+    private let downloadHandlersLock = NSLock()
+
+    private func storeHandler(_ handler: DownloadHandler, for identifier: Int) {
+        downloadHandlersLock.lock()
+        downloadHandlers[identifier] = handler
+        downloadHandlersLock.unlock()
+    }
+
+    private func handler(for identifier: Int) -> DownloadHandler? {
+        downloadHandlersLock.lock()
+        let value = downloadHandlers[identifier]
+        downloadHandlersLock.unlock()
+        return value
+    }
+
+    private func removeHandler(for identifier: Int) -> DownloadHandler? {
+        downloadHandlersLock.lock()
+        let value = downloadHandlers.removeValue(forKey: identifier)
+        downloadHandlersLock.unlock()
+        return value
+    }
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let storedPath = defaults.string(forKey: Self.cacheDirectoryDefaultsKey), !storedPath.isEmpty {
+            cacheDirectory = URL(fileURLWithPath: storedPath, isDirectory: true).standardizedFileURL
+        } else {
+            cacheDirectory = Self.defaultCacheDirectory(fileManager: fileManager)
+        }
+        super.init()
+        ensureCacheDirectoryIfNeeded()
+    }
+
+    static func defaultCacheDirectory(fileManager: FileManager = .default) -> URL {
+        if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            return supportDirectory.appendingPathComponent("GhostVM/IPSW", isDirectory: true)
+        }
+        return fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/GhostVM/IPSW", isDirectory: true)
+    }
+
+    var cacheDirectoryURL: URL {
+        cacheDirectory
+    }
+
+    var feedURL: URL {
+        get {
+            if let stored = defaults.string(forKey: Self.feedURLDefaultsKey), let url = URL(string: stored) {
+                return url
+            }
+            return Self.defaultFeedURL
+        }
+        set {
+            defaults.set(newValue.absoluteString, forKey: Self.feedURLDefaultsKey)
+        }
+    }
+
+    func cachedImages() -> [IPSWCachedImage] {
+        ensureCacheDirectoryIfNeeded()
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: cacheDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+        var images: [IPSWCachedImage] = []
+        for url in contents where url.pathExtension.lowercased() == "ipsw" {
+            if let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+               values.isRegularFile == true {
+                let size = values.fileSize.map { Int64($0) }
+                images.append(IPSWCachedImage(fileURL: url, sizeBytes: size))
+            }
+        }
+        return images.sorted { $0.fileURL.lastPathComponent.localizedCaseInsensitiveCompare($1.fileURL.lastPathComponent) == .orderedAscending }
+    }
+
+    @discardableResult
+    func fetchFeed(completion: @escaping (Result<[IPSWFeedEntry], Error>) -> Void) -> URLSessionDataTask {
+        return performFeedRequest(url: feedURL, completion: completion)
+    }
+
+    @discardableResult
+    func verifyFeed(at url: URL, completion: @escaping (Result<[IPSWFeedEntry], Error>) -> Void) -> URLSessionDataTask {
+        return performFeedRequest(url: url, completion: completion)
+    }
+
+    @discardableResult
+    func download(
+        entry: IPSWFeedEntry,
+        progress: ((IPSWDownloadProgress) -> Void)? = nil,
+        completion: @escaping (Result<IPSWCachedImage, Error>) -> Void
+    ) throws -> URLSessionDataTask {
+        ensureCacheDirectoryIfNeeded()
+        let destination = cacheDirectory.appendingPathComponent(entry.filename, isDirectory: false)
+        let temporary = destination.appendingPathExtension("download")
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        if fileManager.fileExists(atPath: temporary.path) {
+            try fileManager.removeItem(at: temporary)
+        }
+        guard fileManager.createFile(atPath: temporary.path, contents: nil, attributes: nil) else {
+            throw LibraryError.unableToPrepareDestination
+        }
+        let fileHandle = try FileHandle(forWritingTo: temporary)
+        let handler = DownloadHandler(entry: entry, finalURL: destination, temporaryURL: temporary, fileHandle: fileHandle, progress: progress, completion: completion)
+        let task = session.dataTask(with: entry.firmwareURL)
+        storeHandler(handler, for: task.taskIdentifier)
+        task.resume()
+        return task
+    }
+
+    func updateCacheDirectory(_ url: URL) throws {
+        cacheDirectory = url.standardizedFileURL
+        try ensureCacheDirectory()
+        defaults.set(cacheDirectory.path, forKey: Self.cacheDirectoryDefaultsKey)
+    }
+
+    func deleteImage(at url: URL) throws {
+        try fileManager.removeItem(at: url)
+    }
+
+    private func ensureCacheDirectoryIfNeeded() {
+        if !fileManager.fileExists(atPath: cacheDirectory.path) {
+            try? ensureCacheDirectory()
+        }
+    }
+
+    private func ensureCacheDirectory() throws {
+        if !fileManager.fileExists(atPath: cacheDirectory.path) {
+            try fileManager.createDirectory(at: cacheDirectory, withIntermediateDirectories: true, attributes: nil)
+        }
+    }
+
+    private func performFeedRequest(url: URL, completion: @escaping (Result<[IPSWFeedEntry], Error>) -> Void) -> URLSessionDataTask {
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 60
+        let task = session.dataTask(with: request) { data, response, error in
+            if let error {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+                return
+            }
+            guard
+                let http = response as? HTTPURLResponse,
+                (200..<300).contains(http.statusCode),
+                let data
+            else {
+                DispatchQueue.main.async {
+                    completion(.failure(LibraryError.invalidResponse))
+                }
+                return
+            }
+            do {
+                let entries = try self.parseFeedEntries(data: data)
+                DispatchQueue.main.async {
+                    completion(.success(entries))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+        task.resume()
+        return task
+    }
+
+    private func parseFeedEntries(data: Data) throws -> [IPSWFeedEntry] {
+        let plist = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        let restoreDictionaries = collectRestoreDictionaries(from: plist)
+        var deduped: [String: IPSWFeedEntry] = [:]
+        for restore in restoreDictionaries {
+            guard
+                let firmwareString = restore["FirmwareURL"] as? String,
+                let firmwareURL = URL(string: firmwareString),
+                let productVersion = restore["ProductVersion"] as? String,
+                let buildVersion = restore["BuildVersion"] as? String
+            else {
+                continue
+            }
+            let sha1 = restore["FirmwareSHA1"] as? String
+            let documentationURL = (restore["DocumentationURL"] as? String).flatMap { URL(string: $0) }
+            let entry = IPSWFeedEntry(
+                firmwareURL: firmwareURL,
+                productVersion: productVersion,
+                buildVersion: buildVersion,
+                sha1: sha1,
+                documentationURL: documentationURL
+            )
+            let key = "\(productVersion)|\(buildVersion)|\(firmwareURL.absoluteString)"
+            deduped[key] = entry
+        }
+        let sorted = deduped.values.sorted { lhs, rhs in
+            let leftParts = versionComponents(lhs.productVersion)
+            let rightParts = versionComponents(rhs.productVersion)
+            if leftParts != rightParts {
+                return compareVersionParts(leftParts, rightParts) > 0
+            }
+            if lhs.buildVersion != rhs.buildVersion {
+                return lhs.buildVersion > rhs.buildVersion
+            }
+            return lhs.filename.localizedCaseInsensitiveCompare(rhs.filename) == .orderedAscending
+        }
+        return sorted
+    }
+
+    private func collectRestoreDictionaries(from object: Any) -> [[String: Any]] {
+        var restores: [[String: Any]] = []
+        if let dict = object as? [String: Any] {
+            if dict["FirmwareURL"] != nil && dict["ProductVersion"] != nil && dict["BuildVersion"] != nil {
+                restores.append(dict)
+            }
+            for value in dict.values {
+                restores.append(contentsOf: collectRestoreDictionaries(from: value))
+            }
+        } else if let array = object as? [Any] {
+            for element in array {
+                restores.append(contentsOf: collectRestoreDictionaries(from: element))
+            }
+        }
+        return restores
+    }
+
+    private func versionComponents(_ version: String) -> [Int] {
+        return version.split(separator: ".").compactMap { Int($0) }
+    }
+
+    private func compareVersionParts(_ lhs: [Int], _ rhs: [Int]) -> Int {
+        let maxCount = max(lhs.count, rhs.count)
+        for index in 0..<maxCount {
+            let left = index < lhs.count ? lhs[index] : 0
+            let right = index < rhs.count ? rhs[index] : 0
+            if left != right {
+                return left - right
+            }
+        }
+        return 0
+    }
+    // MARK: - URLSessionDownloadDelegate
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        if let handler = handler(for: dataTask.taskIdentifier) {
+            let expected = response.expectedContentLength
+            handler.expectedBytes = expected > 0 ? expected : 0
+        }
+        completionHandler(.allow)
+    }
+
+    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard let handler = handler(for: dataTask.taskIdentifier) else { return }
+        do {
+            try handler.fileHandle.write(contentsOf: data)
+            handler.bytesWritten += Int64(data.count)
+            let elapsed = max(Date().timeIntervalSince(handler.startDate), 0.001)
+            let speed = Double(handler.bytesWritten) / elapsed
+            let info = IPSWDownloadProgress(
+                bytesWritten: handler.bytesWritten,
+                totalBytes: handler.expectedBytes,
+                speedBytesPerSecond: speed
+            )
+            if let progress = handler.progress {
+                Task { @MainActor in
+                    progress(info)
+                }
+            }
+        } catch {
+            handleDownloadFailure(for: dataTask.taskIdentifier, error: error)
+            dataTask.cancel()
+        }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error = error {
+            handleDownloadFailure(for: task.taskIdentifier, error: error)
+            return
+        }
+        guard let handler = removeHandler(for: task.taskIdentifier) else { return }
+        do {
+            try handler.fileHandle.close()
+        } catch {
+            // ignore close failure; we'll attempt to delete on subsequent error
+        }
+        do {
+            if fileManager.fileExists(atPath: handler.finalURL.path) {
+                try fileManager.removeItem(at: handler.finalURL)
+            }
+            try fileManager.moveItem(at: handler.temporaryURL, to: handler.finalURL)
+            let values = try handler.finalURL.resourceValues(forKeys: [.fileSizeKey])
+            let cached = IPSWCachedImage(fileURL: handler.finalURL, sizeBytes: values.fileSize.map { Int64($0) })
+            Task { @MainActor in
+                handler.completion(.success(cached))
+            }
+        } catch {
+            try? fileManager.removeItem(at: handler.temporaryURL)
+            try? fileManager.removeItem(at: handler.finalURL)
+            Task { @MainActor in
+                handler.completion(.failure(error))
+            }
+        }
+    }
+
+    private func handleDownloadFailure(for taskIdentifier: Int, error: Error) {
+        guard let handler = removeHandler(for: taskIdentifier) else { return }
+        try? handler.fileHandle.close()
+        try? fileManager.removeItem(at: handler.temporaryURL)
+        Task { @MainActor in
+            handler.completion(.failure(error))
+        }
+    }
+}
+
 private func statusColor(for entry: VMController.VMListEntry) -> Color {
     if entry.isRunning {
         return Color(nsColor: .systemGreen)
@@ -182,6 +616,9 @@ struct MainView: View {
                 .buttonStyle(.bordered)
             }
 
+            ZStack(alignment: .bottomTrailing) {
+                racecarOverlay   // “background” layer
+
             List(selection: $model.selectedBundlePath) {
                 if let message = model.emptyMessage, model.entries.isEmpty {
                     Section {
@@ -226,11 +663,29 @@ struct MainView: View {
                 }
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color.clear)
+            .environment(\.defaultMinListRowHeight, 96)
             .padding(.horizontal, -16)
             .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: handleDrop)
+            }
         }
         .padding(16)
         .frame(minWidth: 560, minHeight: 440)
+    }
+
+    @ViewBuilder
+    private var racecarOverlay: some View {
+        if model.showsRacecarBackground,
+           let url = Bundle.main.url(forResource: "racecar", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: 260, maxHeight: 180)
+                .opacity(0.85)
+                .allowsHitTesting(false)
+        }
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -364,6 +819,7 @@ struct VMRowView: View {
         .padding(.vertical, 6)
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
         // Let the system draw selected row highlight (blue/gray). Do not override background.
         .contextMenu { actionMenuItems() }
     }
@@ -431,68 +887,457 @@ struct VMRowView: View {
     }
 }
 
+private struct CreateVMView: View {
+    @ObservedObject var model: VMCTLApp.CreateVMViewModel
+    let browseRestore: () -> Void
+    let browseSharedFolder: () -> Void
+    let manageRestoreImages: () -> Void
+    let cancel: () -> Void
+    let create: () -> Void
+
+    private let labelWidth: CGFloat = 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Provide a name and required .ipsw restore image. Adjust CPU, memory, and disk as needed. Shared folder is optional.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("Name") {
+                TextField("sandbox", text: $model.name)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            labeledRow("CPUs") {
+                HStack(spacing: 8) {
+                    TextField("Number of vCPUs", text: $model.cpuCount)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("cores")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Memory") {
+                HStack(spacing: 8) {
+                    TextField("GiB", text: $model.memoryGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Disk") {
+                HStack(spacing: 8) {
+                    TextField("GiB (minimum 20)", text: $model.diskGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Restore Image*") {
+                HStack(spacing: 8) {
+                    restorePicker
+                    Button("Browse…", action: browseRestore)
+                }
+            }
+
+            labeledRow("Shared Folder") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        TextField("Optional shared folder path", text: $model.sharedFolderPath)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Browse…", action: browseSharedFolder)
+                    }
+                    Toggle("Allow writes to shared folder", isOn: $model.sharedFolderWritable)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Create", action: create)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!model.hasRestoreOptions)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+    }
+
+    @ViewBuilder
+    private var restorePicker: some View {
+        if model.hasRestoreOptions {
+            Picker("Restore Image", selection: restoreSelectionBinding) {
+                ForEach(model.restoreItems) { item in
+                    Text(item.title).tag(item.path)
+                }
+                if !model.restoreItems.isEmpty {
+                    Divider()
+                }
+                Text("Manage Restore Images…")
+                    .tag("__manage_restore__")
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .onChange(of: restoreSelectionBinding.wrappedValue) { oldValue, newValue in
+                if newValue == "__manage_restore__" {
+                    DispatchQueue.main.async {
+                        manageRestoreImages()
+                        model.selectedRestorePath = oldValue
+                    }
+                }
+            }
+        } else {
+            Text("No cached restore images detected.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var restoreSelectionBinding: Binding<String> {
+        Binding<String>(
+            get: {
+                model.selectedRestorePath ?? ""
+            },
+            set: { newValue in
+                model.selectedRestorePath = newValue.isEmpty ? nil : newValue
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct EditSettingsView: View {
+    @ObservedObject var model: VMCTLApp.EditSettingsViewModel
+    let browseSharedFolder: () -> Void
+    let cancel: () -> Void
+    let save: () -> Void
+
+    private let labelWidth: CGFloat = 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Adjust CPU, memory, and shared folder settings. Changes apply the next time the VM starts.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("Name") {
+                Text(model.name)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            labeledRow("CPUs") {
+                HStack(spacing: 8) {
+                    TextField("Number of vCPUs", text: $model.cpuCount)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("cores")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Memory") {
+                HStack(spacing: 8) {
+                    TextField("GiB", text: $model.memoryGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Disk") {
+                Text(model.diskDescription)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            labeledRow("Shared Folder") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        TextField("Optional shared folder path", text: $model.sharedFolderPath)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Browse…", action: browseSharedFolder)
+                    }
+                    Toggle("Allow writes to shared folder", isOn: $model.sharedFolderWritable)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+private struct SettingsView: View {
+    @ObservedObject var model: VMCTLApp.SettingsViewModel
+    let browseVMFolder: () -> Void
+    let browseIPSWFolder: () -> Void
+    let verifyFeed: () -> Void
+    let resetDefaults: () -> Void
+    let cancel: () -> Void
+    let save: () -> Void
+
+    private let labelWidth: CGFloat = 130
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Choose where GhostVM stores virtual machines and IPSW downloads, and configure the IPSW feed. Changes apply immediately.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("VMs Folder") {
+                HStack(spacing: 8) {
+                    TextField("Path to virtual machines", text: $model.vmPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…", action: browseVMFolder)
+                }
+            }
+
+            labeledRow("IPSW Cache") {
+                HStack(spacing: 8) {
+                    TextField("Path to IPSW cache", text: $model.ipswPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Browse…", action: browseIPSWFolder)
+                }
+            }
+
+            labeledRow("IPSW Feed URL") {
+                HStack(spacing: 8) {
+                    TextField(IPSWLibrary.defaultFeedURL.absoluteString, text: $model.feedURLString)
+                        .textFieldStyle(.roundedBorder)
+                    Button(action: verifyFeed) {
+                        if model.isVerifying {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .controlSize(.small)
+                        } else {
+                            Text("Verify")
+                        }
+                    }
+                    .disabled(model.isVerifying)
+                }
+            }
+
+            if let message = model.verificationMessage {
+                HStack(spacing: 6) {
+                    Image(systemName: model.verificationWasSuccessful == true ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(model.verificationWasSuccessful == true ? Color.green : Color.orange)
+                    Text(message)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, labelWidth + 4)
+            }
+
+            labeledRow("VM List Artwork") {
+                Toggle("Show racecar background", isOn: $model.showRacecarBackground)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            labeledRow("App Icon") {
+                Picker("", selection: $model.iconMode) {
+                    Text("System").tag(VMCTLApp.IconMode.system)
+                    Text("Light").tag(VMCTLApp.IconMode.light)
+                    Text("Dark").tag(VMCTLApp.IconMode.dark)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 260, alignment: .leading)
+            }
+
+            HStack {
+                Button("Reset to Default", action: resetDefaults)
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save", action: save)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 // MARK: - App Delegate
 
 @main
-final class VMCTLApp: NSObject, NSApplicationDelegate {
+final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let vmRootDefaultsKey = "VMCTLRootDirectoryPath"
+    private static let showRacecarDefaultsKey = "VMCTLShowRacecarBackground"
+    private static let iconModeDefaultsKey = "VMCTLIconMode"
     private static let defaultVMRootDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)
+
+    enum IconMode: String {
+        case system
+        case light
+        case dark
+    }
 
     private let cliURL: URL
     private let commandQueue = DispatchQueue(label: "vmctl.app.command")
     private let userDefaults = UserDefaults.standard
     private var vmRootDirectory: URL
+    private var showsRacecarBackground: Bool
+    private var iconMode: IconMode
     private let controller: VMController
     private let library: VMLibrary
+    private let ipswLibrary: IPSWLibrary
     private let viewModel = VMListViewModel()
-    private let recognizedBundleExtension = "virtualmachine"
+    private var cachedRestoreImages: [IPSWCachedImage] = []
 
     private var window: NSWindow!
     private var statusTimer: Timer?
     private weak var createSheet: NSPanel?
     private weak var editSheet: NSPanel?
     private weak var settingsSheet: NSPanel?
-    private var createForm: CreateForm?
-    private var editForm: EditForm?
-    private var settingsForm: SettingsForm?
+    private var createViewModel: CreateVMViewModel?
+    private var editViewModel: EditSettingsViewModel?
+    private var settingsViewModel: SettingsViewModel?
     private var installSessions: [String: InstallProgressSession] = [:]
     private var runningProcesses: [RunningProcess] = []
     private var managedSessions: [String: EmbeddedVMSession] = [:]
     private var pendingLaunchPaths: Set<String> = []
     private var awaitingQuitConfirmation = false
+    private var pendingFeedVerificationTask: URLSessionDataTask?
+    private var ipswManagerController: IPSWManagerWindowController?
+    private var toolsMenu: NSMenu?
+    private var screenshotMenuItem: NSMenuItem?
 
     private struct RunningProcess {
         let process: Process
         let pipe: Pipe
     }
 
-    private struct CreateForm {
-        let panel: NSPanel
-        let nameField: NSTextField
-        let cpuField: NSTextField
-        let memoryField: NSTextField
-        let diskField: NSTextField
-        let restoreImageField: NSTextField
-        let sharedFolderField: NSTextField
-        let sharedWritableCheckbox: NSButton
-        let createButton: NSButton
+    final class CreateVMViewModel: ObservableObject {
+        struct RestoreItem: Identifiable {
+            let path: String
+            let title: String
+            var id: String { path }
+        }
+
+        @Published var name: String = ""
+        @Published var cpuCount: String = "4"
+        @Published var memoryGiB: String = "8"
+        @Published var diskGiB: String = "64"
+        @Published var sharedFolderPath: String = ""
+        @Published var sharedFolderWritable: Bool = false
+        @Published private(set) var restoreItems: [RestoreItem] = []
+        @Published var selectedRestorePath: String?
+        var customRestoreURL: URL?
+
+        func setRestoreItems(from cached: [IPSWCachedImage], preferredSelection: String? = nil) {
+            var items: [RestoreItem] = []
+            if let custom = customRestoreURL {
+                items.append(RestoreItem(path: custom.path, title: "Custom: \(custom.lastPathComponent)"))
+            }
+            for image in cached {
+                items.append(RestoreItem(path: image.fileURL.path, title: image.displayName))
+            }
+            restoreItems = items
+            let desiredSelection = preferredSelection ?? selectedRestorePath
+            if let desiredSelection, items.contains(where: { $0.path == desiredSelection }) {
+                selectedRestorePath = desiredSelection
+            } else {
+                selectedRestorePath = items.first?.path
+            }
+        }
+
+        var hasRestoreOptions: Bool {
+            !restoreItems.isEmpty
+        }
     }
 
-    private struct EditForm {
+    final class EditSettingsViewModel: ObservableObject {
         let name: String
         let bundleURL: URL
-        let panel: NSPanel
-        let cpuField: NSTextField
-        let memoryField: NSTextField
-        let diskField: NSTextField
-        let sharedFolderField: NSTextField
-        let sharedWritableCheckbox: NSButton
-        let saveButton: NSButton
+        @Published var cpuCount: String
+        @Published var memoryGiB: String
+        let diskDescription: String
+        @Published var sharedFolderPath: String
+        @Published var sharedFolderWritable: Bool
+
+        init(
+            name: String,
+            bundleURL: URL,
+            cpuCount: String,
+            memoryGiB: String,
+            diskDescription: String,
+            sharedFolderPath: String,
+            sharedFolderWritable: Bool
+        ) {
+            self.name = name
+            self.bundleURL = bundleURL
+            self.cpuCount = cpuCount
+            self.memoryGiB = memoryGiB
+            self.diskDescription = diskDescription
+            self.sharedFolderPath = sharedFolderPath
+            self.sharedFolderWritable = sharedFolderWritable
+        }
     }
 
-    private struct SettingsForm {
-        let panel: NSPanel
-        let pathField: NSTextField
+    final class SettingsViewModel: ObservableObject {
+        @Published var vmPath: String
+        @Published var ipswPath: String
+        @Published var feedURLString: String
+        @Published var verificationMessage: String?
+        @Published var verificationWasSuccessful: Bool?
+        @Published var isVerifying: Bool = false
+        @Published var showRacecarBackground: Bool
+        @Published var iconMode: VMCTLApp.IconMode
+
+        init(vmPath: String, ipswPath: String, feedURLString: String, showRacecarBackground: Bool, iconMode: VMCTLApp.IconMode) {
+            self.vmPath = vmPath
+            self.ipswPath = ipswPath
+            self.feedURLString = feedURLString
+            self.showRacecarBackground = showRacecarBackground
+            self.iconMode = iconMode
+        }
     }
 
     private struct InstallProgressSession {
@@ -518,9 +1363,23 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         } else {
             vmRootDirectory = VMCTLApp.defaultVMRootDirectory
         }
+        if let storedFlag = userDefaults.object(forKey: VMCTLApp.showRacecarDefaultsKey) as? Bool {
+            showsRacecarBackground = storedFlag
+        } else {
+            showsRacecarBackground = true
+        }
+        if let storedIcon = userDefaults.string(forKey: VMCTLApp.iconModeDefaultsKey),
+           let parsed = IconMode(rawValue: storedIcon) {
+            iconMode = parsed
+        } else {
+            iconMode = .system
+        }
         controller = VMController(rootDirectory: vmRootDirectory)
         library = VMLibrary(defaults: userDefaults)
+        ipswLibrary = IPSWLibrary(defaults: userDefaults)
+        cachedRestoreImages = ipswLibrary.cachedImages()
         library.addBundles(in: vmRootDirectory)
+        viewModel.showsRacecarBackground = showsRacecarBackground
         super.init()
     }
 
@@ -532,15 +1391,35 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         app.run()
     }
 
+    private func updateApplicationAndBundleIcons(for appearance: NSAppearance) {
+        let appearanceName: NSAppearance.Name?
+        switch iconMode {
+        case .light:
+            appearanceName = .aqua
+        case .dark:
+            appearanceName = .darkAqua
+        case .system:
+            appearanceName = appearance.bestMatch(from: [.darkAqua, .aqua])
+        }
+        let resourceName = (appearanceName == .darkAqua) ? "ghostvm-dark" : "ghostvm"
+        guard let iconURL = Bundle.main.url(forResource: resourceName, withExtension: "png"),
+              let image = NSImage(contentsOf: iconURL) else {
+            return
+        }
+        NSApplication.shared.applicationIconImage = image
+
+        let workspace = NSWorkspace.shared
+        for url in library.bundleURLs {
+            workspace.setIcon(image, forFile: url.path, options: [])
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenus()
         buildInterface()
         window.center()
         window.makeKeyAndOrderFront(nil)
-        if let iconURL = Bundle.main.url(forResource: "icon", withExtension: "png"),
-           let image = NSImage(contentsOf: iconURL) {
-            NSApplication.shared.applicationIconImage = image
-        }
+        updateApplicationAndBundleIcons(for: NSApplication.shared.effectiveAppearance)
         NSApplication.shared.activate(ignoringOtherApps: true)
         refreshVMs()
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
@@ -568,9 +1447,9 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let names = activeSessions.values.map { $0.name }.sorted().joined(separator: ", ")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Suspend running virtual machines before quitting?"
-        alert.informativeText = "The following VMs are still running:\n\(names)\nThey need to be suspended before the app quits."
-        alert.addButton(withTitle: "Suspend & Quit")
+        alert.messageText = "Shut down running virtual machines before quitting?"
+        alert.informativeText = "The following VMs are still running:\n\(names)\nThey need to be shut down before the app quits."
+        alert.addButton(withTitle: "Shut Down & Quit")
         let cancel = alert.addButton(withTitle: "Cancel")
         cancel.keyEquivalent = "\u{1b}"
 
@@ -578,7 +1457,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
             awaitingQuitConfirmation = true
-            suspendSessionsBeforeQuit(Array(activeSessions.values))
+            shutdownSessionsBeforeQuit(Array(activeSessions.values))
             return .terminateLater
         }
         return .terminateCancel
@@ -608,6 +1487,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         handleOpenRequests(urls)
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        updateToolsMenuVisibility()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        updateToolsMenuVisibility()
+    }
+
     // MARK: - Menu & Interface
 
     private func handleOpenRequests(_ urls: [URL]) {
@@ -616,7 +1503,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     private func isRecognizedVMBundle(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == recognizedBundleExtension
+        return ext == VMController.bundleExtensionLowercased
     }
 
     private func registerBundles(_ urls: [URL], autoLaunch: Bool) {
@@ -721,12 +1608,52 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        let toolsMenuItem = NSMenuItem()
+        mainMenu.addItem(toolsMenuItem)
+        let toolsMenu = NSMenu(title: "Tools")
+        toolsMenuItem.submenu = toolsMenu
+        let sendInputMenuItem = NSMenuItem(title: "Send Input", action: nil, keyEquivalent: "")
+        let sendInputMenu = NSMenu(title: "Send Input")
+        sendInputMenuItem.submenu = sendInputMenu
+
+        let escapeItem = NSMenuItem(title: "Escape", action: #selector(sendEscapeKey(_:)), keyEquivalent: "")
+        escapeItem.target = self
+        sendInputMenu.addItem(escapeItem)
+
+        let returnItem = NSMenuItem(title: "Return", action: #selector(sendReturnKey(_:)), keyEquivalent: "")
+        returnItem.target = self
+        sendInputMenu.addItem(returnItem)
+
+        let tabItem = NSMenuItem(title: "Tab", action: #selector(sendTabKey(_:)), keyEquivalent: "")
+        tabItem.target = self
+        sendInputMenu.addItem(tabItem)
+
+        let spaceItem = NSMenuItem(title: "Space", action: #selector(sendSpaceKey(_:)), keyEquivalent: "")
+        spaceItem.target = self
+        sendInputMenu.addItem(spaceItem)
+
+        toolsMenu.addItem(sendInputMenuItem)
+        toolsMenu.addItem(NSMenuItem.separator())
+
+        let screenshotItem = NSMenuItem(title: "Screenshot", action: #selector(captureScreenshotFromMenu(_:)), keyEquivalent: "s")
+        screenshotItem.keyEquivalentModifierMask = [.command, .shift]
+        screenshotItem.target = self
+        toolsMenu.addItem(screenshotItem)
+        toolsMenuItem.isHidden = true
+        screenshotItem.isEnabled = false
+        self.toolsMenu = toolsMenu
+        self.screenshotMenuItem = screenshotItem
+
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "Window")
         windowMenuItem.submenu = windowMenu
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        let ipswManagerItem = NSMenuItem(title: "Manage Restore Images", action: #selector(showIPSWManagerFromMenu(_:)), keyEquivalent: "")
+        ipswManagerItem.target = self
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(ipswManagerItem)
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
@@ -740,7 +1667,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.isReleasedWhenClosed = false
-        window.title = "Virtual Machine Manager"
+        window.delegate = self
+        window.title = "GhostVM"
 
         let content = MainView(
             model: viewModel,
@@ -1106,6 +2034,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                 default:
                     self.viewModel.busyBundlePaths.remove(bundlePath)
                 }
+                self.updateToolsMenuVisibility()
             }
         }
 
@@ -1127,10 +2056,12 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
             self.viewModel.busyBundlePaths.remove(bundlePath)
             self.refreshVMs()
+            self.updateToolsMenuVisibility()
         }
+        updateToolsMenuVisibility()
     }
 
-    private func suspendSessionsBeforeQuit(_ sessions: [EmbeddedVMSession]) {
+    private func shutdownSessionsBeforeQuit(_ sessions: [EmbeddedVMSession]) {
         if sessions.isEmpty {
             awaitingQuitConfirmation = false
             NSApp.reply(toApplicationShouldTerminate: true)
@@ -1160,6 +2091,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             return
         }
 
+        cachedRestoreImages = ipswLibrary.cachedImages()
+
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 480, height: 380),
             styleMask: [.titled, .closable],
@@ -1172,155 +2105,71 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.center()
 
-        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
-        panel.contentView = contentView
+        let viewModel = CreateVMViewModel()
+        viewModel.setRestoreItems(from: cachedRestoreImages)
+        createViewModel = viewModel
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
-
-        contentView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-        ])
-
-        let descriptionLabel = NSTextField(labelWithString: "Provide a name and required .ipsw restore image. Adjust CPU, memory, and disk as needed. Shared folder is optional.")
-        descriptionLabel.lineBreakMode = .byWordWrapping
-        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        stack.addArrangedSubview(descriptionLabel)
-
-        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
-
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.distribution = .fill
-
-            control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(control)
-            if let trailing = trailing {
-                row.addArrangedSubview(trailing)
-            }
-
-            return row
-        }
-
-        let nameField = NSTextField(string: "")
-        nameField.placeholderString = "sandbox"
-        stack.addArrangedSubview(labeledRow("Name", control: nameField))
-
-        let cpuField = NSTextField(string: "4")
-        cpuField.placeholderString = "Number of vCPUs"
-        stack.addArrangedSubview(labeledRow("CPUs", control: cpuField))
-
-        let memoryField = NSTextField(string: "8")
-        memoryField.placeholderString = "GiB"
-        stack.addArrangedSubview(labeledRow("Memory", control: memoryField))
-
-        let diskField = NSTextField(string: "64")
-        diskField.placeholderString = "GiB (minimum 20)"
-        stack.addArrangedSubview(labeledRow("Disk", control: diskField))
-
-        let restoreField = NSTextField(string: "")
-        restoreField.placeholderString = "Path to macOS .ipsw restore image"
-        let restoreBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseRestoreImage))
-        stack.addArrangedSubview(labeledRow("Restore Image*", control: restoreField, trailing: restoreBrowse))
-
-        let sharedField = NSTextField(string: "")
-        sharedField.placeholderString = "Optional shared folder path"
-        let sharedBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseSharedFolder))
-        stack.addArrangedSubview(labeledRow("Shared Folder", control: sharedField, trailing: sharedBrowse))
-
-        let sharedWritable = NSButton(checkboxWithTitle: "Allow writes to shared folder", target: nil, action: nil)
-        stack.addArrangedSubview(sharedWritable)
-
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillProportionally
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelCreateSheet))
-        cancelButton.bezelStyle = .rounded
-
-        let createButton = NSButton(title: "Create", target: self, action: #selector(confirmCreateSheet))
-        createButton.bezelStyle = .rounded
-        createButton.keyEquivalent = "\r"
-
-        buttonRow.addArrangedSubview(spacer)
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(createButton)
-
-        stack.addArrangedSubview(buttonRow)
-
-        createForm = CreateForm(
-            panel: panel,
-            nameField: nameField,
-            cpuField: cpuField,
-            memoryField: memoryField,
-            diskField: diskField,
-            restoreImageField: restoreField,
-            sharedFolderField: sharedField,
-            sharedWritableCheckbox: sharedWritable,
-            createButton: createButton
+        let rootView = CreateVMView(
+            model: viewModel,
+            browseRestore: { [weak self] in self?.browseRestoreImage(nil) },
+            browseSharedFolder: { [weak self] in self?.browseSharedFolderFromCreateSheet() },
+            manageRestoreImages: { [weak self] in self?.presentIPSWManager() },
+            cancel: { [weak self] in self?.cancelCreateSheet(nil) },
+            create: { [weak self] in self?.confirmCreateSheet(nil) }
         )
+
+        let hosting = NSHostingController(rootView: rootView)
+        panel.contentViewController = hosting
+
         createSheet = panel
 
         window.beginSheet(panel) { [weak self] _ in
             self?.createSheet = nil
-            self?.createForm = nil
+            self?.createViewModel = nil
         }
     }
 
+    private func updateCreateRestoreItems(selecting path: String? = nil) {
+        createViewModel?.setRestoreItems(from: cachedRestoreImages, preferredSelection: path)
+    }
+
     @objc private func cancelCreateSheet(_ sender: Any?) {
-        guard let panel = createForm?.panel else { return }
+        guard let panel = createSheet else { return }
         window?.endSheet(panel)
     }
 
     @objc private func confirmCreateSheet(_ sender: Any?) {
-        guard let form = createForm else { return }
+        guard let viewModel = createViewModel else { return }
 
-        let name = form.nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = viewModel.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else {
             presentErrorAlert(message: "Name Required", informative: "Please provide a name for the new virtual machine.")
             return
         }
 
-        guard let cpus = Int(form.cpuField.stringValue), cpus > 0 else {
+        guard let cpus = Int(viewModel.cpuCount), cpus > 0 else {
             presentErrorAlert(message: "Invalid CPU Count", informative: "Enter a positive integer for vCPU count.")
             return
         }
 
-        guard let memory = Int(form.memoryField.stringValue), memory > 0 else {
+        guard let memory = Int(viewModel.memoryGiB), memory > 0 else {
             presentErrorAlert(message: "Invalid Memory", informative: "Enter memory in GiB (positive integer).")
             return
         }
 
-        guard let disk = Int(form.diskField.stringValue), disk >= 20 else {
+        guard let disk = Int(viewModel.diskGiB), disk >= 20 else {
             presentErrorAlert(message: "Invalid Disk Size", informative: "Disk size must be at least 20 GiB.")
             return
         }
 
-        let restorePath = form.restoreImageField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !restorePath.isEmpty else {
-            presentErrorAlert(message: "Restore Image Required", informative: "Select a macOS .ipsw restore image before creating the VM.")
+        guard let selectedRestorePath = viewModel.selectedRestorePath else {
+            presentErrorAlert(message: "Restore Image Required", informative: "Select or browse for a macOS .ipsw restore image before creating the VM.")
+            return
+        }
+        let normalizedRestorePath = (selectedRestorePath as NSString).expandingTildeInPath
+        guard FileManager.default.fileExists(atPath: normalizedRestorePath) else {
+            presentErrorAlert(message: "Restore Image Missing", informative: "The selected restore image could not be found at \(normalizedRestorePath).")
+            updateCreateRestoreItems()
             return
         }
 
@@ -1328,19 +2177,20 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         options.cpus = cpus
         options.memoryGiB = UInt64(memory)
         options.diskGiB = UInt64(disk)
-        options.restoreImagePath = restorePath
+        options.restoreImagePath = normalizedRestorePath
 
-        let sharedPath = form.sharedFolderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sharedPath = viewModel.sharedFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sharedPath.isEmpty {
             options.sharedFolderPath = sharedPath
-            options.sharedFolderWritable = (form.sharedWritableCheckbox.state == .on)
+            options.sharedFolderWritable = viewModel.sharedFolderWritable
         }
 
         let savePanel = NSSavePanel()
         savePanel.directoryURL = vmRootDirectory
         savePanel.canCreateDirectories = true
         savePanel.prompt = "Create"
-        savePanel.nameFieldStringValue = "\(name).\(VMController.bundleExtension)"
+        // Let NSSavePanel/UTType add the extension to avoid double extensions.
+        savePanel.nameFieldStringValue = name
         if #available(macOS 11.0, *) {
             if let bundleType = UTType(filenameExtension: VMController.bundleExtension.lowercased()) {
                 savePanel.allowedContentTypes = [bundleType]
@@ -1349,16 +2199,20 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             savePanel.allowedFileTypes = [VMController.bundleExtension]
         }
 
-        savePanel.beginSheetModal(for: form.panel) { [weak self] response in
+        guard let sheet = createSheet else { return }
+
+        savePanel.beginSheetModal(for: sheet) { [weak self] response in
             guard let self else { return }
             guard response == .OK, var destination = savePanel.url else { return }
-            if destination.pathExtension.lowercased() != VMController.bundleExtensionLowercased {
-                destination.deletePathExtension()
-                destination.appendPathExtension(VMController.bundleExtension)
+            // Normalize to a single .GhostVM extension with canonical casing.
+            var base = destination.deletingPathExtension()
+            while base.pathExtension.lowercased() == VMController.bundleExtensionLowercased {
+                base = base.deletingPathExtension()
             }
-            self.window?.endSheet(form.panel)
-            self.createForm = nil
+            destination = base.appendingPathExtension(VMController.bundleExtension)
+            self.window?.endSheet(sheet)
             self.createSheet = nil
+            self.createViewModel = nil
             self.createVM(at: destination, name: name, options: options)
         }
     }
@@ -1419,7 +2273,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         guard let window = self.window else { return }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 320),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -1430,147 +2284,62 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.center()
 
-        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
-        panel.contentView = contentView
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
-
-        contentView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-        ])
-
-        let descriptionLabel = NSTextField(labelWithString: "Adjust CPU, memory, and shared folder settings. Changes apply the next time the VM starts.")
-        descriptionLabel.lineBreakMode = .byWordWrapping
-        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        stack.addArrangedSubview(descriptionLabel)
-
-        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
-
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.distribution = .fill
-
-            control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(control)
-            if let trailing = trailing {
-                row.addArrangedSubview(trailing)
-            }
-
-            return row
-        }
-
-        let nameField = NSTextField(string: name)
-        nameField.isEnabled = false
-        stack.addArrangedSubview(labeledRow("Name", control: nameField))
-
-        let cpuField = NSTextField(string: "\(config.cpus)")
-        cpuField.placeholderString = "Number of vCPUs"
-        stack.addArrangedSubview(labeledRow("CPUs", control: cpuField))
-
         let memoryGiB = max(1, Int((config.memoryBytes + ((1 << 30) - 1)) >> 30))
-        let memoryField = NSTextField(string: "\(memoryGiB)")
-        memoryField.placeholderString = "GiB"
-        stack.addArrangedSubview(labeledRow("Memory", control: memoryField))
-
         let diskFormatter = ByteCountFormatter()
         diskFormatter.allowedUnits = [.useGB]
         diskFormatter.countStyle = .file
         diskFormatter.includesUnit = true
         let diskDisplay = diskFormatter.string(fromByteCount: Int64(config.diskBytes))
-        let diskField = NSTextField(string: diskDisplay)
-        diskField.isEnabled = false
-        stack.addArrangedSubview(labeledRow("Disk", control: diskField))
+        let sharedPath = config.sharedFolderPath ?? ""
+        let sharedWritableDefault = sharedPath.isEmpty ? false : !config.sharedFolderReadOnly
 
-        let sharedField = NSTextField(string: config.sharedFolderPath ?? "")
-        sharedField.placeholderString = "Optional shared folder path"
-        let sharedBrowse = NSButton(title: "Browse…", target: self, action: #selector(browseSharedFolder))
-        stack.addArrangedSubview(labeledRow("Shared Folder", control: sharedField, trailing: sharedBrowse))
-
-        let sharedWritable = NSButton(checkboxWithTitle: "Allow writes to shared folder", target: nil, action: nil)
-        if let sharedPath = config.sharedFolderPath, !sharedPath.isEmpty {
-            sharedWritable.state = config.sharedFolderReadOnly ? .off : .on
-        } else {
-            sharedWritable.state = .off
-        }
-        stack.addArrangedSubview(sharedWritable)
-
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillProportionally
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelEditSheet))
-        cancelButton.bezelStyle = .rounded
-
-        let saveButton = NSButton(title: "Save", target: self, action: #selector(confirmEditSheet))
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"
-
-        buttonRow.addArrangedSubview(spacer)
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(saveButton)
-        stack.addArrangedSubview(buttonRow)
-
-        editForm = EditForm(
+        let model = EditSettingsViewModel(
             name: name,
             bundleURL: bundleURL,
-            panel: panel,
-            cpuField: cpuField,
-            memoryField: memoryField,
-            diskField: diskField,
-            sharedFolderField: sharedField,
-            sharedWritableCheckbox: sharedWritable,
-            saveButton: saveButton
+            cpuCount: "\(config.cpus)",
+            memoryGiB: "\(memoryGiB)",
+            diskDescription: diskDisplay,
+            sharedFolderPath: sharedPath,
+            sharedFolderWritable: sharedWritableDefault
         )
+        editViewModel = model
+
+        let rootView = EditSettingsView(
+            model: model,
+            browseSharedFolder: { [weak self] in self?.browseSharedFolderFromEditSheet() },
+            cancel: { [weak self] in self?.cancelEditSheet(nil) },
+            save: { [weak self] in self?.confirmEditSheet(nil) }
+        )
+
+        let hosting = NSHostingController(rootView: rootView)
+        panel.contentViewController = hosting
 
         editSheet = panel
         window.beginSheet(panel) { [weak self] _ in
             self?.editSheet = nil
-            self?.editForm = nil
+            self?.editViewModel = nil
         }
     }
 
     @objc private func cancelEditSheet(_ sender: Any?) {
-        guard let panel = editForm?.panel else { return }
+        guard let panel = editSheet else { return }
         window?.endSheet(panel)
     }
 
     @objc private func confirmEditSheet(_ sender: Any?) {
-        guard let form = editForm else { return }
+        guard let model = editViewModel, let panel = editSheet else { return }
 
-        guard let cpus = Int(form.cpuField.stringValue), cpus > 0 else {
+        guard let cpus = Int(model.cpuCount), cpus > 0 else {
             presentErrorAlert(message: "Invalid CPU Count", informative: "Enter a positive integer for vCPU count.")
             return
         }
 
-        guard let memoryValue = UInt64(form.memoryField.stringValue), memoryValue > 0 else {
+        guard let memoryValue = UInt64(model.memoryGiB), memoryValue > 0 else {
             presentErrorAlert(message: "Invalid Memory", informative: "Enter memory in GiB (positive number).")
             return
         }
 
-        let sharedPathValue = form.sharedFolderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sharedPathValue = model.sharedFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
         if !sharedPathValue.isEmpty {
             var isDirectory: ObjCBool = false
             if !FileManager.default.fileExists(atPath: sharedPathValue, isDirectory: &isDirectory) || !isDirectory.boolValue {
@@ -1579,13 +2348,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        window?.endSheet(form.panel)
+        window?.endSheet(panel)
 
-        let name = form.name
-        let bundleURL = form.bundleURL
+        let name = model.name
+        let bundleURL = model.bundleURL
         let bundlePath = bundleURL.path
         let sharedPath = sharedPathValue.isEmpty ? nil : sharedPathValue
-        let writable = (form.sharedWritableCheckbox.state == .on)
+        let writable = model.sharedFolderWritable
 
         viewModel.busyBundlePaths.insert(bundlePath)
         viewModel.statusMessage = "Updating \(name)…"
@@ -1631,7 +2400,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 220),
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 260),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -1642,100 +2411,46 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.center()
 
-        let contentView = NSView(frame: panel.contentRect(forFrameRect: panel.frame))
-        panel.contentView = contentView
+        let model = SettingsViewModel(
+            vmPath: vmRootDirectory.path,
+            ipswPath: ipswLibrary.cacheDirectoryURL.path,
+            feedURLString: ipswLibrary.feedURL.absoluteString,
+            showRacecarBackground: showsRacecarBackground,
+            iconMode: iconMode
+        )
+        settingsViewModel = model
 
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 14
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 24, bottom: 18, right: 24)
+        let rootView = SettingsView(
+            model: model,
+            browseVMFolder: { [weak self] in self?.browseVMFolder() },
+            browseIPSWFolder: { [weak self] in self?.browseIPSWFolder() },
+            verifyFeed: { [weak self] in self?.verifyFeedURL() },
+            resetDefaults: { [weak self] in self?.resetDirectoriesToDefault() },
+            cancel: { [weak self] in self?.cancelSettingsSheet() },
+            save: { [weak self] in self?.confirmSettingsSheet() }
+        )
 
-        contentView.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: contentView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor)
-        ])
-
-        let descriptionLabel = NSTextField(labelWithString: "Choose where Virtual Machine Manager stores .VirtualMachine bundles. Changes take effect immediately.")
-        descriptionLabel.lineBreakMode = .byWordWrapping
-        descriptionLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        stack.addArrangedSubview(descriptionLabel)
-
-        func labeledRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSView {
-            let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12, weight: .semibold)
-
-            let row = NSStackView()
-            row.orientation = .horizontal
-            row.alignment = .centerY
-            row.spacing = 8
-            row.distribution = .fill
-
-            control.translatesAutoresizingMaskIntoConstraints = false
-            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 260).isActive = true
-
-            row.addArrangedSubview(label)
-            row.addArrangedSubview(control)
-            if let trailing = trailing {
-                row.addArrangedSubview(trailing)
-            }
-            return row
-        }
-
-        let pathField = NSTextField(string: vmRootDirectory.path)
-        pathField.placeholderString = VMCTLApp.defaultVMRootDirectory.path
-        let browseButton = NSButton(title: "Browse…", target: self, action: #selector(browseVMFolder(_:)))
-        stack.addArrangedSubview(labeledRow("VMs Folder", control: pathField, trailing: browseButton))
-
-        let buttonRow = NSStackView()
-        buttonRow.orientation = .horizontal
-        buttonRow.alignment = .centerY
-        buttonRow.spacing = 8
-        buttonRow.distribution = .fillProportionally
-
-        let resetButton = NSButton(title: "Reset to Default", target: self, action: #selector(resetVMFolderToDefault(_:)))
-        resetButton.bezelStyle = .rounded
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancelSettingsSheet(_:)))
-        cancelButton.bezelStyle = .rounded
-
-        let saveButton = NSButton(title: "Save", target: self, action: #selector(confirmSettingsSheet(_:)))
-        saveButton.bezelStyle = .rounded
-        saveButton.keyEquivalent = "\r"
-
-        buttonRow.addArrangedSubview(resetButton)
-        buttonRow.addArrangedSubview(spacer)
-        buttonRow.addArrangedSubview(cancelButton)
-        buttonRow.addArrangedSubview(saveButton)
-        stack.addArrangedSubview(buttonRow)
-
-        settingsForm = SettingsForm(panel: panel, pathField: pathField)
+        let hosting = NSHostingController(rootView: rootView)
+        panel.contentViewController = hosting
         settingsSheet = panel
 
         window.beginSheet(panel) { [weak self] _ in
             self?.settingsSheet = nil
-            self?.settingsForm = nil
+            self?.settingsViewModel = nil
         }
     }
 
-    @objc private func cancelSettingsSheet(_ sender: Any?) {
-        guard let panel = settingsForm?.panel else { return }
+    private func cancelSettingsSheet() {
+        pendingFeedVerificationTask?.cancel()
+        settingsViewModel?.isVerifying = false
+        guard let panel = settingsSheet else { return }
         window?.endSheet(panel)
     }
 
-    @objc private func confirmSettingsSheet(_ sender: Any?) {
-        guard let form = settingsForm else { return }
+    private func confirmSettingsSheet() {
+        guard let viewModel = settingsViewModel, let panel = settingsSheet else { return }
 
-        let rawPath = form.pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawPath = viewModel.vmPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !rawPath.isEmpty else {
             presentErrorAlert(message: "Folder Required", informative: "Enter or choose a folder to store your virtual machines.")
             return
@@ -1761,19 +2476,114 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
         }
 
-        window?.endSheet(form.panel)
+        let rawIPSWPath = viewModel.ipswPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackIPSWPath = IPSWLibrary.defaultCacheDirectory().path
+        let ipswInputPath = rawIPSWPath.isEmpty ? fallbackIPSWPath : rawIPSWPath
+        let ipswExpanded = (ipswInputPath as NSString).expandingTildeInPath
+        let ipswResolvedPath = ipswExpanded.isEmpty ? ipswInputPath : ipswExpanded
+        let ipswURL = URL(fileURLWithPath: ipswResolvedPath, isDirectory: true).standardizedFileURL
+        var isIPSWDirectory: ObjCBool = false
+        if fm.fileExists(atPath: ipswURL.path, isDirectory: &isIPSWDirectory) {
+            if !isIPSWDirectory.boolValue {
+                presentErrorAlert(message: "Not a Folder", informative: "\(ipswURL.path) exists but is not a directory.")
+                return
+            }
+        } else {
+            do {
+                try fm.createDirectory(at: ipswURL, withIntermediateDirectories: true, attributes: nil)
+            } catch {
+                presentErrorAlert(message: "Failed to Create IPSW Folder", informative: error.localizedDescription)
+                return
+            }
+        }
+
+        let trimmedFeed = viewModel.feedURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosenFeedURL: URL
+        if trimmedFeed.isEmpty {
+            chosenFeedURL = IPSWLibrary.defaultFeedURL
+        } else if let parsed = URL(string: trimmedFeed), let scheme = parsed.scheme?.lowercased(), ["http", "https"].contains(scheme) {
+            chosenFeedURL = parsed
+        } else {
+            presentErrorAlert(message: "Invalid Feed URL", informative: "Enter a valid HTTP or HTTPS URL for the IPSW feed.")
+            return
+        }
+
+        do {
+            try ipswLibrary.updateCacheDirectory(ipswURL)
+            refreshCachedRestoreImages()
+            ipswManagerController?.cacheDirectoryDidChange()
+        } catch {
+            presentErrorAlert(message: "Failed to Update IPSW Folder", informative: error.localizedDescription)
+            return
+        }
+
+        window?.endSheet(panel)
+        settingsViewModel = nil
         applyVMRootDirectory(selectedURL)
+        ipswLibrary.feedURL = chosenFeedURL
+        ipswManagerController?.feedURLDidChange()
+
+        showsRacecarBackground = viewModel.showRacecarBackground
+        userDefaults.set(showsRacecarBackground, forKey: VMCTLApp.showRacecarDefaultsKey)
+        self.viewModel.showsRacecarBackground = showsRacecarBackground
+
+        iconMode = viewModel.iconMode
+        userDefaults.set(iconMode.rawValue, forKey: VMCTLApp.iconModeDefaultsKey)
+        updateApplicationAndBundleIcons(for: NSApplication.shared.effectiveAppearance)
     }
 
-    @objc private func browseVMFolder(_ sender: Any?) {
-        guard let form = settingsForm else { return }
-        presentSharedFolderPicker(attachedTo: form.panel) { path in
-            form.pathField.stringValue = path
+    private func browseVMFolder() {
+        guard let panel = settingsSheet, let viewModel = settingsViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.vmPath = path
         }
     }
 
-    @objc private func resetVMFolderToDefault(_ sender: Any?) {
-        settingsForm?.pathField.stringValue = VMCTLApp.defaultVMRootDirectory.path
+    private func browseIPSWFolder() {
+        guard let panel = settingsSheet, let viewModel = settingsViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.ipswPath = path
+        }
+    }
+
+    private func resetDirectoriesToDefault() {
+        settingsViewModel?.vmPath = VMCTLApp.defaultVMRootDirectory.path
+        settingsViewModel?.ipswPath = IPSWLibrary.defaultCacheDirectory().path
+    }
+
+    private func verifyFeedURL() {
+        guard let viewModel = settingsViewModel else { return }
+        let rawValue = viewModel.feedURLString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawValue.isEmpty else {
+            presentErrorAlert(message: "Feed URL Required", informative: "Enter an IPSW feed URL before verifying.")
+            return
+        }
+        guard let parsed = URL(string: rawValue), let scheme = parsed.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
+            presentErrorAlert(message: "Invalid Feed URL", informative: "Enter a valid HTTP or HTTPS URL for the IPSW feed.")
+            return
+        }
+
+        pendingFeedVerificationTask?.cancel()
+        viewModel.isVerifying = true
+        viewModel.verificationMessage = nil
+        viewModel.verificationWasSuccessful = nil
+
+        pendingFeedVerificationTask = ipswLibrary.verifyFeed(at: parsed) { [weak self] result in
+            guard let self else { return }
+            self.pendingFeedVerificationTask = nil
+            guard let currentModel = self.settingsViewModel else { return }
+            currentModel.isVerifying = false
+
+            switch result {
+            case .success(let entries):
+                currentModel.verificationWasSuccessful = true
+                currentModel.verificationMessage = "Feed verified (\(entries.count) versions)."
+            case .failure(let error):
+                self.presentErrorAlert(message: "Failed to Verify Feed", informative: error.localizedDescription)
+                currentModel.verificationWasSuccessful = false
+                currentModel.verificationMessage = "Verification failed."
+            }
+        }
     }
 
     private func applyVMRootDirectory(_ url: URL) {
@@ -1785,8 +2595,15 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         refreshVMs()
     }
 
+    private func refreshCachedRestoreImages() {
+        cachedRestoreImages = ipswLibrary.cachedImages()
+        if createViewModel != nil {
+            updateCreateRestoreItems()
+        }
+    }
+
     @objc private func browseRestoreImage(_ sender: Any?) {
-        guard let form = createForm else { return }
+        guard let sheet = createSheet, createViewModel != nil else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -1796,22 +2613,26 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         }
         panel.title = "Select Restore Image"
         panel.prompt = "Choose"
-        panel.beginSheetModal(for: form.panel) { response in
+        panel.beginSheetModal(for: sheet) { [weak self] response in
+            guard let self else { return }
             if response == .OK, let url = panel.url {
-                form.restoreImageField.stringValue = url.path
+                self.createViewModel?.customRestoreURL = url
+                self.updateCreateRestoreItems(selecting: url.path)
             }
         }
     }
 
-    @objc private func browseSharedFolder(_ sender: Any?) {
-        if let form = createForm {
-            presentSharedFolderPicker(attachedTo: form.panel) { path in
-                form.sharedFolderField.stringValue = path
-            }
-        } else if let form = editForm {
-            presentSharedFolderPicker(attachedTo: form.panel) { path in
-                form.sharedFolderField.stringValue = path
-            }
+    private func browseSharedFolderFromCreateSheet() {
+        guard let panel = createSheet, let viewModel = createViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.sharedFolderPath = path
+        }
+    }
+
+    private func browseSharedFolderFromEditSheet() {
+        guard let panel = editSheet, let viewModel = editViewModel else { return }
+        presentSharedFolderPicker(attachedTo: panel) { path in
+            viewModel.sharedFolderPath = path
         }
     }
 
@@ -1825,6 +2646,409 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             if response == .OK, let url = openPanel.url {
                 update(url.path)
             }
+        }
+    }
+
+    private func presentIPSWManager() {
+        if ipswManagerController == nil {
+            ipswManagerController = IPSWManagerWindowController(library: ipswLibrary) { [weak self] in
+                self?.refreshCachedRestoreImages()
+            }
+        }
+        if let window = ipswManagerController?.window {
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
+    }
+
+    @objc private func showIPSWManagerFromMenu(_ sender: Any?) {
+        presentIPSWManager()
+    }
+
+    private func activeEmbeddedSessionForKeyWindow() -> EmbeddedVMSession? {
+        guard let keyWindow = NSApp.keyWindow else { return nil }
+        return managedSessions.values.first(where: { $0.window === keyWindow && $0.isRunning && !$0.isStopping })
+    }
+
+    private func updateToolsMenuVisibility() {
+        guard let toolsMenu else { return }
+        let hasActiveSessionWindow = activeEmbeddedSessionForKeyWindow() != nil
+        if let toolsItem = toolsMenu.supermenu?.items.first(where: { $0.submenu === toolsMenu }) {
+            toolsItem.isHidden = !hasActiveSessionWindow
+        }
+        screenshotMenuItem?.isEnabled = hasActiveSessionWindow
+    }
+
+    @objc private func captureScreenshotFromMenu(_ sender: Any?) {
+        guard let session = activeEmbeddedSessionForKeyWindow() else {
+            return
+        }
+
+        if #available(macOS 13.0, *) {
+            let activeSession = session
+            screenshotMenuItem?.isEnabled = false
+            viewModel.statusMessage = "Capturing screenshot for \(session.name)…"
+            session.captureScreenshot { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.screenshotMenuItem?.isEnabled = true
+                    switch result {
+                    case .success(let image):
+                        activeSession.flashDisplay()
+                        self.saveScreenshot(image, for: activeSession.name)
+                    case .failure(let error):
+                        self.viewModel.statusMessage = "Failed to capture screenshot: \(error.localizedDescription)"
+                        self.presentErrorAlert(message: "Screenshot Failed", informative: error.localizedDescription)
+                    }
+                }
+            }
+        } else {
+            presentErrorAlert(message: "Screenshot Unavailable", informative: "Screenshots require macOS 13 or newer.")
+        }
+    }
+
+    private func withActiveSession(_ body: (EmbeddedVMSession) -> Void) {
+        if let session = activeEmbeddedSessionForKeyWindow() {
+            body(session)
+        }
+    }
+
+    @objc private func sendEscapeKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.escape) }
+    }
+
+    @objc private func sendReturnKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.return) }
+    }
+
+    @objc private func sendTabKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.tab) }
+    }
+
+    @objc private func sendSpaceKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.space) }
+    }
+
+    private func saveScreenshot(_ image: CGImage, for name: String) {
+        let fm = FileManager.default
+        let downloadsURL = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        let timestamp = formatter.string(from: Date())
+        let sanitizedName = name.replacingOccurrences(of: "/", with: "-")
+        let filename = "\(sanitizedName) \(timestamp).png"
+        let destinationURL = downloadsURL.appendingPathComponent(filename, isDirectory: false)
+
+        let destinationDir = destinationURL.deletingLastPathComponent()
+        if !fm.fileExists(atPath: destinationDir.path) {
+            try? fm.createDirectory(at: destinationDir, withIntermediateDirectories: true, attributes: nil)
+        }
+
+        guard let destinationSink = CGImageDestinationCreateWithURL(destinationURL as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            viewModel.statusMessage = "Failed to prepare screenshot destination."
+            return
+        }
+
+        CGImageDestinationAddImage(destinationSink, image, nil)
+        if CGImageDestinationFinalize(destinationSink) {
+            viewModel.statusMessage = "Saved screenshot to \(destinationURL.path)"
+            NSWorkspace.shared.activateFileViewerSelecting([destinationURL])
+        } else {
+            viewModel.statusMessage = "Failed to save screenshot."
+        }
+    }
+
+    // MARK: - IPSW Manager Window
+
+    @MainActor
+    private final class IPSWManagerViewModel: ObservableObject {
+        struct DownloadStatus {
+            let bytesWritten: Int64
+            let totalBytes: Int64
+            let speedBytesPerSecond: Double
+        }
+
+        @Published var entries: [IPSWFeedEntry] = []
+        @Published var statusMessage: String = ""
+        @Published var loading: Bool = false
+        @Published var downloadStatuses: [String: DownloadStatus] = [:]
+        @Published var cachedByFilename: [String: IPSWCachedImage] = [:]
+
+        private let library: IPSWLibrary
+        private let onCacheChanged: () -> Void
+        private var feedTask: URLSessionDataTask?
+        private var downloadTasks: [String: URLSessionDataTask] = [:]
+
+        init(library: IPSWLibrary, onCacheChanged: @escaping () -> Void) {
+            self.library = library
+            self.onCacheChanged = onCacheChanged
+            reloadCachedImages()
+            refreshFeed()
+        }
+
+        func refreshFeed() {
+            feedTask?.cancel()
+            reloadCachedImages()
+            loading = true
+            statusMessage = "Loading restore images…"
+            feedTask = library.fetchFeed { [weak self] result in
+                guard let self else { return }
+                self.loading = false
+                switch result {
+                case .success(let entries):
+                    self.entries = entries
+                    self.statusMessage = "Showing \(entries.count) restore images from \(self.library.feedURL.host ?? self.library.feedURL.absoluteString)."
+                case .failure(let error):
+                    self.entries = []
+                    self.statusMessage = "Failed to load restore images: \(error.localizedDescription)"
+                }
+            }
+        }
+
+        func reloadCachedImages() {
+            let cached = library.cachedImages()
+            cachedByFilename = Dictionary(uniqueKeysWithValues: cached.map { ($0.fileURL.lastPathComponent, $0) })
+        }
+
+        func isCached(_ entry: IPSWFeedEntry) -> Bool {
+            return cachedByFilename[entry.filename] != nil
+        }
+
+        func progress(for entry: IPSWFeedEntry) -> DownloadStatus? {
+            return downloadStatuses[entry.id]
+        }
+
+        func download(entry: IPSWFeedEntry) {
+            guard downloadStatuses[entry.id] == nil else { return }
+            downloadStatuses[entry.id] = DownloadStatus(bytesWritten: 0, totalBytes: 0, speedBytesPerSecond: 0)
+            statusMessage = "Downloading \(entry.filename)…"
+            do {
+                let task = try library.download(entry: entry, progress: { [weak self] progress in
+                    guard let self else { return }
+                    self.downloadStatuses[entry.id] = DownloadStatus(
+                        bytesWritten: progress.bytesWritten,
+                        totalBytes: progress.totalBytes,
+                        speedBytesPerSecond: progress.speedBytesPerSecond
+                    )
+                }, completion: { [weak self] result in
+                    guard let self else { return }
+                    self.downloadTasks.removeValue(forKey: entry.id)
+                    self.downloadStatuses.removeValue(forKey: entry.id)
+                    switch result {
+                    case .success:
+                        self.reloadCachedImages()
+                        self.statusMessage = "Downloaded \(entry.filename)."
+                        self.onCacheChanged()
+                    case .failure(let error):
+                        if (error as NSError).code == NSURLErrorCancelled {
+                            self.statusMessage = "Cancelled download for \(entry.filename)."
+                        } else {
+                            self.statusMessage = "Failed to download \(entry.filename): \(error.localizedDescription)"
+                        }
+                    }
+                })
+                downloadTasks[entry.id] = task
+            } catch {
+                downloadStatuses.removeValue(forKey: entry.id)
+                statusMessage = "Failed to begin download for \(entry.filename): \(error.localizedDescription)"
+            }
+        }
+
+        func delete(entry: IPSWFeedEntry) {
+            guard let cached = cachedByFilename[entry.filename] else { return }
+            do {
+                try library.deleteImage(at: cached.fileURL)
+                reloadCachedImages()
+                statusMessage = "Deleted \(cached.fileURL.lastPathComponent)."
+                onCacheChanged()
+            } catch {
+                statusMessage = "Failed to delete \(cached.fileURL.lastPathComponent): \(error.localizedDescription)"
+            }
+        }
+
+        func showInFinder(entry: IPSWFeedEntry) {
+            let destination = library.cacheDirectoryURL.appendingPathComponent(entry.filename, isDirectory: false)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                NSWorkspace.shared.activateFileViewerSelecting([destination])
+            } else {
+                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: library.cacheDirectoryURL.path)
+            }
+        }
+
+        func cancel(entry: IPSWFeedEntry) {
+            if let task = downloadTasks.removeValue(forKey: entry.id) {
+                task.cancel()
+                downloadStatuses.removeValue(forKey: entry.id)
+                statusMessage = "Cancelled download for \(entry.filename)."
+            }
+        }
+    }
+
+    private struct IPSWManagerView: View {
+        @ObservedObject var model: IPSWManagerViewModel
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 8) {
+                    Text("Browse available macOS restore images from your configured feed. Download images for offline creation or delete cached copies.")
+                        .lineLimit(2)
+                    Spacer(minLength: 12)
+                    if model.loading {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                    Button("Reload") {
+                        model.refreshFeed()
+                    }
+                    .disabled(model.loading)
+                }
+
+                if model.entries.isEmpty {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color(nsColor: .textBackgroundColor))
+                            .opacity(0.2)
+                        Text(model.loading ? "Loading restore images…" : "No restore images available.")
+                            .foregroundStyle(.secondary)
+                            .padding()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List {
+                        ForEach(model.entries) { entry in
+                            IPSWEntryRow(
+                                entry: entry,
+                                isCached: model.isCached(entry),
+                                progress: model.progress(for: entry),
+                                downloadAction: { model.download(entry: entry) },
+                                deleteAction: { model.delete(entry: entry) },
+                                cancelAction: { model.cancel(entry: entry) }
+                            )
+                            .contextMenu {
+                                if model.isCached(entry) {
+                                    Button("Delete") {
+                                        model.delete(entry: entry)
+                                    }
+                                }
+                                Button("Show in Finder") {
+                                    model.showInFinder(entry: entry)
+                                }
+                            }
+                        }
+                    }
+                    .listStyle(.inset)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+
+                Text(model.statusMessage)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+            .frame(minWidth: 520, minHeight: 360)
+        }
+    }
+
+    private struct IPSWEntryRow: View {
+        let entry: IPSWFeedEntry
+        let isCached: Bool
+        let progress: IPSWManagerViewModel.DownloadStatus?
+        let downloadAction: () -> Void
+        let deleteAction: () -> Void
+        let cancelAction: () -> Void
+
+        var body: some View {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.displayName)
+                        .font(.system(size: 14, weight: .semibold))
+                    Text(entry.detailDescription + (isCached ? " · Cached" : ""))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if let progress {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        if progress.totalBytes > 0 {
+                            ProgressView(
+                                value: Double(progress.bytesWritten),
+                                total: Double(progress.totalBytes)
+                            )
+                            .frame(width: 160)
+                        } else {
+                            ProgressView()
+                                .frame(width: 160)
+                        }
+                        Text("\(Self.byteFormatter.string(fromByteCount: progress.bytesWritten)) / \(progress.totalBytes > 0 ? Self.byteFormatter.string(fromByteCount: progress.totalBytes) : "Unknown") · \(Self.speedFormatter(progress.speedBytesPerSecond))")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                let buttonLabel = progress != nil ? "Cancel" : (isCached ? "Delete" : "Download")
+                Button(buttonLabel) {
+                    if progress != nil {
+                        cancelAction()
+                    } else if isCached {
+                        deleteAction()
+                    } else {
+                        downloadAction()
+                    }
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.vertical, 4)
+        }
+
+        private static let byteFormatter: ByteCountFormatter = {
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useGB, .useMB, .useKB]
+            formatter.countStyle = .file
+            formatter.includesUnit = true
+            return formatter
+        }()
+
+        private static func speedFormatter(_ speed: Double) -> String {
+            guard speed > 0 else { return "0 B/s" }
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useGB, .useMB, .useKB]
+            formatter.countStyle = .file
+            formatter.includesUnit = true
+            formatter.includesActualByteCount = false
+            return formatter.string(fromByteCount: Int64(speed)) + "/s"
+        }
+    }
+
+    private final class IPSWManagerWindowController: NSWindowController {
+        private let viewModel: IPSWManagerViewModel
+
+        init(library: IPSWLibrary, onCacheChanged: @escaping () -> Void) {
+            self.viewModel = IPSWManagerViewModel(library: library, onCacheChanged: onCacheChanged)
+            let hosting = NSHostingController(rootView: IPSWManagerView(model: viewModel))
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 620, height: 420),
+                styleMask: [.titled, .closable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "Manage Restore Images"
+            window.minSize = NSSize(width: 520, height: 360)
+            window.contentViewController = hosting
+            super.init(window: window)
+        }
+
+        required init?(coder: NSCoder) {
+            return nil
+        }
+
+        func feedURLDidChange() {
+            viewModel.refreshFeed()
+        }
+
+        func cacheDirectoryDidChange() {
+            viewModel.reloadCachedImages()
         }
     }
 
