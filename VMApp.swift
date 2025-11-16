@@ -2425,6 +2425,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settingsWindow.title = "Settings"
         settingsWindow.delegate = self
         settingsWindow.isReleasedWhenClosed = false
+        settingsWindow.center()
 
         let model = SettingsViewModel(
             vmPath: vmRootDirectory.path,
