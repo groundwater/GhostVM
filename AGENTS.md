@@ -163,6 +163,7 @@ Extending / Creating New Agents
 * **Adding CLI commands** – Extend `CLI.run()` switch plus `showHelp`. Keep argument parsing side-effect free, then call into `VMController` or new helpers so UI and CLI stay consistent.
 * **Augmenting VM metadata** – Update `VMStoredConfig`, adjust JSON coding strategies, and ensure both CLI/App update and display the new fields (`VMRowView.statsDescription`).
 * **New UI features** – Prefer enhancing `VMListViewModel` or creating dedicated observable objects; route heavy lifting back through `VMController` or `vmctl` to avoid duplicating logic.
+* **Icons & appearance** – App and `.GhostVM` bundle icons are now driven by light/dark PNG resources (`ghostvm.png`, `ghostvm-dark.png`) wired in `VMCTLApp.applicationDidFinishLaunching` and copied via the `app` target in `Makefile`.
 * **Automation hooks** – The PID lock, snapshot layout, and `vmctl` textual output are the integration surface for external tooling (CI, scripts). Preserve backward compatibility when possible.
 
 Reference Map
