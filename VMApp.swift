@@ -2425,8 +2425,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.isFloatingPanel = false
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
-        panel.center()
         panel.delegate = self
+
+        let frameName = "VMCTLSettingsWindow"
+        if !panel.setFrameUsingName(frameName) {
+            panel.center()
+        }
+        panel.setFrameAutosaveName(frameName)
 
         let model = SettingsViewModel(
             vmPath: vmRootDirectory.path,
@@ -2466,20 +2471,26 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let expandedPath = (rawPath as NSString).expandingTildeInPath
         let resolvedPath = expandedPath.isEmpty ? rawPath : expandedPath
         let selectedURL = URL(fileURLWithPath: resolvedPath, isDirectory: true).standardizedFileURL
+
+        let currentVMRoot = vmRootDirectory
+        let vmRootChanged = selectedURL.standardizedFileURL != currentVMRoot
+
         let fm = FileManager.default
         var isDirectory: ObjCBool = false
 
-        if fm.fileExists(atPath: selectedURL.path, isDirectory: &isDirectory) {
-            if !isDirectory.boolValue {
-                presentErrorAlert(message: "Not a Folder", informative: "\(selectedURL.path) exists but is not a directory.")
-                return
-            }
-        } else {
-            do {
-                try fm.createDirectory(at: selectedURL, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                presentErrorAlert(message: "Failed to Create Folder", informative: error.localizedDescription)
-                return
+        if vmRootChanged {
+            if fm.fileExists(atPath: selectedURL.path, isDirectory: &isDirectory) {
+                if !isDirectory.boolValue {
+                    presentErrorAlert(message: "Not a Folder", informative: "\(selectedURL.path) exists but is not a directory.")
+                    return
+                }
+            } else {
+                do {
+                    try fm.createDirectory(at: selectedURL, withIntermediateDirectories: true, attributes: nil)
+                } catch {
+                    presentErrorAlert(message: "Failed to Create Folder", informative: error.localizedDescription)
+                    return
+                }
             }
         }
 
@@ -2489,18 +2500,22 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let ipswExpanded = (ipswInputPath as NSString).expandingTildeInPath
         let ipswResolvedPath = ipswExpanded.isEmpty ? ipswInputPath : ipswExpanded
         let ipswURL = URL(fileURLWithPath: ipswResolvedPath, isDirectory: true).standardizedFileURL
+        let currentIPSWDirectory = ipswLibrary.cacheDirectoryURL
+        let ipswDirectoryChanged = ipswURL.standardizedFileURL != currentIPSWDirectory
         var isIPSWDirectory: ObjCBool = false
-        if fm.fileExists(atPath: ipswURL.path, isDirectory: &isIPSWDirectory) {
-            if !isIPSWDirectory.boolValue {
-                presentErrorAlert(message: "Not a Folder", informative: "\(ipswURL.path) exists but is not a directory.")
-                return
-            }
-        } else {
-            do {
-                try fm.createDirectory(at: ipswURL, withIntermediateDirectories: true, attributes: nil)
-            } catch {
-                presentErrorAlert(message: "Failed to Create IPSW Folder", informative: error.localizedDescription)
-                return
+        if ipswDirectoryChanged {
+            if fm.fileExists(atPath: ipswURL.path, isDirectory: &isIPSWDirectory) {
+                if !isIPSWDirectory.boolValue {
+                    presentErrorAlert(message: "Not a Folder", informative: "\(ipswURL.path) exists but is not a directory.")
+                    return
+                }
+            } else {
+                do {
+                    try fm.createDirectory(at: ipswURL, withIntermediateDirectories: true, attributes: nil)
+                } catch {
+                    presentErrorAlert(message: "Failed to Create IPSW Folder", informative: error.localizedDescription)
+                    return
+                }
             }
         }
 
@@ -2515,18 +2530,25 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
 
-        do {
-            try ipswLibrary.updateCacheDirectory(ipswURL)
-            refreshCachedRestoreImages()
-            ipswManagerController?.cacheDirectoryDidChange()
-        } catch {
-            presentErrorAlert(message: "Failed to Update IPSW Folder", informative: error.localizedDescription)
-            return
+        if ipswDirectoryChanged {
+            do {
+                try ipswLibrary.updateCacheDirectory(ipswURL)
+                refreshCachedRestoreImages()
+                ipswManagerController?.cacheDirectoryDidChange()
+            } catch {
+                presentErrorAlert(message: "Failed to Update IPSW Folder", informative: error.localizedDescription)
+                return
+            }
         }
 
-        applyVMRootDirectory(selectedURL)
-        ipswLibrary.feedURL = chosenFeedURL
-        ipswManagerController?.feedURLDidChange()
+        if vmRootChanged {
+            applyVMRootDirectory(selectedURL)
+        }
+
+        if chosenFeedURL != ipswLibrary.feedURL {
+            ipswLibrary.feedURL = chosenFeedURL
+            ipswManagerController?.feedURLDidChange()
+        }
 
         showsRacecarBackground = viewModel.showRacecarBackground
         userDefaults.set(showsRacecarBackground, forKey: VMCTLApp.showRacecarDefaultsKey)
