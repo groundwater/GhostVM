@@ -2,6 +2,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import ImageIO
 
 // MARK: - View Model & Helpers
 
@@ -1169,7 +1170,7 @@ private struct SettingsView: View {
 // MARK: - App Delegate
 
 @main
-final class VMCTLApp: NSObject, NSApplicationDelegate {
+final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let vmRootDefaultsKey = "VMCTLRootDirectoryPath"
     private static let defaultVMRootDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)
 
@@ -1198,6 +1199,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
     private var awaitingQuitConfirmation = false
     private var pendingFeedVerificationTask: URLSessionDataTask?
     private var ipswManagerController: IPSWManagerWindowController?
+    private var toolsMenu: NSMenu?
+    private var screenshotMenuItem: NSMenuItem?
 
     private struct RunningProcess {
         let process: Process
@@ -1401,6 +1404,14 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         handleOpenRequests(urls)
     }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        updateToolsMenuVisibility()
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        updateToolsMenuVisibility()
+    }
+
     // MARK: - Menu & Interface
 
     private func handleOpenRequests(_ urls: [URL]) {
@@ -1514,6 +1525,42 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
 
+        let toolsMenuItem = NSMenuItem()
+        mainMenu.addItem(toolsMenuItem)
+        let toolsMenu = NSMenu(title: "Tools")
+        toolsMenuItem.submenu = toolsMenu
+        let sendInputMenuItem = NSMenuItem(title: "Send Input", action: nil, keyEquivalent: "")
+        let sendInputMenu = NSMenu(title: "Send Input")
+        sendInputMenuItem.submenu = sendInputMenu
+
+        let escapeItem = NSMenuItem(title: "Escape", action: #selector(sendEscapeKey(_:)), keyEquivalent: "")
+        escapeItem.target = self
+        sendInputMenu.addItem(escapeItem)
+
+        let returnItem = NSMenuItem(title: "Return", action: #selector(sendReturnKey(_:)), keyEquivalent: "")
+        returnItem.target = self
+        sendInputMenu.addItem(returnItem)
+
+        let tabItem = NSMenuItem(title: "Tab", action: #selector(sendTabKey(_:)), keyEquivalent: "")
+        tabItem.target = self
+        sendInputMenu.addItem(tabItem)
+
+        let spaceItem = NSMenuItem(title: "Space", action: #selector(sendSpaceKey(_:)), keyEquivalent: "")
+        spaceItem.target = self
+        sendInputMenu.addItem(spaceItem)
+
+        toolsMenu.addItem(sendInputMenuItem)
+        toolsMenu.addItem(NSMenuItem.separator())
+
+        let screenshotItem = NSMenuItem(title: "Screenshot", action: #selector(captureScreenshotFromMenu(_:)), keyEquivalent: "s")
+        screenshotItem.keyEquivalentModifierMask = [.command, .shift]
+        screenshotItem.target = self
+        toolsMenu.addItem(screenshotItem)
+        toolsMenuItem.isHidden = true
+        screenshotItem.isEnabled = false
+        self.toolsMenu = toolsMenu
+        self.screenshotMenuItem = screenshotItem
+
         let windowMenuItem = NSMenuItem()
         mainMenu.addItem(windowMenuItem)
         let windowMenu = NSMenu(title: "Window")
@@ -1537,6 +1584,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.isReleasedWhenClosed = false
+        window.delegate = self
         window.title = "GhostVM"
 
         let content = MainView(
@@ -1903,6 +1951,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
                 default:
                     self.viewModel.busyBundlePaths.remove(bundlePath)
                 }
+                self.updateToolsMenuVisibility()
             }
         }
 
@@ -1924,7 +1973,9 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
             }
             self.viewModel.busyBundlePaths.remove(bundlePath)
             self.refreshVMs()
+            self.updateToolsMenuVisibility()
         }
+        updateToolsMenuVisibility()
     }
 
     private func suspendSessionsBeforeQuit(_ sessions: [EmbeddedVMSession]) {
@@ -2519,6 +2570,101 @@ final class VMCTLApp: NSObject, NSApplicationDelegate {
 
     @objc private func showIPSWManagerFromMenu(_ sender: Any?) {
         presentIPSWManager()
+    }
+
+    private func activeEmbeddedSessionForKeyWindow() -> EmbeddedVMSession? {
+        guard let keyWindow = NSApp.keyWindow else { return nil }
+        return managedSessions.values.first(where: { $0.window === keyWindow && $0.isRunning && !$0.isStopping })
+    }
+
+    private func updateToolsMenuVisibility() {
+        guard let toolsMenu else { return }
+        let hasActiveSessionWindow = activeEmbeddedSessionForKeyWindow() != nil
+        if let toolsItem = toolsMenu.supermenu?.items.first(where: { $0.submenu === toolsMenu }) {
+            toolsItem.isHidden = !hasActiveSessionWindow
+        }
+        screenshotMenuItem?.isEnabled = hasActiveSessionWindow
+    }
+
+    @objc private func captureScreenshotFromMenu(_ sender: Any?) {
+        guard let session = activeEmbeddedSessionForKeyWindow() else {
+            return
+        }
+
+        if #available(macOS 13.0, *) {
+            let activeSession = session
+            screenshotMenuItem?.isEnabled = false
+            viewModel.statusMessage = "Capturing screenshot for \(session.name)…"
+            session.captureScreenshot { [weak self] result in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.screenshotMenuItem?.isEnabled = true
+                    switch result {
+                    case .success(let image):
+                        activeSession.flashDisplay()
+                        self.saveScreenshot(image, for: activeSession.name)
+                    case .failure(let error):
+                        self.viewModel.statusMessage = "Failed to capture screenshot: \(error.localizedDescription)"
+                        self.presentErrorAlert(message: "Screenshot Failed", informative: error.localizedDescription)
+                    }
+                }
+            }
+        } else {
+            presentErrorAlert(message: "Screenshot Unavailable", informative: "Screenshots require macOS 13 or newer.")
+        }
+    }
+
+    private func withActiveSession(_ body: (EmbeddedVMSession) -> Void) {
+        if let session = activeEmbeddedSessionForKeyWindow() {
+            body(session)
+        }
+    }
+
+    @objc private func sendEscapeKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.escape) }
+    }
+
+    @objc private func sendReturnKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.return) }
+    }
+
+    @objc private func sendTabKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.tab) }
+    }
+
+    @objc private func sendSpaceKey(_ sender: Any?) {
+        withActiveSession { $0.sendSpecialKey(.space) }
+    }
+
+    private func saveScreenshot(_ image: CGImage, for name: String) {
+        let fm = FileManager.default
+        let downloadsURL = fm.urls(for: .downloadsDirectory, in: .userDomainMask).first ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        let timestamp = formatter.string(from: Date())
+        let sanitizedName = name.replacingOccurrences(of: "/", with: "-")
+        let filename = "\(sanitizedName) \(timestamp).png"
+        let destinationURL = downloadsURL.appendingPathComponent(filename, isDirectory: false)
+
+        let destinationDir = destinationURL.deletingLastPathComponent()
+        if !fm.fileExists(atPath: destinationDir.path) {
+            try? fm.createDirectory(at: destinationDir, withIntermediateDirectories: true, attributes: nil)
+        }
+
+        guard let destinationSink = CGImageDestinationCreateWithURL(destinationURL as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+            viewModel.statusMessage = "Failed to prepare screenshot destination."
+            return
+        }
+
+        CGImageDestinationAddImage(destinationSink, image, nil)
+        if CGImageDestinationFinalize(destinationSink) {
+            viewModel.statusMessage = "Saved screenshot to \(destinationURL.path)"
+            NSWorkspace.shared.activateFileViewerSelecting([destinationURL])
+        } else {
+            viewModel.statusMessage = "Failed to save screenshot."
+        }
     }
 
     // MARK: - IPSW Manager Window

@@ -1384,6 +1384,13 @@ final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachineDeleg
         case stopped
     }
 
+    enum SpecialKey {
+        case escape
+        case `return`
+        case tab
+        case space
+    }
+
     let name: String
     let bundlePath: String
     let window: NSWindow
@@ -1493,6 +1500,116 @@ final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachineDeleg
     func bringToFront() {
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+
+    func flashDisplay() {
+        DispatchQueue.main.async {
+            guard let contentView = self.window.contentView else { return }
+            let overlay = NSView(frame: contentView.bounds)
+            overlay.wantsLayer = true
+            overlay.layer?.backgroundColor = NSColor.white.cgColor
+            overlay.alphaValue = 0
+            overlay.autoresizingMask = [.width, .height]
+            contentView.addSubview(overlay)
+
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.12
+                overlay.animator().alphaValue = 1
+            } completionHandler: {
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.18
+                    overlay.animator().alphaValue = 0
+                } completionHandler: {
+                    overlay.removeFromSuperview()
+                }
+            }
+        }
+    }
+
+    @available(macOS 13.0, *)
+    func captureScreenshot(completion: @escaping (Result<CGImage, Error>) -> Void) {
+        DispatchQueue.main.async {
+            guard let contentView = self.window.contentView else {
+                completion(.failure(VMError.message("No content view available for screenshot.")))
+                return
+            }
+            let bounds = contentView.bounds
+            guard let bitmap = contentView.bitmapImageRepForCachingDisplay(in: bounds) else {
+                completion(.failure(VMError.message("Unable to prepare bitmap for screenshot.")))
+                return
+            }
+            contentView.cacheDisplay(in: bounds, to: bitmap)
+            if let cgImage = bitmap.cgImage {
+                completion(.success(cgImage))
+            } else {
+                completion(.failure(VMError.message("Failed to capture screenshot image.")))
+            }
+        }
+    }
+
+    func sendSpecialKey(_ key: SpecialKey) {
+        DispatchQueue.main.async {
+            guard let window = self.window as NSWindow? else { return }
+            window.makeFirstResponder(self.vmView)
+
+            self.sendSimpleKey(key, in: window)
+        }
+    }
+
+    private func sendSimpleKey(_ key: SpecialKey, in window: NSWindow) {
+        let timestamp = ProcessInfo.processInfo.systemUptime
+        let modifierFlags: NSEvent.ModifierFlags = []
+        let characters: String
+        let charactersIgnoringModifiers: String
+        let keyCode: UInt16
+
+        switch key {
+        case .escape:
+            characters = String(UnicodeScalar(0x1b)!)
+            charactersIgnoringModifiers = characters
+            keyCode = 53
+        case .return:
+            characters = "\r"
+            charactersIgnoringModifiers = characters
+            keyCode = 36
+        case .tab:
+            characters = "\t"
+            charactersIgnoringModifiers = characters
+            keyCode = 48
+        case .space:
+            characters = " "
+            charactersIgnoringModifiers = characters
+            keyCode = 49
+        }
+
+        guard let keyDown = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: timestamp,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
+            isARepeat: false,
+            keyCode: keyCode
+        ), let keyUp = NSEvent.keyEvent(
+            with: .keyUp,
+            location: .zero,
+            modifierFlags: modifierFlags,
+            timestamp: timestamp,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: characters,
+            charactersIgnoringModifiers: charactersIgnoringModifiers,
+            isARepeat: false,
+            keyCode: keyCode
+        ) else {
+            return
+        }
+
+        vmView.keyDown(with: keyDown)
+        vmView.keyUp(with: keyUp)
     }
 
     // MARK: - NSWindowDelegate
