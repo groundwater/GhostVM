@@ -16,6 +16,7 @@ final class VMListViewModel: ObservableObject {
     @Published var busyBundlePaths: Set<String> = []
     @Published var emptyMessage: String? = "Loading…"
     @Published var selectedBundlePath: String?
+    @Published var showsRacecarBackground: Bool = false
 }
 
 final class VMLibrary {
@@ -615,6 +616,9 @@ struct MainView: View {
                 .buttonStyle(.bordered)
             }
 
+            ZStack(alignment: .bottomTrailing) {
+                racecarOverlay   // “background” layer
+
             List(selection: $model.selectedBundlePath) {
                 if let message = model.emptyMessage, model.entries.isEmpty {
                     Section {
@@ -659,12 +663,31 @@ struct MainView: View {
                 }
             }
             .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background(Color.clear)
             .environment(\.defaultMinListRowHeight, 96)
             .padding(.horizontal, -16)
             .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: handleDrop)
+            }
         }
         .padding(16)
         .frame(minWidth: 560, minHeight: 440)
+    }
+
+    @ViewBuilder
+    private var racecarOverlay: some View {
+        if model.showsRacecarBackground,
+           let url = Bundle.main.url(forResource: "racecar", withExtension: "png"),
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: 260, maxHeight: 180)
+                .opacity(0.85)
+                // .padding(.trailing, 4)
+                // .padding(.bottom, 4)
+                .allowsHitTesting(false)
+        }
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
@@ -1142,6 +1165,11 @@ private struct SettingsView: View {
                 .padding(.leading, labelWidth + 4)
             }
 
+            labeledRow("VM List Artwork") {
+                Toggle("Show racecar background", isOn: $model.showRacecarBackground)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
             HStack {
                 Button("Reset to Default", action: resetDefaults)
                 Spacer()
@@ -1172,12 +1200,14 @@ private struct SettingsView: View {
 @main
 final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private static let vmRootDefaultsKey = "VMCTLRootDirectoryPath"
+    private static let showRacecarDefaultsKey = "VMCTLShowRacecarBackground"
     private static let defaultVMRootDirectory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("VMs", isDirectory: true)
 
     private let cliURL: URL
     private let commandQueue = DispatchQueue(label: "vmctl.app.command")
     private let userDefaults = UserDefaults.standard
     private var vmRootDirectory: URL
+    private var showsRacecarBackground: Bool
     private let controller: VMController
     private let library: VMLibrary
     private let ipswLibrary: IPSWLibrary
@@ -1281,11 +1311,13 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         @Published var verificationMessage: String?
         @Published var verificationWasSuccessful: Bool?
         @Published var isVerifying: Bool = false
+        @Published var showRacecarBackground: Bool
 
-        init(vmPath: String, ipswPath: String, feedURLString: String) {
+        init(vmPath: String, ipswPath: String, feedURLString: String, showRacecarBackground: Bool) {
             self.vmPath = vmPath
             self.ipswPath = ipswPath
             self.feedURLString = feedURLString
+            self.showRacecarBackground = showRacecarBackground
         }
     }
 
@@ -1312,11 +1344,17 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             vmRootDirectory = VMCTLApp.defaultVMRootDirectory
         }
+        if let storedFlag = userDefaults.object(forKey: VMCTLApp.showRacecarDefaultsKey) as? Bool {
+            showsRacecarBackground = storedFlag
+        } else {
+            showsRacecarBackground = true
+        }
         controller = VMController(rootDirectory: vmRootDirectory)
         library = VMLibrary(defaults: userDefaults)
         ipswLibrary = IPSWLibrary(defaults: userDefaults)
         cachedRestoreImages = ipswLibrary.cachedImages()
         library.addBundles(in: vmRootDirectory)
+        viewModel.showsRacecarBackground = showsRacecarBackground
         super.init()
     }
 
@@ -1364,9 +1402,9 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let names = activeSessions.values.map { $0.name }.sorted().joined(separator: ", ")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Suspend running virtual machines before quitting?"
-        alert.informativeText = "The following VMs are still running:\n\(names)\nThey need to be suspended before the app quits."
-        alert.addButton(withTitle: "Suspend & Quit")
+        alert.messageText = "Shut down running virtual machines before quitting?"
+        alert.informativeText = "The following VMs are still running:\n\(names)\nThey need to be shut down before the app quits."
+        alert.addButton(withTitle: "Shut Down & Quit")
         let cancel = alert.addButton(withTitle: "Cancel")
         cancel.keyEquivalent = "\u{1b}"
 
@@ -1374,7 +1412,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
             awaitingQuitConfirmation = true
-            suspendSessionsBeforeQuit(Array(activeSessions.values))
+            shutdownSessionsBeforeQuit(Array(activeSessions.values))
             return .terminateLater
         }
         return .terminateCancel
@@ -1978,7 +2016,7 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         updateToolsMenuVisibility()
     }
 
-    private func suspendSessionsBeforeQuit(_ sessions: [EmbeddedVMSession]) {
+    private func shutdownSessionsBeforeQuit(_ sessions: [EmbeddedVMSession]) {
         if sessions.isEmpty {
             awaitingQuitConfirmation = false
             NSApp.reply(toApplicationShouldTerminate: true)
@@ -2331,7 +2369,8 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let model = SettingsViewModel(
             vmPath: vmRootDirectory.path,
             ipswPath: ipswLibrary.cacheDirectoryURL.path,
-            feedURLString: ipswLibrary.feedURL.absoluteString
+            feedURLString: ipswLibrary.feedURL.absoluteString,
+            showRacecarBackground: showsRacecarBackground
         )
         settingsViewModel = model
 
@@ -2437,6 +2476,10 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         applyVMRootDirectory(selectedURL)
         ipswLibrary.feedURL = chosenFeedURL
         ipswManagerController?.feedURLDidChange()
+
+        showsRacecarBackground = viewModel.showRacecarBackground
+        userDefaults.set(showsRacecarBackground, forKey: VMCTLApp.showRacecarDefaultsKey)
+        self.viewModel.showsRacecarBackground = showsRacecarBackground
     }
 
     private func browseVMFolder() {

@@ -59,6 +59,7 @@ app: build
 	$(SWIFTC) $(SWIFTFLAGS) -DVMCTL_APP -o $(APP_BUNDLE)/Contents/MacOS/$(APP_TARGET) $(APP_SOURCES) $(FRAMEWORKS)
 	cp $(TARGET) $(APP_BUNDLE)/Contents/MacOS/vmctl
 	cp ghostvm.png $(APP_BUNDLE)/Contents/Resources/ghostvm.png
+	cp racecar.png $(APP_BUNDLE)/Contents/Resources/racecar.png
 	# Build a proper .icns for GhostVM bundles from GhostVMIcon.png
 	rm -rf build/GhostVMIcon.iconset
 	mkdir -p build/GhostVMIcon.iconset
