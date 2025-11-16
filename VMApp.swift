@@ -2550,13 +2550,21 @@ final class VMCTLApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             ipswManagerController?.feedURLDidChange()
         }
 
-        showsRacecarBackground = viewModel.showRacecarBackground
-        userDefaults.set(showsRacecarBackground, forKey: VMCTLApp.showRacecarDefaultsKey)
-        self.viewModel.showsRacecarBackground = showsRacecarBackground
+        let newShowRacecar = viewModel.showRacecarBackground
+        let racecarChanged = newShowRacecar != showsRacecarBackground
+        if racecarChanged {
+            showsRacecarBackground = newShowRacecar
+            userDefaults.set(newShowRacecar, forKey: VMCTLApp.showRacecarDefaultsKey)
+            self.viewModel.showsRacecarBackground = newShowRacecar
+        }
 
-        iconMode = viewModel.iconMode
-        userDefaults.set(iconMode.rawValue, forKey: VMCTLApp.iconModeDefaultsKey)
-        updateApplicationAndBundleIcons(for: NSApplication.shared.effectiveAppearance)
+        let newIconMode = viewModel.iconMode
+        let iconModeChanged = newIconMode != iconMode
+        if iconModeChanged {
+            iconMode = newIconMode
+            userDefaults.set(newIconMode.rawValue, forKey: VMCTLApp.iconModeDefaultsKey)
+            updateApplicationAndBundleIcons(for: NSApplication.shared.effectiveAppearance)
+        }
     }
 
     private func browseVMFolder() {
