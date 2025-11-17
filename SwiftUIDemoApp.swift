@@ -1,12 +1,5 @@
 import SwiftUI
-
-// Simple in-memory model for demo VMs.
-struct DemoVM: Identifiable, Hashable, Codable {
-    let id: UUID
-    var name: String
-    var status: String
-    var osVersion: String
-}
+import UniformTypeIdentifiers
 
 struct DemoRestoreImage: Identifiable, Hashable {
     let id: UUID
@@ -15,33 +8,6 @@ struct DemoRestoreImage: Identifiable, Hashable {
     var build: String
     var sizeDescription: String
     var isDownloaded: Bool
-}
-
-final class DemoVMStore: ObservableObject {
-    @Published var vms: [DemoVM] = [
-        DemoVM(id: UUID(), name: "Sandbox", status: "Stopped", osVersion: "macOS 15.0"),
-        DemoVM(id: UUID(), name: "CI Runner", status: "Running", osVersion: "macOS 14.5"),
-        DemoVM(id: UUID(), name: "Legacy Test Rig", status: "Paused", osVersion: "macOS 13.6")
-    ]
-
-    func addSampleVM() {
-        let index = vms.count + 1
-        let vm = DemoVM(
-            id: UUID(),
-            name: "Demo VM \(index)",
-            status: "Stopped",
-            osVersion: "macOS 15.0"
-        )
-        vms.append(vm)
-    }
-
-    func resetToDefaults() {
-        vms = [
-            DemoVM(id: UUID(), name: "Sandbox", status: "Stopped", osVersion: "macOS 15.0"),
-            DemoVM(id: UUID(), name: "CI Runner", status: "Running", osVersion: "macOS 14.5"),
-            DemoVM(id: UUID(), name: "Legacy Test Rig", status: "Paused", osVersion: "macOS 13.6")
-        ]
-    }
 }
 
 final class DemoRestoreImageStore: ObservableObject {
@@ -81,7 +47,7 @@ final class DemoRestoreImageStore: ObservableObject {
 @main
 @available(macOS 13.0, *)
 struct GhostVMSwiftUIApp: App {
-    @StateObject private var store = DemoVMStore()
+    @StateObject private var store = App2VMStore()
     @StateObject private var restoreStore = DemoRestoreImageStore()
 
     var body: some Scene {
@@ -107,10 +73,11 @@ struct GhostVMSwiftUIApp: App {
             MarketplaceDemoView()
         }
 
-        // Fake VM window shown when pressing Play.
-        WindowGroup(id: "vm", for: DemoVM.self) { vmBinding in
+        // Real VM window shown when pressing Play.
+        WindowGroup(id: "vm", for: App2VM.self) { vmBinding in
             if let vm = vmBinding.wrappedValue {
-                FakeVMWindowView(vm: vm)
+                VMWindowView(vm: vm)
+                    .environmentObject(store)
             } else {
                 Text("No VM selected")
                     .frame(minWidth: 320, minHeight: 200)
@@ -121,7 +88,7 @@ struct GhostVMSwiftUIApp: App {
 
 @available(macOS 13.0, *)
 struct DemoAppCommands: Commands {
-    @ObservedObject var store: DemoVMStore
+    @ObservedObject var store: App2VMStore
     @ObservedObject var restoreStore: DemoRestoreImageStore
     @Environment(\.openWindow) private var openWindow
 
@@ -131,17 +98,6 @@ struct DemoAppCommands: Commands {
                 openWindow(id: "settings")
             }
             .keyboardShortcut(",", modifiers: [.command])
-        }
-
-        CommandMenu("Demo VMs") {
-            Button("New Demo VM") {
-                store.addSampleVM()
-            }
-            .keyboardShortcut("n", modifiers: [.command])
-
-            Button("Reset Demo Data") {
-                store.resetToDefaults()
-            }
         }
 
         CommandGroup(after: .windowList) {
@@ -160,10 +116,10 @@ struct DemoAppCommands: Commands {
 
 @available(macOS 13.0, *)
 struct VMListDemoView: View {
-    @EnvironmentObject private var store: DemoVMStore
+    @EnvironmentObject private var store: App2VMStore
     @Environment(\.openWindow) private var openWindow
 
-    @State private var selectedVMID: DemoVM.ID?
+    @State private var selectedVMID: App2VM.ID?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -211,14 +167,36 @@ struct VMListDemoView: View {
                 }
             }
             .listStyle(.inset)
+            .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil) { providers in
+                handleDrop(providers: providers)
+            }
         }
         .frame(minWidth: 520, minHeight: 360)
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        var handled = false
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+                    guard let data = item as? Data,
+                          let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                        return
+                    }
+                    DispatchQueue.main.async {
+                        store.addBundles(from: [url])
+                    }
+                }
+                handled = true
+            }
+        }
+        return handled
     }
 }
 
 @available(macOS 13.0, *)
 struct VMRowView: View {
-    let vm: DemoVM
+    let vm: App2VM
     let isSelected: Bool
     let play: () -> Void
 
@@ -267,7 +245,7 @@ struct VMRowView: View {
         }
     }
 
-    private func statusColor(for vm: DemoVM) -> Color {
+    private func statusColor(for vm: App2VM) -> Color {
         switch vm.status.lowercased() {
         case "running":
             return .green
@@ -281,7 +259,7 @@ struct VMRowView: View {
 
 @available(macOS 13.0, *)
 struct VMContextMenu: View {
-    let vm: DemoVM
+    let vm: App2VM
     let play: () -> Void
 
     var body: some View {
@@ -289,14 +267,58 @@ struct VMContextMenu: View {
             play()
         }
         Button("Stop") {
-            // Placeholder stop action.
+            // Stop is handled by closing the VM window.
         }
         Divider()
         Button("Show in Finder") {
-            // Placeholder show-in-finder action.
+            NSWorkspace.shared.activateFileViewerSelecting([vm.bundleURL])
         }
-        Button("Delete") {
-            // Placeholder delete action.
+    }
+}
+
+@available(macOS 13.0, *)
+struct VMWindowView: View {
+    let vm: App2VM
+    @EnvironmentObject private var store: App2VMStore
+    @StateObject private var session: App2VMRunSession
+
+    init(vm: App2VM) {
+        self.vm = vm
+        _session = StateObject(wrappedValue: App2VMRunSession(bundleURL: vm.bundleURL))
+    }
+
+    var body: some View {
+        ZStack {
+            App2VMDisplayHost(virtualMachine: session.virtualMachine)
+                .frame(minWidth: 800, minHeight: 500)
+                .ignoresSafeArea()
+            // Invisible view that coordinates window close behavior with the VM.
+            App2VMWindowCoordinatorHost(session: session)
+                .frame(width: 0, height: 0)
+        }
+        .onAppear {
+            session.onStateChange = { [vmID = vm.id, store] state in
+                let status: String
+                switch state {
+                case .running:
+                    status = "Running"
+                case .starting:
+                    status = "Starting…"
+                case .stopping:
+                    status = "Stopping…"
+                case .stopped:
+                    status = "Stopped"
+                case .failed:
+                    status = "Error"
+                case .idle:
+                    status = "Stopped"
+                }
+                store.updateStatus(for: vmID, status: status)
+            }
+            session.startIfNeeded()
+        }
+        .onDisappear {
+            session.stopIfNeeded()
         }
     }
 }
@@ -424,49 +446,6 @@ enum DemoIconMode: String, CaseIterable, Identifiable {
         case .light: return "Light"
         case .dark: return "Dark"
         }
-    }
-}
-
-@available(macOS 13.0, *)
-struct FakeVMWindowView: View {
-    let vm: DemoVM
-
-    var body: some View {
-        ZStack {
-            Color.black
-
-            switch vm.status.lowercased() {
-            case "stopped":
-                Image(systemName: "play.circle.fill")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 80, height: 80)
-                    .foregroundStyle(.white)
-
-            case "paused":
-                ZStack {
-                    Color.white.opacity(0.12)
-
-                    Image(systemName: "play.circle.fill")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 64, height: 64)
-                        .foregroundStyle(.white)
-                }
-
-            default:
-                VStack {
-                    Text("Fake VM Display")
-                        .foregroundStyle(.white)
-                        .font(.headline)
-                    Text("No real virtualization is happening here.")
-                        .foregroundStyle(.gray)
-                        .font(.subheadline)
-                }
-                .padding()
-            }
-        }
-        .frame(minWidth: 480, minHeight: 320)
     }
 }
 
