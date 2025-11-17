@@ -175,6 +175,17 @@ Reference Map
 | CLI entrypoint | `vmctl.swift` (`CLI`, `VMCTLMain`) | Builds `vmctl` binary used standalone and embedded inside the app bundle. |
 | App shell & UI | `VMApp.swift` | Requires `VMCTL_APP` flag; embeds SwiftUI view hierarchy within AppKit shell. |
 | Build tooling | `Makefile`, `entitlements.plist`, assets | Coordinates `swiftc`, codesigning, DMG/notarization. |
+| macOS guidelines | `docs/MacOS.md` | High-level rules for preferring SwiftUI and isolating AppKit in adapter files. |
+
+### 8. SwiftUI Demo App Agent (`SwiftUIDemoApp.swift`: `GhostVMSwiftUIApp`)
+
+* **Role** – Pure SwiftUI playground app that mimics key surfaces (VM list, settings, VM window) using only placeholder data.
+* **Inputs** – In-memory `DemoVMStore` sample models; no file system, Virtualization, or AppKit dependencies.
+* **Outputs** – A SwiftUI-only app bundle (`GhostVM-SwiftUI.app`) built via `make app2`, with:
+  * Main window showing a list of demo VMs and action buttons wired to no-op or demo behaviors.
+  * Separate Settings window implemented as a distinct `WindowGroup`, not a sheet or panel.
+  * Fake VM windows opened via `openWindow(id: "vm", value: vm)` that render a stub display and console.
+* **Notes** – This app intentionally does not touch real `.GhostVM` bundles or share code with `VMController`; it is safe to prototype UI flows here without impacting the production app.
 
 Use this document as the living index when introducing new behavior. If you add an additional long-running subsystem (e.g., a background agent that syncs VM templates), document it here with its inputs, outputs, and interactions so contributors can quickly orient themselves.
 
