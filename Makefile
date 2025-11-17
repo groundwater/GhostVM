@@ -17,6 +17,13 @@ APP_SOURCES := VMApp.swift vmctl.swift
 APP_BUNDLE := $(APP_TARGET).app
 APP_PLIST := VMApp-Info.plist
 APP_DISPLAY_NAME ?= $(APP_TARGET)
+APP2_TARGET ?= GhostVM-SwiftUI
+APP2_SOURCES := SwiftUIDemoApp.swift
+APP2_BUNDLE := $(APP2_TARGET).app
+APP2_PLIST := VMApp-Info.plist
+APP2_DISPLAY_NAME ?= $(APP2_TARGET)
+APP2_SWIFTFLAGS := -parse-as-library
+APP2_FRAMEWORKS := -framework SwiftUI
 DMG ?= $(APP_TARGET).dmg
 DMG_VOLNAME ?= $(APP_DISPLAY_NAME)
 DMG_STAGING := build/dmg-root
@@ -34,7 +41,7 @@ NOTARY_APPLE_ID ?=
 NOTARY_TEAM_ID ?= $(DEFAULT_TEAM_ID)
 NOTARY_PASSWORD ?=
 
-.PHONY: all build clean run app dmg notary-info
+.PHONY: all build clean run app app2 dmg notary-info
 
 all: build
 
@@ -80,6 +87,23 @@ app: build
 		echo "Codesigning $(APP_BUNDLE) with ad-hoc identity to apply entitlements."; \
 	fi
 	codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)"
+
+app2:
+	rm -rf $(APP2_BUNDLE)
+	mkdir -p $(APP2_BUNDLE)/Contents/MacOS
+	mkdir -p $(APP2_BUNDLE)/Contents/Resources
+	cp $(APP2_PLIST) $(APP2_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $(APP2_TARGET)" $(APP2_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $(APP2_DISPLAY_NAME)" $(APP2_BUNDLE)/Contents/Info.plist
+	/usr/libexec/PlistBuddy -c "Set :CFBundleName $(APP2_DISPLAY_NAME)" $(APP2_BUNDLE)/Contents/Info.plist
+	$(SWIFTC) $(APP2_SWIFTFLAGS) -o $(APP2_BUNDLE)/Contents/MacOS/$(APP2_TARGET) $(APP2_SOURCES) $(APP2_FRAMEWORKS)
+	cp ghostvm.png $(APP2_BUNDLE)/Contents/Resources/ghostvm.png
+	cp ghostvm-dark.png $(APP2_BUNDLE)/Contents/Resources/ghostvm-dark.png
+	cp racecar.png $(APP2_BUNDLE)/Contents/Resources/racecar.png
+	@if [ "$(CODESIGN_ID)" = "-" ]; then \
+		echo "Codesigning $(APP2_BUNDLE) with ad-hoc identity to apply entitlements."; \
+	fi
+	codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP2_BUNDLE)"
 
 dmg: app
 	@if [ -z "$(RELEASE_CODESIGN_ID)" ] || [ "$(RELEASE_CODESIGN_ID)" = "-" ]; then \
