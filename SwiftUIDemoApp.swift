@@ -1,54 +1,11 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-struct DemoRestoreImage: Identifiable, Hashable {
-    let id: UUID
-    var name: String
-    var version: String
-    var build: String
-    var sizeDescription: String
-    var isDownloaded: Bool
-}
-
-final class DemoRestoreImageStore: ObservableObject {
-    @Published var images: [DemoRestoreImage] = [
-        DemoRestoreImage(
-            id: UUID(),
-            name: "Sonoma",
-            version: "15.0",
-            build: "24A123",
-            sizeDescription: "13.2 GB",
-            isDownloaded: true
-        ),
-        DemoRestoreImage(
-            id: UUID(),
-            name: "Ventura",
-            version: "14.5",
-            build: "23F79",
-            sizeDescription: "12.8 GB",
-            isDownloaded: false
-        ),
-        DemoRestoreImage(
-            id: UUID(),
-            name: "Monterey",
-            version: "13.6",
-            build: "22G120",
-            sizeDescription: "11.9 GB",
-            isDownloaded: false
-        )
-    ]
-
-    func toggleDownload(for image: DemoRestoreImage) {
-        guard let index = images.firstIndex(of: image) else { return }
-        images[index].isDownloaded.toggle()
-    }
-}
-
 @main
 @available(macOS 13.0, *)
 struct GhostVMSwiftUIApp: App {
     @StateObject private var store = App2VMStore()
-    @StateObject private var restoreStore = DemoRestoreImageStore()
+    @StateObject private var restoreStore = App2RestoreImageStore()
 
     var body: some Scene {
         WindowGroup("GhostVM (SwiftUI Demo)", id: "main") {
@@ -89,7 +46,7 @@ struct GhostVMSwiftUIApp: App {
 @available(macOS 13.0, *)
 struct DemoAppCommands: Commands {
     @ObservedObject var store: App2VMStore
-    @ObservedObject var restoreStore: DemoRestoreImageStore
+    @ObservedObject var restoreStore: App2RestoreImageStore
     @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
@@ -261,18 +218,35 @@ struct VMRowView: View {
 struct VMContextMenu: View {
     let vm: App2VM
     let play: () -> Void
+    @EnvironmentObject private var store: App2VMStore
 
     var body: some View {
+        let lowerStatus = vm.status.lowercased()
+        let isRunning = lowerStatus.contains("running") || lowerStatus.contains("starting") || lowerStatus.contains("stopping")
+        let isInstalled = lowerStatus != "not installed"
+
         Button("Start") {
             play()
         }
+        .disabled(!isInstalled || isRunning)
+
         Button("Stop") {
-            // Stop is handled by closing the VM window.
+            // VM stop is coordinated by closing the VM window; for now this
+            // entry is present but handled via the window close behavior.
         }
+        .disabled(!isRunning)
+
         Divider()
         Button("Show in Finder") {
-            NSWorkspace.shared.activateFileViewerSelecting([vm.bundleURL])
+            FinderAdapter.revealItem(at: vm.bundleURL)
         }
+        Button("Remove from List") {
+            store.removeFromList(vm)
+        }
+        Button("Delete") {
+            store.deleteVM(vm)
+        }
+        .disabled(isRunning)
     }
 }
 
@@ -325,9 +299,9 @@ struct VMWindowView: View {
 
 @available(macOS 13.0, *)
 struct SettingsDemoView: View {
-    @State private var vmPath: String = "~/VMs"
-    @State private var ipswPath: String = "~/Library/Application Support/GhostVM/IPSW"
-    @State private var feedURLString: String = "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml"
+    @State private var vmPath: String
+    @State private var ipswPath: String
+    @State private var feedURLString: String
     @State private var verificationMessage: String? = nil
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
@@ -335,6 +309,13 @@ struct SettingsDemoView: View {
     @State private var iconMode: DemoIconMode = .system
 
     private let labelWidth: CGFloat = 130
+
+    init() {
+        let ipswService = App2IPSWService.shared
+        _vmPath = State(initialValue: "~/VMs")
+        _ipswPath = State(initialValue: ipswService.cacheDirectory.path)
+        _feedURLString = State(initialValue: ipswService.feedURL.absoluteString)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -366,7 +347,7 @@ struct SettingsDemoView: View {
                     TextField("https://mesu.apple.com/…", text: $feedURLString)
                         .textFieldStyle(.roundedBorder)
                     Button("Verify") {
-                        // Intentionally no-op in demo app.
+                        verifyFeedURL()
                     }
                     .disabled(isVerifying)
                 }
@@ -401,21 +382,6 @@ struct SettingsDemoView: View {
             }
 
             Spacer()
-
-            HStack {
-                Button("Reset to Default") {
-                    // Intentionally no-op in demo app.
-                }
-                Spacer()
-                Button("Cancel") {
-                    // Intentionally no-op in demo app.
-                }
-                .keyboardShortcut(.cancelAction)
-                Button("Save") {
-                    // Intentionally no-op in demo app.
-                }
-                .keyboardShortcut(.defaultAction)
-            }
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 320)
@@ -429,6 +395,27 @@ struct SettingsDemoView: View {
                 .frame(width: labelWidth, alignment: .leading)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func verifyFeedURL() {
+        verificationMessage = nil
+        verificationWasSuccessful = nil
+        isVerifying = true
+
+        Task { @MainActor in
+            defer { isVerifying = false }
+            do {
+                let service = App2IPSWService.shared
+                let url = try service.validateFeedURL(string: feedURLString)
+                _ = try await service.fetchFeed(from: url)
+                service.setFeedURL(url)
+                verificationMessage = "Feed verified successfully."
+                verificationWasSuccessful = true
+            } catch {
+                verificationMessage = error.localizedDescription
+                verificationWasSuccessful = false
+            }
         }
     }
 }
@@ -451,17 +438,28 @@ enum DemoIconMode: String, CaseIterable, Identifiable {
 
 @available(macOS 13.0, *)
 struct RestoreImagesDemoView: View {
-    @EnvironmentObject private var store: DemoRestoreImageStore
+    @EnvironmentObject private var store: App2RestoreImageStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Restore Images")
                 .font(.title2.bold())
 
-            Text("Review demo restore images and simulate downloads or deletions. This view mirrors the idea of the main app’s IPSW manager but uses only in-memory placeholder data.")
+            Text("Review macOS restore images from the configured IPSW feed and download or delete local copies. These images are stored in the IPSW cache folder.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if store.isLoading {
+                ProgressView("Loading restore images…")
+                    .padding(.vertical, 8)
+            }
+
+            if let error = store.errorMessage {
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+            }
 
             List {
                 ForEach(store.images) { image in
@@ -476,21 +474,72 @@ struct RestoreImagesDemoView: View {
 
                         Spacer()
 
-                        Text(image.sizeDescription)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            if let status = store.downloadStatuses[image.id] {
+                                if status.totalBytes > 0 {
+                                    ProgressView(
+                                        value: Double(status.bytesWritten),
+                                        total: Double(status.totalBytes)
+                                    )
+                                    .frame(width: 160)
+                                } else {
+                                    ProgressView()
+                                        .frame(width: 160)
+                                }
+                                Text("\(Self.byteFormatter.string(fromByteCount: status.bytesWritten)) / \(status.totalBytes > 0 ? Self.byteFormatter.string(fromByteCount: status.totalBytes) : "Unknown") · \(Self.speedFormatter(status.speedBytesPerSecond))")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                            } else {
+                                Text(image.sizeDescription)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
 
-                        Button(image.isDownloaded ? "Delete" : "Download") {
+                        Button(
+                            image.isDownloaded
+                                ? (image.isDownloading ? "Delete" : "Delete")
+                                : (image.isDownloading ? "Cancel" : "Download")
+                        ) {
                             store.toggleDownload(for: image)
                         }
                         .buttonStyle(.bordered)
                     }
                     .padding(.vertical, 4)
+                    .contextMenu {
+                        Button("Show in Finder") {
+                            let service = App2IPSWService.shared
+                            FinderAdapter.revealRestoreImage(
+                                filename: image.filename,
+                                cacheDirectory: service.cacheDirectory
+                            )
+                        }
+                    }
                 }
             }
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 360)
+    }
+
+    private static let byteFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB, .useKB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        return formatter
+    }()
+
+    private static func speedFormatter(_ speed: Double) -> String {
+        guard speed > 0 else { return "0 B/s" }
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB, .useKB]
+        formatter.countStyle = .file
+        formatter.includesUnit = true
+        formatter.includesActualByteCount = false
+        return formatter.string(fromByteCount: Int64(speed)) + "/s"
     }
 }
 

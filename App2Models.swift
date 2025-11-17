@@ -130,6 +130,30 @@ final class App2VMStore: ObservableObject {
         vms[index].status = status
     }
 
+    func removeFromList(_ vm: App2VM) {
+        vms.removeAll { $0.id == vm.id }
+    }
+
+    func deleteVM(_ vm: App2VM) {
+        let path = vm.bundleURL.path
+        let lowercasedStatus = vm.status.lowercased()
+        let isBusy = lowercasedStatus.contains("running") ||
+                     lowercasedStatus.contains("starting") ||
+                     lowercasedStatus.contains("stopping")
+        guard !isBusy else { return }
+
+        do {
+            if fileManager.fileExists(atPath: path) {
+                try fileManager.removeItem(atPath: path)
+            }
+        } catch {
+            // For now, surface failures only in the debug console.
+            print("Failed to delete VM bundle at \(path): \(error.localizedDescription)")
+        }
+
+        removeFromList(vm)
+    }
+
     func vm(for bundlePath: String) -> App2VM? {
         let standardized = URL(fileURLWithPath: bundlePath).standardizedFileURL.path
         return vms.first { $0.bundleURL.path == standardized }
@@ -161,4 +185,3 @@ final class App2VMStore: ObservableObject {
         )
     }
 }
-
