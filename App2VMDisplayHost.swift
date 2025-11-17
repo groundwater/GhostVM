@@ -10,6 +10,9 @@ struct App2VMDisplayHost: NSViewRepresentable {
     func makeNSView(context: Context) -> VZVirtualMachineView {
         let view = VZVirtualMachineView()
         view.capturesSystemKeys = true
+        if #available(macOS 14.0, *) {
+            view.automaticallyReconfiguresDisplay = true
+        }
         view.autoresizingMask = [.width, .height]
         return view
     }
@@ -88,4 +91,3 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
         }
     }
 }
-

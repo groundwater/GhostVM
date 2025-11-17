@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Virtualization
 
 // Minimal runtime controller for a single VM bundle.
@@ -200,11 +201,25 @@ final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelega
         config.networkDevices = [networkDevice]
 
         let graphics = VZMacGraphicsDeviceConfiguration()
-        let display = VZMacGraphicsDisplayConfiguration(
-            widthInPixels: 1920,
-            heightInPixels: 1200,
-            pixelsPerInch: 110
-        )
+        let display: VZMacGraphicsDisplayConfiguration
+        if let screen = NSScreen.main {
+            let scale = max(screen.backingScaleFactor, 1.0)
+            let sizeInPoints = screen.visibleFrame.size
+            let widthPixels = max(Int((sizeInPoints.width * scale).rounded()), 1024)
+            let heightPixels = max(Int((sizeInPoints.height * scale).rounded()), 768)
+            let ppi = max(Int((110.0 * scale).rounded()), 110)
+            display = VZMacGraphicsDisplayConfiguration(
+                widthInPixels: widthPixels,
+                heightInPixels: heightPixels,
+                pixelsPerInch: ppi
+            )
+        } else {
+            display = VZMacGraphicsDisplayConfiguration(
+                widthInPixels: 1920,
+                heightInPixels: 1200,
+                pixelsPerInch: 110
+            )
+        }
         graphics.displays = [display]
         config.graphicsDevices = [graphics]
         config.keyboards = [VZUSBKeyboardConfiguration()]
