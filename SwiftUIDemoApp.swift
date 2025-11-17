@@ -225,22 +225,24 @@ struct VMRowView: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(vm.name)
-                        .font(.headline)
-                    Spacer(minLength: 0)
-                    Text(vm.status)
-                        .font(.subheadline)
-                        .foregroundStyle(statusColor(for: vm))
-                        .frame(width: 80, alignment: .trailing)
-                }
-
+                Text(vm.name)
+                    .font(.headline)
                 Text(vm.osVersion)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Spacer(minLength: 8)
+
+            VStack {
+                Spacer(minLength: 0)
+                Text(vm.status)
+                    .font(.subheadline)
+                    .foregroundStyle(statusColor(for: vm))
+                    .frame(width: 80, alignment: .trailing)
+                Spacer(minLength: 0)
+            }
+
             HStack(spacing: 8) {
                 Button {
                     play()
@@ -251,15 +253,15 @@ struct VMRowView: View {
                 }
                 .buttonStyle(.borderless)
 
-                Button { } label: {
+                Menu {
+                    VMContextMenu(vm: vm, play: play)
+                } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 16, weight: .semibold))
                         .frame(width: 20, height: 20, alignment: .center)
                 }
-                .buttonStyle(.borderless)
-                .contextMenu {
-                    VMContextMenu(vm: vm, play: play)
-                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
             }
             .frame(width: 64, alignment: .trailing)
         }
