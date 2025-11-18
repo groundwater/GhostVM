@@ -3,7 +3,7 @@ import AppKit
 import UniformTypeIdentifiers
 
 enum SavePanelAdapter {
-    static func chooseVMBundleURL(suggestedName: String, completion: @escaping (URL?) -> Void) {
+    static func chooseVMBundleURL(suggestedName: String, completion: @MainActor @escaping (URL?) -> Void) {
         DispatchQueue.main.async {
             let panel = NSSavePanel()
             panel.canCreateDirectories = true
@@ -29,4 +29,3 @@ enum SavePanelAdapter {
         }
     }
 }
-

@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 
+@MainActor
 final class App2AppDelegate: NSObject, NSApplicationDelegate {
     static weak var sharedStore: App2VMStore? {
         didSet {
@@ -33,4 +34,3 @@ final class App2AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 }
-

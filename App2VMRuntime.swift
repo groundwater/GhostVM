@@ -1,9 +1,9 @@
 import Foundation
 import AppKit
-import Virtualization
+@preconcurrency import Virtualization
 
 // Minimal runtime controller for a single VM bundle.
-final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelegate {
+final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelegate, @unchecked Sendable {
     enum State {
         case idle
         case starting

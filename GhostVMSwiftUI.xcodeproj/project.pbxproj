@@ -1,0 +1,241 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		BC1B6C5C2C3F8A2A00A1F001 /* SwiftUIDemoApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C4F2C3F8A2A00A1F001 /* SwiftUIDemoApp.swift */; };
+		BC1B6C5D2C3F8A2A00A1F001 /* App2Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C502C3F8A2A00A1F001 /* App2Models.swift */; };
+		BC1B6C5E2C3F8A2A00A1F001 /* App2VMRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C512C3F8A2A00A1F001 /* App2VMRuntime.swift */; };
+		BC1B6C5F2C3F8A2A00A1F001 /* App2VMDisplayHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C522C3F8A2A00A1F001 /* App2VMDisplayHost.swift */; };
+		BC1B6C602C3F8A2A00A1F001 /* App2IPSW.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C532C3F8A2A00A1F001 /* App2IPSW.swift */; };
+		BC1B6C612C3F8A2A00A1F001 /* FinderAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C542C3F8A2A00A1F001 /* FinderAdapter.swift */; };
+		BC1B6C622C3F8A2A00A1F001 /* SavePanelAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C552C3F8A2A00A1F001 /* SavePanelAdapter.swift */; };
+		BC1B6C632C3F8A2A00A1F001 /* App2AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C562C3F8A2A00A1F001 /* App2AppDelegate.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		BC1B6C482C3F8A2A00A1F001 /* GhostVMSwiftUI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = GhostVMSwiftUI.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		BC1B6C4F2C3F8A2A00A1F001 /* SwiftUIDemoApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwiftUIDemoApp.swift; sourceTree = "<group>"; };
+		BC1B6C502C3F8A2A00A1F001 /* App2Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App2Models.swift; sourceTree = "<group>"; };
+		BC1B6C512C3F8A2A00A1F001 /* App2VMRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App2VMRuntime.swift; sourceTree = "<group>"; };
+		BC1B6C522C3F8A2A00A1F001 /* App2VMDisplayHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App2VMDisplayHost.swift; sourceTree = "<group>"; };
+		BC1B6C532C3F8A2A00A1F001 /* App2IPSW.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App2IPSW.swift; sourceTree = "<group>"; };
+		BC1B6C542C3F8A2A00A1F001 /* FinderAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderAdapter.swift; sourceTree = "<group>"; };
+		BC1B6C552C3F8A2A00A1F001 /* SavePanelAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavePanelAdapter.swift; sourceTree = "<group>"; };
+		BC1B6C562C3F8A2A00A1F001 /* App2AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App2AppDelegate.swift; sourceTree = "<group>"; };
+		BC1B6C572C3F8A2A00A1F001 /* VMApp-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "VMApp-Info.plist"; sourceTree = "<group>"; };
+		BC1B6C582C3F8A2A00A1F001 /* entitlements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = entitlements.plist; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		BC1B6C442C3F8A2A00A1F001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		BC1B6C3E2C3F8A2A00A1F001 = {
+			isa = PBXGroup;
+			children = (
+				BC1B6C4E2C3F8A2A00A1F001 /* Sources */,
+				BC1B6C492C3F8A2A00A1F001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		BC1B6C492C3F8A2A00A1F001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				BC1B6C482C3F8A2A00A1F001 /* GhostVMSwiftUI.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		BC1B6C4E2C3F8A2A00A1F001 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				BC1B6C4F2C3F8A2A00A1F001 /* SwiftUIDemoApp.swift */,
+				BC1B6C502C3F8A2A00A1F001 /* App2Models.swift */,
+				BC1B6C512C3F8A2A00A1F001 /* App2VMRuntime.swift */,
+				BC1B6C522C3F8A2A00A1F001 /* App2VMDisplayHost.swift */,
+				BC1B6C532C3F8A2A00A1F001 /* App2IPSW.swift */,
+				BC1B6C542C3F8A2A00A1F001 /* FinderAdapter.swift */,
+				BC1B6C552C3F8A2A00A1F001 /* SavePanelAdapter.swift */,
+				BC1B6C562C3F8A2A00A1F001 /* App2AppDelegate.swift */,
+				BC1B6C572C3F8A2A00A1F001 /* VMApp-Info.plist */,
+				BC1B6C582C3F8A2A00A1F001 /* entitlements.plist */,
+			);
+			name = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		BC1B6C472C3F8A2A00A1F001 /* GhostVMSwiftUI */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = BC1B6C5B2C3F8A2A00A1F001 /* Build configuration list for PBXNativeTarget "GhostVMSwiftUI" */;
+			buildPhases = (
+				BC1B6C432C3F8A2A00A1F001 /* Sources */,
+				BC1B6C442C3F8A2A00A1F001 /* Frameworks */,
+				BC1B6C452C3F8A2A00A1F001 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = GhostVMSwiftUI;
+			productName = GhostVMSwiftUI;
+			productReference = BC1B6C482C3F8A2A00A1F001 /* GhostVMSwiftUI.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BC1B6C3F2C3F8A2A00A1F001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastSwiftUpdateCheck = 1540;
+				LastUpgradeCheck = 1540;
+				TargetAttributes = {
+					BC1B6C472C3F8A2A00A1F001 = {
+						CreatedOnToolsVersion = 15.4;
+					};
+				};
+			};
+			buildConfigurationList = BC1B6C422C3F8A2A00A1F001 /* Build configuration list for PBXProject "GhostVMSwiftUI" */;
+			compatibilityVersion = "Xcode 15.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+			);
+			mainGroup = BC1B6C3E2C3F8A2A00A1F001;
+			productRefGroup = BC1B6C492C3F8A2A00A1F001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				BC1B6C472C3F8A2A00A1F001 /* GhostVMSwiftUI */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		BC1B6C452C3F8A2A00A1F001 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		BC1B6C432C3F8A2A00A1F001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				BC1B6C5C2C3F8A2A00A1F001 /* SwiftUIDemoApp.swift in Sources */,
+				BC1B6C5D2C3F8A2A00A1F001 /* App2Models.swift in Sources */,
+				BC1B6C5E2C3F8A2A00A1F001 /* App2VMRuntime.swift in Sources */,
+				BC1B6C5F2C3F8A2A00A1F001 /* App2VMDisplayHost.swift in Sources */,
+				BC1B6C602C3F8A2A00A1F001 /* App2IPSW.swift in Sources */,
+				BC1B6C612C3F8A2A00A1F001 /* FinderAdapter.swift in Sources */,
+				BC1B6C622C3F8A2A00A1F001 /* SavePanelAdapter.swift in Sources */,
+				BC1B6C632C3F8A2A00A1F001 /* App2AppDelegate.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BC1B6C592C3F8A2A00A1F001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES;
+				CODE_SIGN_ENTITLEMENTS = entitlements.plist;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = 3FGZQE8AW3;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "VMApp-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = GhostVM;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.groundwater.GhostVM;
+				PRODUCT_NAME = GhostVMSwiftUI;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		BC1B6C5A2C3F8A2A00A1F001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES;
+				CODE_SIGN_ENTITLEMENTS = entitlements.plist;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = 3FGZQE8AW3;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "VMApp-Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = GhostVM;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.groundwater.GhostVM;
+				PRODUCT_NAME = GhostVMSwiftUI;
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		BC1B6C422C3F8A2A00A1F001 /* Build configuration list for PBXProject "GhostVMSwiftUI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC1B6C592C3F8A2A00A1F001 /* Debug */,
+				BC1B6C5A2C3F8A2A00A1F001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		BC1B6C5B2C3F8A2A00A1F001 /* Build configuration list for PBXNativeTarget "GhostVMSwiftUI" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC1B6C592C3F8A2A00A1F001 /* Debug */,
+				BC1B6C5A2C3F8A2A00A1F001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = BC1B6C3F2C3F8A2A00A1F001 /* Project object */;
+}

@@ -30,19 +30,15 @@ struct App2IPSWCachedImage: Hashable {
     }
 
     var sizeDescription: String {
-        if let sizeBytes {
-            return Self.formatter.string(fromByteCount: sizeBytes)
-        }
-        return "Downloaded"
-    }
-
-    private static let formatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.allowedUnits = [.useGB, .useMB]
         formatter.countStyle = .file
         formatter.includesUnit = true
-        return formatter
-    }()
+        if let sizeBytes {
+            return formatter.string(fromByteCount: sizeBytes)
+        }
+        return "Downloaded"
+    }
 }
 
 struct App2IPSWDownloadProgress {
@@ -53,6 +49,7 @@ struct App2IPSWDownloadProgress {
 
 // MARK: - IPSW Service (feed + cache)
 
+@MainActor
 final class App2IPSWService: ObservableObject {
     static let shared = App2IPSWService()
 
