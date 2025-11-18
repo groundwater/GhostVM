@@ -364,7 +364,7 @@ final class App2RestoreImageStore: ObservableObject {
             let cached = service.listCachedImages()
             let cachedByFilename = Dictionary(uniqueKeysWithValues: cached.map { ($0.filename, $0) })
 
-            images = entries.map { entry in
+            var all: [App2RestoreImage] = entries.map { entry in
                 let cachedImage = cachedByFilename[entry.filename]
                 let isDownloaded = cachedImage != nil
                 let sizeDescription: String
@@ -384,6 +384,50 @@ final class App2RestoreImageStore: ObservableObject {
                     isDownloading: false,
                     firmwareURL: entry.firmwareURL
                 )
+            }
+
+            // Include any cached IPSWs that are not present in the current feed.
+            let knownFilenames = Set(all.map { $0.filename })
+            let orphaned = cached.filter { !knownFilenames.contains($0.filename) }
+            for cachedImage in orphaned {
+                let filename = cachedImage.filename
+                let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+                let title = baseName.isEmpty ? filename : baseName
+
+                let guessed = guessVersionAndBuild(from: filename)
+                let version = guessed?.version ?? "Unknown"
+                let build = guessed?.build ?? "Unknown"
+                let displayName: String
+                if let guessed {
+                    displayName = "macOS \(guessed.version) (\(guessed.build))"
+                } else {
+                    displayName = title
+                }
+
+                let image = App2RestoreImage(
+                    id: "cached:\(filename)",
+                    name: displayName,
+                    version: version,
+                    build: build,
+                    filename: filename,
+                    sizeDescription: cachedImage.sizeDescription,
+                    isDownloaded: true,
+                    isDownloading: false,
+                    firmwareURL: cachedImage.fileURL
+                )
+                all.append(image)
+            }
+
+            // Keep feed order first, then orphaned cached entries sorted by filename.
+            let feedCount = entries.count
+            if feedCount < all.count {
+                let head = all.prefix(feedCount)
+                let tail = all.suffix(all.count - feedCount).sorted {
+                    $0.filename.localizedCaseInsensitiveCompare($1.filename) == .orderedAscending
+                }
+                images = Array(head + tail)
+            } else {
+                images = all
             }
         } catch {
             errorMessage = error.localizedDescription
@@ -474,5 +518,34 @@ final class App2RestoreImageStore: ObservableObject {
         }
 
         downloadTasks[id] = task
+    }
+
+    // Best-effort parser for filenames like:
+    //   UniversalMac_15.1.1_24B91_Restore.ipsw
+    //   Sonoma_15.0_24A335_Restore.ipsw
+    private func guessVersionAndBuild(from filename: String) -> (version: String, build: String)? {
+        let base = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+        let parts = base.split(whereSeparator: { $0 == "_" || $0 == "-" })
+
+        var version: String?
+        var build: String?
+
+        for (index, part) in parts.enumerated() {
+            let token = String(part)
+            if version == nil,
+               token.range(of: #"^\d+(\.\d+)*$"#, options: .regularExpression) != nil {
+                version = token
+                if index + 1 < parts.count {
+                    let next = String(parts[index + 1])
+                    if next.range(of: #"^[0-9A-Za-z]+$"#, options: .regularExpression) != nil {
+                        build = next
+                    }
+                }
+                break
+            }
+        }
+
+        guard let version else { return nil }
+        return (version, build ?? "Unknown")
     }
 }

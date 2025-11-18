@@ -4,13 +4,15 @@ import UniformTypeIdentifiers
 @main
 @available(macOS 13.0, *)
 struct GhostVMSwiftUIApp: App {
+    @NSApplicationDelegateAdaptor(App2AppDelegate.self) private var appDelegate
     @StateObject private var store = App2VMStore()
     @StateObject private var restoreStore = App2RestoreImageStore()
 
     var body: some Scene {
-        WindowGroup("GhostVM (SwiftUI Demo)", id: "main") {
+        Window("GhostVM (SwiftUI Demo)", id: "main") {
             VMListDemoView()
                 .environmentObject(store)
+                .environmentObject(restoreStore)
         }
         .commands {
             DemoAppCommands(store: store, restoreStore: restoreStore)
@@ -74,15 +76,18 @@ struct DemoAppCommands: Commands {
 @available(macOS 13.0, *)
 struct VMListDemoView: View {
     @EnvironmentObject private var store: App2VMStore
+    @EnvironmentObject private var restoreStore: App2RestoreImageStore
     @Environment(\.openWindow) private var openWindow
 
     @State private var selectedVMID: App2VM.ID?
+    @State private var isShowingCreateSheet: Bool = false
+    @State private var isDropTarget: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Button {
-                    // Placeholder create action.
+                    isShowingCreateSheet = true
                 } label: {
                     Label("Create", systemImage: "plus")
                 }
@@ -102,6 +107,15 @@ struct VMListDemoView: View {
             .padding(.horizontal, 12)
 
             List(selection: $selectedVMID) {
+                if isDropTarget && store.vms.isEmpty {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down.on.square")
+                        Text("Drop .GhostVM bundles here")
+                        Spacer()
+                    }
+                    .foregroundStyle(Color.accentColor)
+                }
+
                 ForEach(store.vms) { vm in
                     VMRowView(
                         vm: vm,
@@ -122,32 +136,343 @@ struct VMListDemoView: View {
                     .listRowInsets(EdgeInsets(top: 4, leading: 12, bottom: 4, trailing: 8))
                     .padding(.vertical, 2)
                 }
+
+                if isDropTarget && !store.vms.isEmpty {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down.on.square")
+                        Text("Release to add .GhostVM bundles")
+                        Spacer()
+                    }
+                    .foregroundStyle(Color.accentColor)
+                }
             }
             .listStyle(.inset)
-            .onDrop(of: [UTType.fileURL.identifier], isTargeted: nil) { providers in
-                handleDrop(providers: providers)
-            }
+            .onDrop(of: [UTType.fileURL], isTargeted: $isDropTarget, perform: handleDrop)
         }
         .frame(minWidth: 520, minHeight: 360)
+        .sheet(isPresented: $isShowingCreateSheet) {
+            CreateVMDemoView(isPresented: $isShowingCreateSheet)
+                .environmentObject(store)
+                .environmentObject(restoreStore)
+        }
+        .onAppear {
+            App2AppDelegate.sharedStore = store
+        }
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        var handled = false
-        for provider in providers {
-            if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
-                provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                    guard let data = item as? Data,
-                          let url = URL(dataRepresentation: data, relativeTo: nil) else {
-                        return
-                    }
-                    DispatchQueue.main.async {
-                        store.addBundles(from: [url])
-                    }
+        guard !providers.isEmpty else { return false }
+        let identifier = UTType.fileURL.identifier
+        var accepted = false
+        var collected: [URL] = []
+        let lock = NSLock()
+        let group = DispatchGroup()
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(identifier) {
+            accepted = true
+            group.enter()
+            provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                var resolvedURL: URL?
+                if let url = item as? URL {
+                    resolvedURL = url
+                } else if let nsurl = item as? NSURL {
+                    resolvedURL = nsurl as URL
+                } else if let data = item as? Data {
+                    resolvedURL = URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true)
                 }
-                handled = true
+
+                if let url = resolvedURL {
+                    lock.lock()
+                    collected.append(url)
+                    lock.unlock()
+                }
             }
         }
-        return handled
+
+        guard accepted else { return false }
+
+        group.notify(queue: .main) {
+            self.store.addBundles(from: collected)
+        }
+
+        return true
+    }
+}
+
+@available(macOS 13.0, *)
+struct CreateVMDemoView: View {
+    @Binding var isPresented: Bool
+    @EnvironmentObject private var store: App2VMStore
+    @EnvironmentObject private var restoreStore: App2RestoreImageStore
+    @Environment(\.openWindow) private var openWindow
+
+    @State private var cpuCount: String = "4"
+    @State private var memoryGiB: String = "8"
+    @State private var diskGiB: String = "64"
+    @State private var sharedFolderPath: String = ""
+    @State private var sharedFolderWritable: Bool = false
+    @State private var restoreItems: [RestoreItem] = []
+    @State private var selectedRestorePath: String?
+    @State private var isCreating: Bool = false
+    @State private var errorMessage: String?
+    @State private var isShowingError: Bool = false
+
+    private let labelWidth: CGFloat = 120
+
+    private struct RestoreItem: Identifiable {
+        let path: String
+        let title: String
+        var id: String { path }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Provide the required .ipsw restore image. Adjust CPU, memory, and disk as needed. Shared folder is optional.")
+                .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("CPUs") {
+                HStack(spacing: 8) {
+                    TextField("Number of vCPUs", text: $cpuCount)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("cores")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Memory") {
+                HStack(spacing: 8) {
+                    TextField("GiB", text: $memoryGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Disk") {
+                HStack(spacing: 8) {
+                    TextField("GiB (minimum 20)", text: $diskGiB)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 120)
+                    Text("GiB")
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            labeledRow("Restore Image*") {
+                restorePicker
+            }
+
+            labeledRow("Shared Folder") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        TextField("Optional shared folder path", text: $sharedFolderPath)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Toggle("Allow writes to shared folder", isOn: $sharedFolderWritable)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            Spacer(minLength: 8)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .disabled(isCreating)
+                Button("Create") {
+                    create()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canCreate)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+        .onAppear(perform: reloadRestoreItems)
+        .onChange(of: restoreStore.images) {
+            reloadRestoreItems()
+        }
+        .alert("Unable to Create VM", isPresented: $isShowingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "An unknown error occurred while creating the virtual machine.")
+        }
+    }
+
+    private var canCreate: Bool {
+        hasRestoreOptions && selectedRestorePath != nil
+    }
+
+    @ViewBuilder
+    private var restorePicker: some View {
+        if hasRestoreOptions {
+            Picker("Restore Image", selection: restoreSelectionBinding) {
+                ForEach(restoreItems) { item in
+                    Text(item.title).tag(item.path)
+                }
+                if !restoreItems.isEmpty {
+                    Divider()
+                }
+                Text("Manage Restore Images…")
+                    .tag("__manage_restore__")
+            }
+            .labelsHidden()
+            .frame(maxWidth: .infinity)
+            .onChange(of: restoreSelectionBinding.wrappedValue) { oldValue, newValue in
+                if newValue == "__manage_restore__" {
+                    DispatchQueue.main.async {
+                        openWindow(id: "restoreImages")
+                        selectedRestorePath = oldValue.isEmpty ? nil : oldValue
+                    }
+                }
+            }
+        } else {
+            Text("No downloaded restore images detected.")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var restoreSelectionBinding: Binding<String> {
+        Binding<String>(
+            get: {
+                selectedRestorePath ?? ""
+            },
+            set: { newValue in
+                selectedRestorePath = newValue.isEmpty ? nil : newValue
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+        }
+    }
+
+    private var hasRestoreOptions: Bool {
+        !restoreItems.isEmpty
+    }
+
+    private func reloadRestoreItems() {
+        let service = App2IPSWService.shared
+        let cached = service.listCachedImages()
+
+        var items: [RestoreItem] = []
+        for image in cached {
+            if let restore = restoreStore.images.first(where: { $0.filename == image.filename }) {
+                items.append(RestoreItem(path: image.fileURL.path, title: restore.name))
+            } else {
+                items.append(RestoreItem(path: image.fileURL.path, title: image.filename))
+            }
+        }
+
+        items.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+        restoreItems = items
+
+        if let selected = selectedRestorePath,
+           items.contains(where: { $0.path == selected }) {
+            // keep selection
+        } else {
+            selectedRestorePath = items.first?.path
+        }
+    }
+
+    private func create() {
+        guard canCreate, !isCreating, let restorePath = selectedRestorePath else { return }
+
+        let suggestedName: String = {
+            let filename = URL(fileURLWithPath: restorePath)
+                .deletingPathExtension()
+                .lastPathComponent
+            let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "Virtual Machine" : trimmed
+        }()
+
+        SavePanelAdapter.chooseVMBundleURL(suggestedName: suggestedName) { url in
+            guard let url else { return }
+            DispatchQueue.main.async {
+                self.performCreate(at: url)
+            }
+        }
+    }
+
+    private func performCreate(at initialURL: URL) {
+        guard let restorePath = selectedRestorePath else { return }
+
+        var bundleURL = initialURL.standardizedFileURL
+        if bundleURL.pathExtension.lowercased() != "ghostvm" {
+            bundleURL.deletePathExtension()
+            bundleURL.appendPathExtension("GhostVM")
+        }
+
+        guard let vmctlURL = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("vmctl") else {
+            errorMessage = "Unable to locate vmctl helper inside the app bundle."
+            isShowingError = true
+            return
+        }
+
+        var arguments: [String] = [
+            "init",
+            bundleURL.path,
+            "--cpus", cpuCount,
+            "--memory", memoryGiB,
+            "--disk", diskGiB,
+            "--restore-image", restorePath
+        ]
+
+        let trimmedShared = sharedFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedShared.isEmpty {
+            arguments.append(contentsOf: ["--shared-folder", trimmedShared])
+            if sharedFolderWritable {
+                arguments.append("--writable")
+            }
+        }
+
+        let process = Process()
+        process.executableURL = vmctlURL
+        process.arguments = arguments
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        isCreating = true
+
+        do {
+            try process.run()
+        } catch {
+            isCreating = false
+            errorMessage = error.localizedDescription
+            isShowingError = true
+            return
+        }
+
+        process.terminationHandler = { proc in
+            let data = try? outputPipe.fileHandleForReading.readToEnd()
+            let output = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self.isCreating = false
+                if proc.terminationStatus == 0 {
+                    self.store.addBundles(from: [bundleURL])
+                    self.isPresented = false
+                } else {
+                    self.errorMessage = output.isEmpty ? "vmctl init failed with exit code \(proc.terminationStatus)." : output
+                    self.isShowingError = true
+                }
+            }
+        }
     }
 }
 

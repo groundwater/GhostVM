@@ -18,7 +18,7 @@ APP_BUNDLE := $(APP_TARGET).app
 APP_PLIST := VMApp-Info.plist
 APP_DISPLAY_NAME ?= $(APP_TARGET)
 APP2_TARGET ?= GhostVM-SwiftUI
-APP2_SOURCES := SwiftUIDemoApp.swift App2Models.swift App2VMRuntime.swift App2VMDisplayHost.swift App2IPSW.swift FinderAdapter.swift
+APP2_SOURCES := SwiftUIDemoApp.swift App2Models.swift App2VMRuntime.swift App2VMDisplayHost.swift App2IPSW.swift FinderAdapter.swift SavePanelAdapter.swift App2AppDelegate.swift
 APP2_BUNDLE := $(APP2_TARGET).app
 APP2_PLIST := VMApp-Info.plist
 APP2_DISPLAY_NAME ?= $(APP2_TARGET)
@@ -88,7 +88,7 @@ app: build
 	fi
 	codesign --force --sign "$(CODESIGN_ID)" --entitlements "$(ENTITLEMENTS)" "$(APP_BUNDLE)"
 
-app2:
+app2: build
 	rm -rf $(APP2_BUNDLE)
 	mkdir -p $(APP2_BUNDLE)/Contents/MacOS
 	mkdir -p $(APP2_BUNDLE)/Contents/Resources
@@ -97,6 +97,7 @@ app2:
 	/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $(APP2_DISPLAY_NAME)" $(APP2_BUNDLE)/Contents/Info.plist
 	/usr/libexec/PlistBuddy -c "Set :CFBundleName $(APP2_DISPLAY_NAME)" $(APP2_BUNDLE)/Contents/Info.plist
 	$(SWIFTC) $(APP2_SWIFTFLAGS) -o $(APP2_BUNDLE)/Contents/MacOS/$(APP2_TARGET) $(APP2_SOURCES) $(APP2_FRAMEWORKS)
+	cp $(TARGET) $(APP2_BUNDLE)/Contents/MacOS/vmctl
 	cp ghostvm.png $(APP2_BUNDLE)/Contents/Resources/ghostvm.png
 	cp ghostvm-dark.png $(APP2_BUNDLE)/Contents/Resources/ghostvm-dark.png
 	cp racecar.png $(APP2_BUNDLE)/Contents/Resources/racecar.png

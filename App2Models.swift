@@ -61,10 +61,12 @@ struct App2BundleLayout {
 final class App2VMStore: ObservableObject {
     @Published var vms: [App2VM] = []
 
+    private let defaults = UserDefaults.standard
     private let fileManager = FileManager.default
+    private let knownBundlesKey = "SwiftUIKnownVMBundles"
 
     init() {
-        reloadDefaultDirectory()
+        loadKnownVMs()
     }
 
     func reloadDefaultDirectory() {
@@ -117,12 +119,33 @@ final class App2VMStore: ObservableObject {
             let path = bundleURL.path
             guard !seenPaths.contains(path) else { continue }
             guard let vm = try? loadVM(from: bundleURL) else { continue }
-            updated.append(vm)
+
+            // Treat drops of a renamed bundle as updates when they refer to
+            // the same underlying directory on disk (same fileResourceIdentifier),
+            // otherwise append as a new entry.
+            var updatedExisting = false
+            if let newID = (try? bundleURL.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier) as? NSData {
+                if let existingIndex = updated.firstIndex(where: { existing in
+                    guard let existingID = (try? existing.bundleURL.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier) as? NSData else {
+                        return false
+                    }
+                    return existingID.isEqual(newID) && existing.bundleURL.path != bundleURL.path
+                }) {
+                    updated[existingIndex] = vm
+                    updatedExisting = true
+                }
+            }
+
+            if !updatedExisting {
+                updated.append(vm)
+            }
+
             seenPaths.insert(path)
         }
 
         updated.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         vms = updated
+        persistKnownVMs()
     }
 
     func updateStatus(for vmID: App2VM.ID, status: String) {
@@ -132,6 +155,7 @@ final class App2VMStore: ObservableObject {
 
     func removeFromList(_ vm: App2VM) {
         vms.removeAll { $0.id == vm.id }
+        persistKnownVMs()
     }
 
     func deleteVM(_ vm: App2VM) {
@@ -157,6 +181,32 @@ final class App2VMStore: ObservableObject {
     func vm(for bundlePath: String) -> App2VM? {
         let standardized = URL(fileURLWithPath: bundlePath).standardizedFileURL.path
         return vms.first { $0.bundleURL.path == standardized }
+    }
+
+    // MARK: - Persistence
+
+    private func loadKnownVMs() {
+        guard let stored = defaults.array(forKey: knownBundlesKey) as? [String], !stored.isEmpty else {
+            vms = []
+            return
+        }
+
+        var discovered: [App2VM] = []
+        for path in stored {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            if fileManager.fileExists(atPath: url.path),
+               let vm = try? loadVM(from: url) {
+                discovered.append(vm)
+            }
+        }
+
+        discovered.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        vms = discovered
+    }
+
+    private func persistKnownVMs() {
+        let paths = vms.map { $0.bundleURL.path }
+        defaults.set(paths, forKey: knownBundlesKey)
     }
 
     private func loadVM(from bundleURL: URL) throws -> App2VM {
