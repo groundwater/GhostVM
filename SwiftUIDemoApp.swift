@@ -9,7 +9,7 @@ struct GhostVMSwiftUIApp: App {
     @StateObject private var restoreStore = App2RestoreImageStore()
 
     var body: some Scene {
-        Window("GhostVM (SwiftUI Demo)", id: "main") {
+        Window("FixieVM", id: "main") {
             VMListDemoView()
                 .environmentObject(store)
                 .environmentObject(restoreStore)
@@ -81,6 +81,7 @@ struct VMListDemoView: View {
 
     @State private var selectedVMID: App2VM.ID?
     @State private var isShowingCreateSheet: Bool = false
+    @State private var vmPendingDelete: App2VM?
     @State private var isDropTarget: Bool = false
 
     var body: some View {
@@ -110,7 +111,7 @@ struct VMListDemoView: View {
                 if isDropTarget && store.vms.isEmpty {
                     HStack {
                         Image(systemName: "square.and.arrow.down.on.square")
-                        Text("Drop .GhostVM bundles here")
+                        Text("Drop .FixieVM bundles here")
                         Spacer()
                     }
                     .foregroundStyle(Color.accentColor)
@@ -130,6 +131,9 @@ struct VMListDemoView: View {
                             vm: vm,
                             play: {
                                 openWindow(id: "vm", value: vm)
+                            },
+                            requestDelete: {
+                                vmPendingDelete = vm
                             }
                         )
                     }
@@ -140,7 +144,7 @@ struct VMListDemoView: View {
                 if isDropTarget && !store.vms.isEmpty {
                     HStack {
                         Image(systemName: "square.and.arrow.down.on.square")
-                        Text("Release to add .GhostVM bundles")
+                        Text("Release to add .FixieVM bundles")
                         Spacer()
                     }
                     .foregroundStyle(Color.accentColor)
@@ -157,6 +161,20 @@ struct VMListDemoView: View {
         }
         .onAppear {
             App2AppDelegate.sharedStore = store
+        }
+        .alert("Delete this virtual machine?", isPresented: Binding(
+            get: { vmPendingDelete != nil },
+            set: { if !$0 { vmPendingDelete = nil } }
+        ), presenting: vmPendingDelete) { vm in
+            Button("Move to Trash", role: .destructive) {
+                store.deleteVM(vm)
+                vmPendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                vmPendingDelete = nil
+            }
+        } message: { vm in
+            Text("“\(vm.name)” will be moved to the Trash. You can restore it from the Trash later if you change your mind.")
         }
     }
 
@@ -410,9 +428,10 @@ struct CreateVMDemoView: View {
         guard let restorePath = selectedRestorePath else { return }
 
         var bundleURL = initialURL.standardizedFileURL
-        if bundleURL.pathExtension.lowercased() != "ghostvm" {
+        let ext = bundleURL.pathExtension.lowercased()
+        if ext != "fixievm" && ext != "ghostvm" {
             bundleURL.deletePathExtension()
-            bundleURL.appendPathExtension("GhostVM")
+            bundleURL.appendPathExtension("FixieVM")
         }
 
         guard let vmctlURL = Bundle.main.executableURL?
@@ -514,7 +533,7 @@ struct VMRowView: View {
                 .buttonStyle(.borderless)
 
                 Menu {
-                    VMContextMenu(vm: vm, play: play)
+                    VMContextMenu(vm: vm, play: play, requestDelete: {})
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 16, weight: .semibold))
@@ -543,6 +562,7 @@ struct VMRowView: View {
 struct VMContextMenu: View {
     let vm: App2VM
     let play: () -> Void
+    let requestDelete: () -> Void
     @EnvironmentObject private var store: App2VMStore
 
     var body: some View {
@@ -568,8 +588,8 @@ struct VMContextMenu: View {
         Button("Remove from List") {
             store.removeFromList(vm)
         }
-        Button("Delete") {
-            store.deleteVM(vm)
+        Button("Delete", role: .destructive) {
+            requestDelete()
         }
         .disabled(isRunning)
     }
@@ -710,6 +730,12 @@ struct SettingsDemoView: View {
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 320)
+        .onAppear {
+            AppIconAdapter.updateIcon(for: iconMode)
+        }
+        .onChange(of: iconMode) { _, newValue in
+            AppIconAdapter.updateIcon(for: newValue)
+        }
     }
 
     @ViewBuilder

@@ -15,6 +15,7 @@
 		BC1B6C612C3F8A2A00A1F001 /* FinderAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C542C3F8A2A00A1F001 /* FinderAdapter.swift */; };
 		BC1B6C622C3F8A2A00A1F001 /* SavePanelAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C552C3F8A2A00A1F001 /* SavePanelAdapter.swift */; };
 		BC1B6C632C3F8A2A00A1F001 /* App2AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C562C3F8A2A00A1F001 /* App2AppDelegate.swift */; };
+		BC1B6C662C3F8A2A00A1F001 /* AppIconAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC1B6C652C3F8A2A00A1F001 /* AppIconAdapter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -27,6 +28,7 @@
 		BC1B6C542C3F8A2A00A1F001 /* FinderAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderAdapter.swift; sourceTree = "<group>"; };
 		BC1B6C552C3F8A2A00A1F001 /* SavePanelAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavePanelAdapter.swift; sourceTree = "<group>"; };
 		BC1B6C562C3F8A2A00A1F001 /* App2AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App2AppDelegate.swift; sourceTree = "<group>"; };
+		BC1B6C652C3F8A2A00A1F001 /* AppIconAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppIconAdapter.swift; sourceTree = "<group>"; };
 		BC1B6C572C3F8A2A00A1F001 /* VMApp-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "VMApp-Info.plist"; sourceTree = "<group>"; };
 		BC1B6C582C3F8A2A00A1F001 /* entitlements.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = entitlements.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -69,6 +71,7 @@
 				BC1B6C542C3F8A2A00A1F001 /* FinderAdapter.swift */,
 				BC1B6C552C3F8A2A00A1F001 /* SavePanelAdapter.swift */,
 				BC1B6C562C3F8A2A00A1F001 /* App2AppDelegate.swift */,
+				BC1B6C652C3F8A2A00A1F001 /* AppIconAdapter.swift */,
 				BC1B6C572C3F8A2A00A1F001 /* VMApp-Info.plist */,
 				BC1B6C582C3F8A2A00A1F001 /* entitlements.plist */,
 			);
@@ -149,6 +152,7 @@
 				BC1B6C612C3F8A2A00A1F001 /* FinderAdapter.swift in Sources */,
 				BC1B6C622C3F8A2A00A1F001 /* SavePanelAdapter.swift in Sources */,
 				BC1B6C632C3F8A2A00A1F001 /* App2AppDelegate.swift in Sources */,
+				BC1B6C662C3F8A2A00A1F001 /* AppIconAdapter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -171,12 +175,12 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "VMApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = GhostVM;
+				INFOPLIST_KEY_CFBundleDisplayName = FixieVM;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
 				ONLY_ACTIVE_ARCH = YES;
-				PRODUCT_BUNDLE_IDENTIFIER = com.groundwater.GhostVM;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.fixie.vm;
 				PRODUCT_NAME = GhostVMSwiftUI;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;
@@ -201,11 +205,11 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = "VMApp-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = GhostVM;
+				INFOPLIST_KEY_CFBundleDisplayName = FixieVM;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				LD_RUNPATH_SEARCH_PATHS = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.groundwater.GhostVM;
+				PRODUCT_BUNDLE_IDENTIFIER = sh.fixie.vm;
 				PRODUCT_NAME = GhostVMSwiftUI;
 				PROVISIONING_PROFILE_SPECIFIER = "";
 				SDKROOT = macosx;

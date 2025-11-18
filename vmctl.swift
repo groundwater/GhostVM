@@ -542,8 +542,12 @@ struct RuntimeSharedFolderOverride {
 }
 
 final class VMController {
-    static let bundleExtension = "GhostVM"
+    // Primary bundle extension for new VMs.
+    static let bundleExtension = "FixieVM"
     static let bundleExtensionLowercased = bundleExtension.lowercased()
+    // Legacy extension accepted for backward compatibility.
+    static let legacyBundleExtension = "GhostVM"
+    static let legacyBundleExtensionLowercased = legacyBundleExtension.lowercased()
 
     private let fileManager = FileManager.default
     private var rootDirectory: URL
@@ -719,7 +723,7 @@ final class VMController {
 
     private func isSupportedBundleURL(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == VMController.bundleExtensionLowercased
+        return ext == VMController.bundleExtensionLowercased || ext == VMController.legacyBundleExtensionLowercased
     }
 
     func storedConfig(at bundleURL: URL) throws -> VMStoredConfig {
@@ -792,8 +796,8 @@ final class VMController {
         let ext = bundleURL.pathExtension.lowercased()
         if ext.isEmpty {
             bundleURL.appendPathExtension(VMController.bundleExtension)
-        } else if ext != VMController.bundleExtensionLowercased {
-            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
+        } else if ext != VMController.bundleExtensionLowercased && ext != VMController.legacyBundleExtensionLowercased {
+            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension) (or legacy .\(VMController.legacyBundleExtension)).")
         }
 
         let vmName: String
@@ -1838,8 +1842,8 @@ struct CLI {
         let ext = url.pathExtension.lowercased()
         if ext.isEmpty {
             url.appendPathExtension(VMController.bundleExtension)
-        } else if ext != VMController.bundleExtensionLowercased {
-            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
+        } else if ext != VMController.bundleExtensionLowercased && ext != VMController.legacyBundleExtensionLowercased {
+            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension) (or legacy .\(VMController.legacyBundleExtension)).")
         }
 
         if mustExist {
@@ -1992,15 +1996,15 @@ Commands:
   snapshot <bundle-path> <create|revert> <snapshot>
 
 Examples:
-  vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
-  vmctl install ~/VMs/sandbox.GhostVM
-  vmctl start ~/VMs/sandbox.GhostVM                    # GUI
-  vmctl start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
-  vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
-  vmctl stop ~/VMs/sandbox.GhostVM
-  vmctl status ~/VMs/sandbox.GhostVM
-  vmctl snapshot ~/VMs/sandbox.GhostVM create clean
-  vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
+  vmctl init ~/VMs/sandbox.FixieVM --cpus 6 --memory 16 --disk 128
+  vmctl install ~/VMs/sandbox.FixieVM
+  vmctl start ~/VMs/sandbox.FixieVM                    # GUI
+  vmctl start ~/VMs/sandbox.FixieVM --headless         # headless (SSH after setup)
+  vmctl start ~/VMs/sandbox.FixieVM --shared-folder ~/Projects --writable
+  vmctl stop ~/VMs/sandbox.FixieVM
+  vmctl status ~/VMs/sandbox.FixieVM
+  vmctl snapshot ~/VMs/sandbox.FixieVM create clean
+  vmctl snapshot ~/VMs/sandbox.FixieVM revert clean
 
 Note: After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
       Apple’s EULA requires macOS guests to run on Apple-branded hardware.
