@@ -1,4 +1,4 @@
-name: GhostVMSwiftUI
+name: GhostVM
 options:
   bundleIdPrefix: sh.fixie
   deploymentTarget:
@@ -13,22 +13,14 @@ settings:
     CLANG_WARN_UNGUARDED_AVAILABILITY: YES
 
 targets:
-  GhostVMSwiftUI:
+  GhostVM:
     type: application
     platform: macOS
     sources:
-      - path: SwiftUIDemoApp.swift
-      - path: App2Models.swift
-      - path: App2VMRuntime.swift
-      - path: App2VMDisplayHost.swift
-      - path: App2IPSW.swift
-      - path: FinderAdapter.swift
-      - path: SavePanelAdapter.swift
-      - path: App2AppDelegate.swift
-      - path: AppIconAdapter.swift
+      - path: GhostVM
     settings:
       base:
-        PRODUCT_NAME: GhostVMSwiftUI
+        PRODUCT_NAME: GhostVM
         PRODUCT_BUNDLE_IDENTIFIER: sh.fixie.vm
         INFOPLIST_FILE: VMApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: entitlements.plist

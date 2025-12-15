@@ -6,10 +6,11 @@ CODESIGN_ID ?= -
 TARGET ?= vmctl
 
 # Xcode project settings (generated via xcodegen)
-XCODE_PROJECT = GhostVMSwiftUI.xcodeproj
-XCODE_SCHEME = GhostVMSwiftUI
+XCODE_PROJECT = GhostVM.xcodeproj
+XCODE_SCHEME = GhostVM
 XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
+APP_NAME = GhostVM
 
 .PHONY: all cli app clean help run generate
 
@@ -39,17 +40,17 @@ app: $(XCODE_PROJECT)
 		-derivedDataPath $(BUILD_DIR) \
 		build
 	@# Copy icons into app bundle Resources
-	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources"
-	@cp ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/"
-	@cp ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/"
-	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/GhostVMIcon.icns"
+	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
+	@cp ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+	@cp ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Re-sign after adding resources
-	codesign --entitlements entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app"
-	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app"
+	codesign --entitlements entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
 # Build and run the app
 run: app
-	open "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app"
+	open "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
 clean:
 	rm -f $(TARGET)
