@@ -19,7 +19,7 @@ Use the `.claude/skills/` folder for detailed guidance on specific topics:
 ## Build Commands
 
 ```bash
-make          # Build vmctl CLI (default)
+make          # Show available targets
 make cli      # Build vmctl CLI
 make generate # Generate Xcode project from project.yml
 make app      # Build SwiftUI app (auto-generates project)

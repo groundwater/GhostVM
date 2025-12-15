@@ -14,7 +14,7 @@ APP_NAME = GhostVM
 
 .PHONY: all cli app clean help run generate test
 
-all: cli
+all: help
 
 # Generate Xcode project from project.yml
 generate: $(XCODE_PROJECT)
@@ -63,7 +63,7 @@ clean:
 
 help:
 	@echo "GhostVM Build Targets:"
-	@echo "  make          - Build vmctl CLI (default)"
+	@echo "  make          - Show this help"
 	@echo "  make cli      - Build vmctl CLI"
 	@echo "  make generate - Generate Xcode project from project.yml"
 	@echo "  make app      - Build SwiftUI app via xcodebuild"
