@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Skills
+
+Use the `.claude/skills/` folder for detailed guidance on specific topics:
+
+| Skill | When to Use |
+|-------|-------------|
+| **Application** | App architecture, file layout, VM bundle format |
+| **Virtualization** | VZVirtualMachine, IPSW installation, VM lifecycle |
+| **SwiftUI** | Views, navigation, window management, app lifecycle |
+| **Swift** | Language patterns, closures, optionals, protocols |
+| **Testing** | XCTest, mocking, async testing |
+| **Xcode** | XcodeGen, project.yml, build settings |
+| **gh** | GitHub CLI for issues, PRs, releases |
+
 ## Build Commands
 
 ```bash
@@ -13,37 +27,7 @@ make run      # Build and launch the app
 make clean    # Remove build artifacts and generated project
 ```
 
-The Xcode project is generated from `project.yml` using XcodeGen (`brew install xcodegen`). The standalone `vmctl` binary is built via swiftc with `-parse-as-library` flag.
-
-## Architecture
-
-GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framework`. VMs are stored as self-contained `.GhostVM` bundles containing:
-- `config.json` - VM metadata (CPUs, memory, disk size, paths)
-- `disk.img` - Raw sparse disk image
-- `HardwareModel.bin`, `MachineIdentifier.bin`, `AuxiliaryStorage.bin` - Platform identity blobs
-
-### Two Parallel Surfaces
-
-1. **vmctl CLI** (`vmctl.swift`) - Single-file CLI tool for init/install/start/stop/status/snapshot operations. Contains `VMController`, `VMConfigStore`, `VMFileLayout`, and `CLI` classes. Builds both as standalone binary and embedded in the app.
-
-2. **SwiftUI App** (`SwiftUIDemoApp.swift` + `App2*.swift`) - Modern SwiftUI app built via Xcode project:
-   - `App2VMStore` - Observable store managing VM list from `UserDefaults` + disk
-   - `App2VMRunSession` - Runtime controller wrapping `VZVirtualMachine`
-   - `App2RestoreImageStore` / `App2IPSW.swift` - IPSW feed and download management
-   - `App2VMDisplayHost.swift` - `NSViewRepresentable` wrapper for `VZVirtualMachineView`
-   - Adapter files (`FinderAdapter`, `SavePanelAdapter`, `AppIconAdapter`) - Isolate AppKit dependencies
-
-### Design Guidelines
-
-- **SwiftUI-first**: New UI goes in SwiftUI; AppKit only when unavoidable
-- **AppKit isolation**: All AppKit code belongs in dedicated `*Adapter.swift` files exposing SwiftUI-friendly APIs
-- **Window scenes**: Each window type is a separate `WindowGroup` with stable `id` strings (`"main"`, `"settings"`, `"restoreImages"`, `"vm"`)
-
-## Key Paths
-
-- Restore images: `~/Downloads/*.ipsw` and `Install macOS*.app` SharedSupport discovered automatically
-- IPSW cache: `~/Library/Application Support/GhostVM/IPSW/`
-- Default VM location: `~/VMs/*.GhostVM`
+The Xcode project is generated from `project.yml` using XcodeGen.
 
 ## Requirements
 
@@ -52,8 +36,8 @@ GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framewo
 - XcodeGen (`brew install xcodegen`)
 - `com.apple.security.virtualization` entitlement required
 
-## Agent Workflow Notes
+## Agent Workflow
 
-- Use `gh` CLI for GitHub operations (see `Documents/gh.md`)
+- Use `gh` CLI for GitHub operations (invoke gh skill)
 - When done with a task, run: `terminal-notifier -title "$TITLE" -message "$MESSAGE" -sound default -sender com.apple.Terminal`
-- Update `AGENTS.md` `<Agent>` section with implementation notes for future reference
+- Update `AGENTS.md` `<Agent>` section with implementation notes
