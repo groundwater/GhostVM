@@ -1,4 +1,4 @@
-# GhostVM / FixieVM Makefile
+# GhostVM Makefile
 # Builds vmctl CLI and the SwiftUI app via xcodebuild
 
 SWIFTC ?= swiftc

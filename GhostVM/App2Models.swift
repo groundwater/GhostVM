@@ -1,6 +1,6 @@
 import Foundation
 
-// Lightweight view model for a real .FixieVM bundle on disk.
+// Lightweight view model for a real .GhostVM bundle on disk.
 struct App2VM: Identifiable, Hashable, Codable {
     let id: UUID
     var name: String
@@ -70,7 +70,7 @@ final class App2VMStore: ObservableObject {
     }
 
     func reloadDefaultDirectory() {
-        // Legacy helper retained for debugging; prefers .FixieVM but accepts .GhostVM.
+        // Legacy helper retained for debugging.
         let home = fileManager.homeDirectoryForCurrentUser
         let root = home.appendingPathComponent("VMs", isDirectory: true)
         guard fileManager.fileExists(atPath: root.path) else {
@@ -89,7 +89,7 @@ final class App2VMStore: ObservableObject {
         var discovered: [App2VM] = []
         for url in contents {
             let ext = url.pathExtension.lowercased()
-            guard ext == "fixievm" || ext == "ghostvm" else { continue }
+            guard ext == "ghostvm" else { continue }
             if let vm = try? loadVM(from: url) {
                 discovered.append(vm)
             }
@@ -107,12 +107,12 @@ final class App2VMStore: ObservableObject {
             let url = rawURL.standardizedFileURL
             let bundleURL: URL
             let ext = url.pathExtension.lowercased()
-            if ext == "fixievm" || ext == "ghostvm" {
+            if ext == "ghostvm" {
                 bundleURL = url
             } else if ext.isEmpty {
                 // If a plain directory is dropped, treat it as a bundle only if it has the right suffix.
                 let name = url.lastPathComponent.lowercased()
-                if name.hasSuffix(".fixievm") || name.hasSuffix(".ghostvm") {
+                if name.hasSuffix(".ghostvm") {
                     bundleURL = url
                 } else {
                     continue

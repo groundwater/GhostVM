@@ -3,14 +3,14 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>FixieVM</string>
+	<string>GhostVM</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
 			<key>CFBundleTypeIconFile</key>
 			<string>GhostVMIcon</string>
 			<key>CFBundleTypeName</key>
-			<string>FixieVM Bundle</string>
+			<string>GhostVM Bundle</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
 			<key>LSItemContentTypes</key>
@@ -30,7 +30,7 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>FixieVM</string>
+	<string>GhostVM</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -38,7 +38,7 @@
 	<key>CFBundleVersion</key>
 	<string>2</string>
 	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
+	<string>15.0</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>UTExportedTypeDeclarations</key>
@@ -49,7 +49,7 @@
 				<string>com.apple.package</string>
 			</array>
 			<key>UTTypeDescription</key>
-			<string>FixieVM bundle</string>
+			<string>GhostVM bundle</string>
 			<key>UTTypeIconFile</key>
 			<string>GhostVMIcon</string>
 			<key>UTTypeIdentifier</key>
@@ -58,8 +58,6 @@
 			<dict>
 				<key>public.filename-extension</key>
 				<array>
-					<string>FixieVM</string>
-					<string>fixievm</string>
 					<string>GhostVM</string>
 					<string>ghostvm</string>
 				</array>

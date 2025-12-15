@@ -17,7 +17,7 @@ The Xcode project is generated from `project.yml` using XcodeGen (`brew install 
 
 ## Architecture
 
-GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framework`. VMs are stored as self-contained `.GhostVM` or `.FixieVM` bundles containing:
+GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framework`. VMs are stored as self-contained `.GhostVM` bundles containing:
 - `config.json` - VM metadata (CPUs, memory, disk size, paths)
 - `disk.img` - Raw sparse disk image
 - `HardwareModel.bin`, `MachineIdentifier.bin`, `AuxiliaryStorage.bin` - Platform identity blobs
@@ -43,7 +43,7 @@ GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framewo
 
 - Restore images: `~/Downloads/*.ipsw` and `Install macOS*.app` SharedSupport discovered automatically
 - IPSW cache: `~/Library/Application Support/GhostVM/IPSW/`
-- Default VM location: `~/VMs/*.GhostVM` or `*.FixieVM`
+- Default VM location: `~/VMs/*.GhostVM`
 
 ## Requirements
 

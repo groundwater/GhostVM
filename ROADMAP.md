@@ -1,62 +1,15 @@
-# ROADMAP
+# Roadmap
 
-- [ ] Host Agent
+## Planned Features
+
+- [ ] **Host Agent**
   - [ ] Install from DMG
-  - [ ] Copy/Paste
-  - [ ] Drag'n Drop
-  - [ ] Network Drives
-  - [ ] Inject HIDs
-- [ ] Suspend-Resume
-
-## Virtualization Framework Configuration Surface
-
-- **Boot & platform**
-  - `VZMacOSBootLoader` + `VZMacPlatformConfiguration` boot macOS restore images using hardware model, machine identifier, auxiliary storage, and SE blobs.
-  - `VZLinuxBootLoader` loads a kernel, initrd, and command line for Linux guests; `VZGenericPlatformConfiguration` supplies a paravirtualized hardware model.
-  - For Windows/Linux UEFI flows, embed a custom firmware bundle and set `bootLoader` to `VZEFIBootLoader`.
-- **CPU & memory sizing**
-  - Tune `VZVirtualMachineConfiguration.cpuCount` and `memorySize` within host limits; Virtualization validates the combo before launch.
-  - Add `VZVirtioTraditionalMemoryBalloonDeviceConfiguration` to let the host reclaim guest memory dynamically.
-  - Configure NUMA-like behavior via multiple `VZVirtioMemoryBalloonDeviceConfiguration` objects when future APIs allow.
-- **Storage devices**
-  - Back `VZVirtioBlockDeviceConfiguration` with `VZDiskImageStorageDeviceAttachment` (raw/sparse files, read-only or read-write).
-  - Attach `VZUSBMassStorageDeviceConfiguration` for removable disks; the guest sees them as hot-pluggable USB drives.
-  - Use multiple block devices to model separate boot/data disks or to pass through prebuilt VHDX/RAW images.
-- **Shared folders & file systems**
-  - `VZVirtioFileSystemDeviceConfiguration` + `VZSingleDirectoryShare` expose one host directory; `VZMultipleDirectoryShare` maps multiple host paths under different tags.
-  - Control permissions with `readOnly` flags; combine with sandbox bookmarks to keep TCC happy.
-  - Linux guests can mount these via 9p (`mount -t virtiofs <tag> /mnt/...`) while macOS uses Finder’s shared folder UI.
-- **Networking**
-  - `VZNATNetworkDeviceAttachment` gives outbound-only internet via host NAT; minimal setup, good default.
-  - `VZBridgedNetworkDeviceAttachment` bridges the VM to a selected physical interface for LAN presence with its own DHCP lease.
-  - `VZFileHandleNetworkDeviceAttachment` lets you proxy packets through a tap device or custom process (VPN, firewall, host-only).
-- **Graphics & display**
-  - macOS guests: `VZMacGraphicsDeviceConfiguration` plus one or more `VZMacGraphicsDisplayConfiguration` entries controlling resolution and pixels-per-inch (mirrors real displays).
-  - Linux guests: `VZVirtioGraphicsDeviceConfiguration` with multiple scanouts, each specifying width/height for multi-monitor setups.
-  - Combine with `VZMacAuxiliaryStorage` / GPU entitlements to unlock high-res rendering and Metal acceleration.
-- **Input devices**
-  - `VZUSBKeyboardConfiguration` emulates a standard USB keyboard; supports international layouts.
-  - `VZUSBPointingDeviceConfiguration` offers relative mouse input; `VZUSBScreenCoordinatePointingDeviceConfiguration` maps host coordinates for touchpad-like behavior.
-  - Additional HID devices (gamepads, pens) arrive via `VZUSBDeviceShareConfiguration` when the host grants access.
-- **Audio**
-  - `VZVirtioSoundDeviceConfiguration` exposes output and input streams; each stream targets a host `AVAudioDevice`.
-  - Configure multiple outputs (speakers + headphones) or isolate inputs for conferencing tests.
-  - Optionally route audio through virtual loopback devices to capture/inspect samples.
-- **Serial & console**
-  - `VZVirtioConsoleDeviceSerialPortConfiguration` with `VZFileHandleSerialPortAttachment` pipes serial traffic to file handles, sockets, or pipes for automation.
-  - `VZSpiceAgentPortAttachment` (via `VZVirtioConsoleDeviceSpicePortConfiguration`) enables SPICE agent comms for clipboard and resolution sync in supporting guests.
-  - Multiple console ports let you split kernel logs, management shells, and guest agents.
-- **Entropy & RNG**
-  - `VZVirtioEntropyDeviceConfiguration` injects host randomness, improving cryptographic strength in fresh guests.
-  - Required for compliance scenarios where `/dev/random` quality matters.
-- **VSock / host-guest IPC**
-  - `VZVirtioSocketDeviceConfiguration` creates an AF_VSOCK transport; useful for RPC, file sync, agent comms without opening network ports.
-  - Combine with `NWConnection` or gRPC to build custom control planes.
-- **USB passthrough**
-  - `VZUSBMassStorageDeviceConfiguration` mounts disk images as thumb drives; hot-plug/hot-unplug by adding/removing devices.
-  - On macOS 15+, `VZUSBDeviceShareConfiguration` forwards real USB devices (HID, serial, etc.) when the host grants entitlement and user consent.
-  - Policy controls allow read-only vs read-write exposure per device.
-- **Installer workflows**
-  - `VZMacOSInstaller` automates macOS restore images, reporting progress callbacks for UI/CLI integration.
-  - Linux: `VZLinuxBootLoader` passes kernel arguments (`init=/sbin/init`, `console=ttyS0`) and initrd paths to boot installers directly.
-  - Windows/other OSes can boot via UEFI + ISO/VHDX images, scripted with unattended answer files through virtual CD/DVD attachments.
+  - [ ] Copy/Paste clipboard sync
+  - [ ] Drag and drop file transfer
+  - [ ] Network drives
+  - [ ] HID injection
+- [ ] **Suspend/Resume** - Save and restore VM state
+- [ ] **Linux guests** - `VZLinuxBootLoader` support
+- [ ] **Bridged networking** - `VZBridgedNetworkDeviceAttachment`
+- [ ] **Audio passthrough** - `VZVirtioSoundDeviceConfiguration`
+- [ ] **USB passthrough** - `VZUSBDeviceShareConfiguration` (macOS 15+)

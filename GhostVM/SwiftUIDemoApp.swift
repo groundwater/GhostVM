@@ -9,7 +9,7 @@ struct GhostVMSwiftUIApp: App {
     @StateObject private var restoreStore = App2RestoreImageStore()
 
     var body: some Scene {
-        Window("FixieVM", id: "main") {
+        Window("GhostVM", id: "main") {
             VMListDemoView()
                 .environmentObject(store)
                 .environmentObject(restoreStore)
@@ -111,7 +111,7 @@ struct VMListDemoView: View {
                 if isDropTarget && store.vms.isEmpty {
                     HStack {
                         Image(systemName: "square.and.arrow.down.on.square")
-                        Text("Drop .FixieVM bundles here")
+                        Text("Drop .GhostVM bundles here")
                         Spacer()
                     }
                     .foregroundStyle(Color.accentColor)
@@ -144,7 +144,7 @@ struct VMListDemoView: View {
                 if isDropTarget && !store.vms.isEmpty {
                     HStack {
                         Image(systemName: "square.and.arrow.down.on.square")
-                        Text("Release to add .FixieVM bundles")
+                        Text("Release to add .GhostVM bundles")
                         Spacer()
                     }
                     .foregroundStyle(Color.accentColor)
@@ -429,9 +429,9 @@ struct CreateVMDemoView: View {
 
         var bundleURL = initialURL.standardizedFileURL
         let ext = bundleURL.pathExtension.lowercased()
-        if ext != "fixievm" && ext != "ghostvm" {
+        if ext != "ghostvm" {
             bundleURL.deletePathExtension()
-            bundleURL.appendPathExtension("FixieVM")
+            bundleURL.appendPathExtension("GhostVM")
         }
 
         guard let vmctlURL = Bundle.main.executableURL?

@@ -8,14 +8,14 @@ enum SavePanelAdapter {
             let panel = NSSavePanel()
             panel.canCreateDirectories = true
             if #available(macOS 12.0, *) {
-                if let packageType = UTType(filenameExtension: "FixieVM") {
+                if let packageType = UTType(filenameExtension: "GhostVM") {
                     panel.allowedContentTypes = [packageType]
                 }
             } else {
-                panel.allowedFileTypes = ["FixieVM"]
+                panel.allowedFileTypes = ["GhostVM"]
                 panel.allowsOtherFileTypes = false
             }
-            panel.nameFieldStringValue = suggestedName.isEmpty ? "Virtual Machine.FixieVM" : "\(suggestedName).FixieVM"
+            panel.nameFieldStringValue = suggestedName.isEmpty ? "Virtual Machine.GhostVM" : "\(suggestedName).GhostVM"
             panel.prompt = "Create"
             panel.title = "Create Virtual Machine"
 

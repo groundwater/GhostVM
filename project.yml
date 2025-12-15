@@ -1,6 +1,6 @@
 name: GhostVM
 options:
-  bundleIdPrefix: sh.fixie
+  bundleIdPrefix: com.groundwater
   deploymentTarget:
     macOS: "15.0"
   xcodeVersion: "15.4"
@@ -24,7 +24,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVM
-        PRODUCT_BUNDLE_IDENTIFIER: sh.fixie.vm
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm
         INFOPLIST_FILE: GhostVM/VMApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
