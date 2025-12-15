@@ -83,6 +83,10 @@ struct VMListDemoView: View {
     @State private var isShowingCreateSheet: Bool = false
     @State private var vmPendingDelete: App2VM?
     @State private var isDropTarget: Bool = false
+    // Snapshot state
+    @State private var vmForSnapshot: App2VM?
+    @State private var snapshotToRevert: (vm: App2VM, name: String)?
+    @State private var snapshotToDelete: (vm: App2VM, name: String)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -134,6 +138,15 @@ struct VMListDemoView: View {
                             },
                             requestDelete: {
                                 vmPendingDelete = vm
+                            },
+                            requestCreateSnapshot: {
+                                vmForSnapshot = vm
+                            },
+                            requestRevertSnapshot: { name in
+                                snapshotToRevert = (vm, name)
+                            },
+                            requestDeleteSnapshot: { name in
+                                snapshotToDelete = (vm, name)
                             }
                         )
                     }
@@ -174,8 +187,64 @@ struct VMListDemoView: View {
                 vmPendingDelete = nil
             }
         } message: { vm in
-            Text("“\(vm.name)” will be moved to the Trash. You can restore it from the Trash later if you change your mind.")
+            Text("\"\(vm.name)\" will be moved to the Trash. You can restore it from the Trash later if you change your mind.")
         }
+        // Create Snapshot sheet
+        .sheet(item: $vmForSnapshot) { vm in
+            CreateSnapshotView(vm: vm, isPresented: Binding(
+                get: { vmForSnapshot != nil },
+                set: { if !$0 { vmForSnapshot = nil } }
+            ))
+        }
+        // Revert Snapshot confirmation
+        .alert("Revert to snapshot?", isPresented: Binding(
+            get: { snapshotToRevert != nil },
+            set: { if !$0 { snapshotToRevert = nil } }
+        )) {
+            Button("Revert", role: .destructive) {
+                if let (vm, name) = snapshotToRevert {
+                    performSnapshotCommand(bundleURL: vm.bundleURL, subcommand: "revert", snapshotName: name)
+                }
+                snapshotToRevert = nil
+            }
+            Button("Cancel", role: .cancel) {
+                snapshotToRevert = nil
+            }
+        } message: {
+            if let (vm, name) = snapshotToRevert {
+                Text("This will revert \"\(vm.name)\" to snapshot \"\(name)\". Current state will be lost.")
+            }
+        }
+        // Delete Snapshot confirmation
+        .alert("Delete snapshot?", isPresented: Binding(
+            get: { snapshotToDelete != nil },
+            set: { if !$0 { snapshotToDelete = nil } }
+        )) {
+            Button("Delete", role: .destructive) {
+                if let (vm, name) = snapshotToDelete {
+                    performSnapshotCommand(bundleURL: vm.bundleURL, subcommand: "delete", snapshotName: name)
+                }
+                snapshotToDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                snapshotToDelete = nil
+            }
+        } message: {
+            if let (vm, name) = snapshotToDelete {
+                Text("Snapshot \"\(name)\" will be permanently deleted from \"\(vm.name)\".")
+            }
+        }
+    }
+
+    private func performSnapshotCommand(bundleURL: URL, subcommand: String, snapshotName: String) {
+        guard let vmctlURL = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("vmctl") else { return }
+
+        let process = Process()
+        process.executableURL = vmctlURL
+        process.arguments = ["snapshot", bundleURL.path, subcommand, snapshotName]
+        try? process.run()
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
@@ -533,7 +602,14 @@ struct VMRowView: View {
                 .buttonStyle(.borderless)
 
                 Menu {
-                    VMContextMenu(vm: vm, play: play, requestDelete: {})
+                    VMContextMenu(
+                        vm: vm,
+                        play: play,
+                        requestDelete: {},
+                        requestCreateSnapshot: {},
+                        requestRevertSnapshot: { _ in },
+                        requestDeleteSnapshot: { _ in }
+                    )
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 16, weight: .semibold))
@@ -558,11 +634,131 @@ struct VMRowView: View {
     }
 }
 
+// MARK: - Create Snapshot View
+
+@available(macOS 13.0, *)
+struct CreateSnapshotView: View {
+    let vm: App2VM
+    @Binding var isPresented: Bool
+
+    @State private var snapshotName: String = ""
+    @State private var isCreating: Bool = false
+    @State private var errorMessage: String?
+    @State private var isShowingError: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Create a snapshot of \"\(vm.name)\"")
+                .font(.headline)
+
+            TextField("Snapshot name", text: $snapshotName)
+                .textFieldStyle(.roundedBorder)
+
+            Text("Snapshots capture the full VM state including disk. This may take a while for large disks.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(isCreating)
+
+                Button("Create") {
+                    createSnapshot()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(snapshotName.trimmingCharacters(in: .whitespaces).isEmpty || isCreating)
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 400)
+        .alert("Unable to Create Snapshot", isPresented: $isShowingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "An unknown error occurred.")
+        }
+    }
+
+    private func createSnapshot() {
+        let trimmedName = snapshotName.trimmingCharacters(in: .whitespaces)
+        guard !trimmedName.isEmpty else { return }
+
+        guard let vmctlURL = Bundle.main.executableURL?
+            .deletingLastPathComponent()
+            .appendingPathComponent("vmctl") else {
+            errorMessage = "Unable to locate vmctl helper."
+            isShowingError = true
+            return
+        }
+
+        let process = Process()
+        process.executableURL = vmctlURL
+        process.arguments = ["snapshot", vm.bundleURL.path, "create", trimmedName]
+
+        let outputPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = outputPipe
+
+        isCreating = true
+
+        do {
+            try process.run()
+        } catch {
+            isCreating = false
+            errorMessage = error.localizedDescription
+            isShowingError = true
+            return
+        }
+
+        process.terminationHandler = { proc in
+            let data = try? outputPipe.fileHandleForReading.readToEnd()
+            let output = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+            DispatchQueue.main.async {
+                self.isCreating = false
+                if proc.terminationStatus == 0 {
+                    self.isPresented = false
+                } else {
+                    self.errorMessage = output.isEmpty ? "vmctl snapshot create failed." : output
+                    self.isShowingError = true
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Snapshot Helpers
+
+@available(macOS 13.0, *)
+func listSnapshots(for bundleURL: URL) -> [String] {
+    let snapshotsDir = bundleURL.appendingPathComponent("Snapshots")
+    guard FileManager.default.fileExists(atPath: snapshotsDir.path) else {
+        return []
+    }
+    do {
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: snapshotsDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+        return contents.filter { url in
+            (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }.map { $0.lastPathComponent }.sorted()
+    } catch {
+        return []
+    }
+}
+
 @available(macOS 13.0, *)
 struct VMContextMenu: View {
     let vm: App2VM
     let play: () -> Void
     let requestDelete: () -> Void
+    let requestCreateSnapshot: () -> Void
+    let requestRevertSnapshot: (String) -> Void
+    let requestDeleteSnapshot: (String) -> Void
     @EnvironmentObject private var store: App2VMStore
 
     var body: some View {
@@ -580,6 +776,31 @@ struct VMContextMenu: View {
             // entry is present but handled via the window close behavior.
         }
         .disabled(!isRunning)
+
+        Divider()
+
+        let snapshots = listSnapshots(for: vm.bundleURL)
+        Menu("Snapshots") {
+            Button("Create Snapshot…") {
+                requestCreateSnapshot()
+            }
+            .disabled(isRunning)
+
+            if !snapshots.isEmpty {
+                Divider()
+                ForEach(snapshots, id: \.self) { name in
+                    Menu(name) {
+                        Button("Revert to \"\(name)\"") {
+                            requestRevertSnapshot(name)
+                        }
+                        .disabled(isRunning)
+                        Button("Delete \"\(name)\"", role: .destructive) {
+                            requestDeleteSnapshot(name)
+                        }
+                    }
+                }
+            }
+        }
 
         Divider()
         Button("Show in Finder") {
