@@ -1,4 +1,5 @@
 import Foundation
+import GhostVMKit
 
 // Lightweight view model for a real .GhostVM bundle on disk.
 struct App2VM: Identifiable, Hashable, Codable {
@@ -13,57 +14,13 @@ struct App2VM: Identifiable, Hashable, Codable {
     }
 }
 
-// Subset of the stored config we need to run an existing VM.
-struct App2StoredConfig: Codable {
-    var cpus: Int
-    var memoryBytes: UInt64
-    var diskBytes: UInt64
-    var hardwareModelPath: String
-    var machineIdentifierPath: String
-    var auxiliaryStoragePath: String
-    var diskPath: String
-    var sharedFolderPath: String?
-    var sharedFolderReadOnly: Bool
-    var installed: Bool
-    var lastInstallVersion: String?
-
-    enum CodingKeys: String, CodingKey {
-        case cpus
-        case memoryBytes
-        case diskBytes
-        case hardwareModelPath
-        case machineIdentifierPath
-        case auxiliaryStoragePath
-        case diskPath
-        case sharedFolderPath
-        case sharedFolderReadOnly
-        case installed
-        case lastInstallVersion
-    }
-}
-
-// Resolves paths that may be stored as relative filenames inside the bundle
-// or as absolute paths on disk.
-struct App2BundleLayout {
-    let bundleURL: URL
-
-    var configURL: URL { bundleURL.appendingPathComponent("config.json") }
-
-    func resolve(path stored: String) -> URL {
-        let expanded = (stored as NSString).expandingTildeInPath
-        if expanded.hasPrefix("/") {
-            return URL(fileURLWithPath: expanded).standardizedFileURL
-        }
-        return bundleURL.appendingPathComponent(expanded)
-    }
-}
-
 final class App2VMStore: ObservableObject {
     @Published var vms: [App2VM] = []
 
     private let defaults = UserDefaults.standard
     private let fileManager = FileManager.default
     private let knownBundlesKey = "SwiftUIKnownVMBundles"
+    private let controller = VMController()
 
     init() {
         loadKnownVMs()
@@ -165,7 +122,6 @@ final class App2VMStore: ObservableObject {
 
     func deleteVM(_ vm: App2VM) {
         let url = vm.bundleURL
-        let path = url.path
         let lowercasedStatus = vm.status.lowercased()
         let isBusy = lowercasedStatus.contains("running") ||
                      lowercasedStatus.contains("starting") ||
@@ -173,12 +129,9 @@ final class App2VMStore: ObservableObject {
         guard !isBusy else { return }
 
         do {
-            if fileManager.fileExists(atPath: path) {
-                try fileManager.trashItem(at: url, resultingItemURL: nil)
-            }
+            try controller.moveVMToTrash(bundleURL: url)
         } catch {
-            // For now, surface failures only in the debug console.
-            print("Failed to move VM bundle at \(path) to Trash: \(error.localizedDescription)")
+            print("Failed to move VM bundle to Trash: \(error)")
         }
 
         removeFromList(vm)
@@ -216,17 +169,13 @@ final class App2VMStore: ObservableObject {
     }
 
     private func loadVM(from bundleURL: URL) throws -> App2VM {
-        let layout = App2BundleLayout(bundleURL: bundleURL.standardizedFileURL)
-        let data = try Data(contentsOf: layout.configURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let stored = try decoder.decode(App2StoredConfig.self, from: data)
+        // Use framework's VMController to load entry
+        let entry = try controller.loadEntry(for: bundleURL)
 
-        let name = bundleURL.deletingPathExtension().lastPathComponent
         let osVersion: String
-        if let version = stored.lastInstallVersion {
+        if let version = entry.lastInstallVersion {
             osVersion = "macOS \(version)"
-        } else if stored.installed {
+        } else if entry.installed {
             osVersion = "Installed"
         } else {
             osVersion = "Not Installed"
@@ -234,10 +183,10 @@ final class App2VMStore: ObservableObject {
 
         return App2VM(
             id: UUID(),
-            name: name,
+            name: entry.name,
             bundlePath: bundleURL.path,
             osVersion: osVersion,
-            status: stored.installed ? "Stopped" : "Not Installed"
+            status: entry.statusDescription
         )
     }
 }

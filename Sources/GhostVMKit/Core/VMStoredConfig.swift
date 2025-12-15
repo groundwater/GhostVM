@@ -1,0 +1,157 @@
+import Foundation
+
+/// Persisted VM metadata. Everything lives in config.json inside the bundle.
+public struct VMStoredConfig: Codable {
+    public var version: Int
+    public var createdAt: Date
+    public var modifiedAt: Date
+    public var cpus: Int
+    public var memoryBytes: UInt64
+    public var diskBytes: UInt64
+    public var restoreImagePath: String
+    public var hardwareModelPath: String
+    public var machineIdentifierPath: String
+    public var auxiliaryStoragePath: String
+    public var diskPath: String
+    public var sharedFolderPath: String?
+    public var sharedFolderReadOnly: Bool
+    public var installed: Bool
+    public var lastInstallBuild: String?
+    public var lastInstallVersion: String?
+    public var lastInstallDate: Date?
+    public var legacyName: String?
+
+    public enum CodingKeys: String, CodingKey {
+        case version
+        case createdAt
+        case modifiedAt
+        case cpus
+        case memoryBytes
+        case diskBytes
+        case restoreImagePath
+        case hardwareModelPath
+        case machineIdentifierPath
+        case auxiliaryStoragePath
+        case diskPath
+        case sharedFolderPath
+        case sharedFolderReadOnly
+        case installed
+        case lastInstallBuild
+        case lastInstallVersion
+        case lastInstallDate
+        case legacyName = "name"
+    }
+
+    public init(
+        version: Int,
+        createdAt: Date,
+        modifiedAt: Date,
+        cpus: Int,
+        memoryBytes: UInt64,
+        diskBytes: UInt64,
+        restoreImagePath: String,
+        hardwareModelPath: String,
+        machineIdentifierPath: String,
+        auxiliaryStoragePath: String,
+        diskPath: String,
+        sharedFolderPath: String?,
+        sharedFolderReadOnly: Bool,
+        installed: Bool,
+        lastInstallBuild: String?,
+        lastInstallVersion: String?,
+        lastInstallDate: Date?,
+        legacyName: String?
+    ) {
+        self.version = version
+        self.createdAt = createdAt
+        self.modifiedAt = modifiedAt
+        self.cpus = cpus
+        self.memoryBytes = memoryBytes
+        self.diskBytes = diskBytes
+        self.restoreImagePath = restoreImagePath
+        self.hardwareModelPath = hardwareModelPath
+        self.machineIdentifierPath = machineIdentifierPath
+        self.auxiliaryStoragePath = auxiliaryStoragePath
+        self.diskPath = diskPath
+        self.sharedFolderPath = sharedFolderPath
+        self.sharedFolderReadOnly = sharedFolderReadOnly
+        self.installed = installed
+        self.lastInstallBuild = lastInstallBuild
+        self.lastInstallVersion = lastInstallVersion
+        self.lastInstallDate = lastInstallDate
+        self.legacyName = legacyName
+    }
+
+    public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
+        var changed = false
+        let basePath = layout.bundleURL.standardizedFileURL.path
+
+        func makeRelative(_ path: String) -> (String, Bool) {
+            guard path.hasPrefix("/") else { return (path, false) }
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            if standardized.hasPrefix(basePath + "/") {
+                let relative = String(standardized.dropFirst(basePath.count + 1))
+                if relative != path {
+                    return (relative, true)
+                }
+            }
+            let filename = URL(fileURLWithPath: path).lastPathComponent
+            if filename != path {
+                return (filename, true)
+            }
+            return (path, false)
+        }
+
+        func makeAbsolute(_ path: String) -> (String, Bool) {
+            let expanded = (path as NSString).expandingTildeInPath
+            let resolved = expanded.isEmpty ? path : expanded
+            let absolute = URL(fileURLWithPath: resolved).standardizedFileURL.path
+            if absolute != path {
+                return (absolute, true)
+            }
+            return (path, false)
+        }
+
+        let relPaths = [
+            ("auxiliaryStoragePath", auxiliaryStoragePath),
+            ("diskPath", diskPath),
+            ("hardwareModelPath", hardwareModelPath),
+            ("machineIdentifierPath", machineIdentifierPath)
+        ]
+
+        for (key, value) in relPaths {
+            let (relative, didChange) = makeRelative(value)
+            if didChange {
+                changed = true
+            }
+            switch key {
+            case "auxiliaryStoragePath": auxiliaryStoragePath = relative
+            case "diskPath": diskPath = relative
+            case "hardwareModelPath": hardwareModelPath = relative
+            case "machineIdentifierPath": machineIdentifierPath = relative
+            default: break
+            }
+        }
+
+        let (absoluteRestore, restoreChanged) = makeAbsolute(restoreImagePath)
+        if restoreChanged {
+            restoreImagePath = absoluteRestore
+            changed = true
+        }
+
+        if let shared = sharedFolderPath {
+            let (absoluteShared, sharedChanged) = makeAbsolute(shared)
+            if sharedChanged {
+                sharedFolderPath = absoluteShared
+                changed = true
+            }
+        }
+
+        if legacyName != nil {
+            legacyName = nil
+            changed = true
+        }
+
+        return changed
+    }
+}

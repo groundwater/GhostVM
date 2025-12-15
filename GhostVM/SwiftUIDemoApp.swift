@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import GhostVMKit
 
 @main
 @available(macOS 13.0, *)
@@ -237,14 +238,12 @@ struct VMListDemoView: View {
     }
 
     private func performSnapshotCommand(bundleURL: URL, subcommand: String, snapshotName: String) {
-        guard let vmctlURL = Bundle.main.executableURL?
-            .deletingLastPathComponent()
-            .appendingPathComponent("vmctl") else { return }
-
-        let process = Process()
-        process.executableURL = vmctlURL
-        process.arguments = ["snapshot", bundleURL.path, subcommand, snapshotName]
-        try? process.run()
+        let controller = VMController()
+        do {
+            try controller.snapshot(bundleURL: bundleURL, subcommand: subcommand, snapshotName: snapshotName)
+        } catch {
+            print("Snapshot command failed: \(error)")
+        }
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
@@ -503,60 +502,31 @@ struct CreateVMDemoView: View {
             bundleURL.appendPathExtension("GhostVM")
         }
 
-        guard let vmctlURL = Bundle.main.executableURL?
-            .deletingLastPathComponent()
-            .appendingPathComponent("vmctl") else {
-            errorMessage = "Unable to locate vmctl helper inside the app bundle."
-            isShowingError = true
-            return
-        }
-
-        var arguments: [String] = [
-            "init",
-            bundleURL.path,
-            "--cpus", cpuCount,
-            "--memory", memoryGiB,
-            "--disk", diskGiB,
-            "--restore-image", restorePath
-        ]
-
         let trimmedShared = sharedFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmedShared.isEmpty {
-            arguments.append(contentsOf: ["--shared-folder", trimmedShared])
-            if sharedFolderWritable {
-                arguments.append("--writable")
-            }
-        }
 
-        let process = Process()
-        process.executableURL = vmctlURL
-        process.arguments = arguments
-
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
+        var opts = InitOptions()
+        opts.cpus = Int(cpuCount) ?? 4
+        opts.memoryGiB = UInt64(memoryGiB) ?? 8
+        opts.diskGiB = UInt64(diskGiB) ?? 64
+        opts.restoreImagePath = restorePath
+        opts.sharedFolderPath = trimmedShared.isEmpty ? nil : trimmedShared
+        opts.sharedFolderWritable = sharedFolderWritable
 
         isCreating = true
 
-        do {
-            try process.run()
-        } catch {
-            isCreating = false
-            errorMessage = error.localizedDescription
-            isShowingError = true
-            return
-        }
-
-        process.terminationHandler = { proc in
-            let data = try? outputPipe.fileHandleForReading.readToEnd()
-            let output = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            DispatchQueue.main.async {
-                self.isCreating = false
-                if proc.terminationStatus == 0 {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = VMController()
+            do {
+                try controller.initVM(at: bundleURL, preferredName: nil, options: opts)
+                DispatchQueue.main.async {
+                    self.isCreating = false
                     self.store.addBundles(from: [bundleURL])
                     self.isPresented = false
-                } else {
-                    self.errorMessage = output.isEmpty ? "vmctl init failed with exit code \(proc.terminationStatus)." : output
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isCreating = false
+                    self.errorMessage = error.localizedDescription
                     self.isShowingError = true
                 }
             }
@@ -686,42 +656,20 @@ struct CreateSnapshotView: View {
         let trimmedName = snapshotName.trimmingCharacters(in: .whitespaces)
         guard !trimmedName.isEmpty else { return }
 
-        guard let vmctlURL = Bundle.main.executableURL?
-            .deletingLastPathComponent()
-            .appendingPathComponent("vmctl") else {
-            errorMessage = "Unable to locate vmctl helper."
-            isShowingError = true
-            return
-        }
-
-        let process = Process()
-        process.executableURL = vmctlURL
-        process.arguments = ["snapshot", vm.bundleURL.path, "create", trimmedName]
-
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = outputPipe
-
         isCreating = true
 
-        do {
-            try process.run()
-        } catch {
-            isCreating = false
-            errorMessage = error.localizedDescription
-            isShowingError = true
-            return
-        }
-
-        process.terminationHandler = { proc in
-            let data = try? outputPipe.fileHandleForReading.readToEnd()
-            let output = data.flatMap { String(data: $0, encoding: .utf8) } ?? ""
-            DispatchQueue.main.async {
-                self.isCreating = false
-                if proc.terminationStatus == 0 {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = VMController()
+            do {
+                try controller.snapshot(bundleURL: vm.bundleURL, subcommand: "create", snapshotName: trimmedName)
+                DispatchQueue.main.async {
+                    self.isCreating = false
                     self.isPresented = false
-                } else {
-                    self.errorMessage = output.isEmpty ? "vmctl snapshot create failed." : output
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isCreating = false
+                    self.errorMessage = error.localizedDescription
                     self.isShowingError = true
                 }
             }

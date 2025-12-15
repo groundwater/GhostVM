@@ -1,4 +1,5 @@
 import XCTest
+@testable import GhostVMKit
 
 final class ParseBytesTests: XCTestCase {
     func testPlainNumber() throws {

@@ -13,6 +13,50 @@ settings:
     CLANG_WARN_UNGUARDED_AVAILABILITY: YES
 
 targets:
+  GhostVMKit:
+    type: framework
+    platform: macOS
+    sources:
+      - path: Sources/GhostVMKit
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMKit
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvmkit
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SWIFT_VERSION: "5.0"
+        DYLIB_INSTALL_NAME_BASE: "@rpath"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@loader_path/../Frameworks"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+
+  vmctl:
+    type: tool
+    platform: macOS
+    sources:
+      - path: Sources/vmctl
+    dependencies:
+      - target: GhostVMKit
+        link: true
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: vmctl
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+          - "@executable_path"
+
   GhostVM:
     type: application
     platform: macOS
@@ -21,6 +65,9 @@ targets:
         excludes:
           - "vmctl.swift"
           - "*.plist"
+    dependencies:
+      - target: GhostVMKit
+        embed: true
     settings:
       base:
         PRODUCT_NAME: GhostVM
@@ -34,6 +81,7 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
         SWIFT_EMIT_LOC_STRINGS: NO
+        SWIFT_VERSION: "5.0"
       configs:
         Debug:
           ONLY_ACTIVE_ARCH: YES
@@ -43,7 +91,8 @@ targets:
     platform: macOS
     sources:
       - path: GhostVMTests
-      - path: GhostVM/vmctl.swift
+    dependencies:
+      - target: GhostVMKit
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm.tests

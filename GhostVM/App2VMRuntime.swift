@@ -1,9 +1,11 @@
 import Foundation
 import AppKit
 @preconcurrency import Virtualization
+import GhostVMKit
 
 // Minimal runtime controller for a single VM bundle.
-final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelegate, @unchecked Sendable {
+// This wraps the framework's EmbeddedVMSession for SwiftUI integration.
+final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     enum State {
         case idle
         case starting
@@ -22,13 +24,16 @@ final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelega
     // Callbacks so the SwiftUI layer can reflect status into the list.
     var onStateChange: ((State) -> Void)?
 
-    private let vmQueue: DispatchQueue
-    private var stateObservation: NSKeyValueObservation?
+    private var embeddedSession: EmbeddedVMSession?
+    private let controller = VMController()
 
     init(bundleURL: URL) {
         self.bundleURL = bundleURL.standardizedFileURL
-        self.vmQueue = DispatchQueue(label: "ghostvm.app2.vm.\(bundleURL.lastPathComponent)")
         super.init()
+    }
+
+    var window: NSWindow? {
+        return embeddedSession?.window
     }
 
     func startIfNeeded() {
@@ -49,46 +54,55 @@ final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelega
 
         transition(to: .starting, message: "Starting…")
 
-        let bundleURL = self.bundleURL
-        vmQueue.async {
-            do {
-                let configuration = try App2VMRunSession.makeConfiguration(for: bundleURL)
-                let vm = VZVirtualMachine(configuration: configuration, queue: self.vmQueue)
-                vm.delegate = self
+        do {
+            let session = try controller.makeEmbeddedSession(bundleURL: bundleURL, runtimeSharedFolder: nil)
+            self.embeddedSession = session
 
+            session.stateDidChange = { [weak self] sessionState in
+                guard let self = self else { return }
                 DispatchQueue.main.async {
-                    self.stateObservation = vm.observe(\.state, options: [.new]) { [weak self] virtualMachine, _ in
-                        guard let self = self else { return }
-                        if virtualMachine.state == .stopped {
-                            self.stateObservation = nil
-                            self.virtualMachine = nil
-                            // Only mark as stopped if we haven't already marked a failure.
-                            if case .failed = self.state {
-                                return
-                            }
-                            self.transition(to: .stopped, message: "Stopped")
-                        }
-                    }
-                    self.virtualMachine = vm
-                }
-
-                vm.start { result in
-                    DispatchQueue.main.async {
-                        switch result {
-                        case .success:
-                            self.transition(to: .running, message: "Running")
-                        case .failure(let error):
-                            self.virtualMachine = nil
-                            self.transition(to: .failed(error.localizedDescription))
-                        }
+                    switch sessionState {
+                    case .initialized:
+                        break
+                    case .starting:
+                        self.transition(to: .starting, message: "Starting…")
+                    case .running:
+                        self.transition(to: .running, message: "Running")
+                    case .stopping:
+                        self.transition(to: .stopping, message: "Stopping…")
+                    case .stopped:
+                        self.embeddedSession = nil
+                        self.transition(to: .stopped, message: "Stopped")
                     }
                 }
-            } catch {
+            }
+
+            session.terminationHandler = { [weak self] result in
+                guard let self = self else { return }
                 DispatchQueue.main.async {
-                    self.virtualMachine = nil
+                    self.embeddedSession = nil
+                    switch result {
+                    case .success:
+                        self.transition(to: .stopped, message: "Stopped")
+                    case .failure(let error):
+                        self.transition(to: .failed(error.localizedDescription))
+                    }
+                }
+            }
+
+            session.start { [weak self] result in
+                guard let self = self else { return }
+                switch result {
+                case .success:
+                    self.transition(to: .running, message: "Running")
+                case .failure(let error):
+                    self.embeddedSession = nil
                     self.transition(to: .failed(error.localizedDescription))
                 }
             }
+        } catch {
+            self.embeddedSession = nil
+            transition(to: .failed(error.localizedDescription))
         }
     }
 
@@ -102,25 +116,26 @@ final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelega
     }
 
     func stop() {
-        guard let vm = virtualMachine else {
+        guard let session = embeddedSession else {
             transition(to: .stopped, message: "Stopped")
             return
         }
 
         transition(to: .stopping, message: "Stopping…")
-
-        vmQueue.async {
-            do {
-                // Request a graceful shutdown and wait for the guest OS
-                // to terminate. We rely on the delegate callback to
-                // observe when the VM has actually stopped.
-                try vm.requestStop()
-            } catch {
-                DispatchQueue.main.async {
-                    self.transition(to: .failed(error.localizedDescription))
-                }
+        session.requestStop(force: false) { [weak self] result in
+            guard let self = self else { return }
+            self.embeddedSession = nil
+            switch result {
+            case .success:
+                self.transition(to: .stopped, message: "Stopped")
+            case .failure(let error):
+                self.transition(to: .failed(error.localizedDescription))
             }
         }
+    }
+
+    func bringToFront() {
+        embeddedSession?.bringToFront()
     }
 
     private func transition(to newState: State, message: String? = nil) {
@@ -144,95 +159,5 @@ final class App2VMRunSession: NSObject, ObservableObject, VZVirtualMachineDelega
             }
         }
         onStateChange?(newState)
-    }
-
-    // MARK: - VZVirtualMachineDelegate
-
-    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: any Error) {
-        DispatchQueue.main.async {
-            self.stateObservation = nil
-            self.virtualMachine = nil
-            self.transition(to: .failed(error.localizedDescription))
-        }
-    }
-
-    // MARK: - Configuration
-
-    private static func makeConfiguration(for bundleURL: URL) throws -> VZVirtualMachineConfiguration {
-        let layout = App2BundleLayout(bundleURL: bundleURL)
-        let data = try Data(contentsOf: layout.configURL)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        let stored = try decoder.decode(App2StoredConfig.self, from: data)
-
-        let config = VZVirtualMachineConfiguration()
-        config.bootLoader = VZMacOSBootLoader()
-        config.cpuCount = stored.cpus
-        config.memorySize = stored.memoryBytes
-
-        let platform = VZMacPlatformConfiguration()
-        let hardwareModelURL = layout.resolve(path: stored.hardwareModelPath)
-        let machineIdentifierURL = layout.resolve(path: stored.machineIdentifierPath)
-        let auxiliaryStorageURL = layout.resolve(path: stored.auxiliaryStoragePath)
-
-        let hardwareData = try Data(contentsOf: hardwareModelURL)
-        guard let hardwareModel = VZMacHardwareModel(dataRepresentation: hardwareData), hardwareModel.isSupported else {
-            throw NSError(domain: "GhostVM.App2", code: 1, userInfo: [NSLocalizedDescriptionKey: "Unsupported hardware model."])
-        }
-
-        let identifierData = try Data(contentsOf: machineIdentifierURL)
-        guard let machineIdentifier = VZMacMachineIdentifier(dataRepresentation: identifierData) else {
-            throw NSError(domain: "GhostVM.App2", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to decode machine identifier."])
-        }
-
-        platform.hardwareModel = hardwareModel
-        platform.machineIdentifier = machineIdentifier
-        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: auxiliaryStorageURL)
-        config.platform = platform
-
-        let diskURL = layout.resolve(path: stored.diskPath)
-        let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: diskURL, readOnly: false)
-        let diskDevice = VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
-        diskDevice.blockDeviceIdentifier = "macos-root"
-        config.storageDevices = [diskDevice]
-
-        let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        networkDevice.attachment = VZNATNetworkDeviceAttachment()
-        config.networkDevices = [networkDevice]
-
-        let graphics = VZMacGraphicsDeviceConfiguration()
-        let display: VZMacGraphicsDisplayConfiguration
-        if let screen = NSScreen.main {
-            let scale = max(screen.backingScaleFactor, 1.0)
-            let sizeInPoints = screen.visibleFrame.size
-            let widthPixels = max(Int((sizeInPoints.width * scale).rounded()), 1024)
-            let heightPixels = max(Int((sizeInPoints.height * scale).rounded()), 768)
-            let ppi = max(Int((110.0 * scale).rounded()), 110)
-            display = VZMacGraphicsDisplayConfiguration(
-                widthInPixels: widthPixels,
-                heightInPixels: heightPixels,
-                pixelsPerInch: ppi
-            )
-        } else {
-            display = VZMacGraphicsDisplayConfiguration(
-                widthInPixels: 1920,
-                heightInPixels: 1200,
-                pixelsPerInch: 110
-            )
-        }
-        graphics.displays = [display]
-        config.graphicsDevices = [graphics]
-        config.keyboards = [VZUSBKeyboardConfiguration()]
-        config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
-
-        let serialConfig = VZVirtioConsoleDeviceSerialPortConfiguration()
-        serialConfig.attachment = VZFileHandleSerialPortAttachment(
-            fileHandleForReading: nil,
-            fileHandleForWriting: FileHandle.standardOutput
-        )
-        config.serialPorts = [serialConfig]
-
-        try config.validate()
-        return config
     }
 }

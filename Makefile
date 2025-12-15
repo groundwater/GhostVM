@@ -1,18 +1,15 @@
 # GhostVM Makefile
 # Builds vmctl CLI and the SwiftUI app via xcodebuild
 
-SWIFTC ?= swiftc
 CODESIGN_ID ?= -
-TARGET ?= vmctl
 
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = GhostVM.xcodeproj
-XCODE_SCHEME = GhostVM
 XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test
+.PHONY: all cli app clean help run launch generate test framework
 
 all: help
 
@@ -22,20 +19,27 @@ generate: $(XCODE_PROJECT)
 $(XCODE_PROJECT): project.yml
 	xcodegen generate
 
-# Build the standalone vmctl CLI
-cli: $(TARGET)
+# Build the GhostVMKit framework
+framework: $(XCODE_PROJECT)
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme GhostVMKit \
+		-configuration $(XCODE_CONFIG) \
+		-derivedDataPath $(BUILD_DIR) \
+		build
 
-$(TARGET): GhostVM/vmctl.swift GhostVM/entitlements.plist
-	$(SWIFTC) -O -parse-as-library -o $(TARGET) GhostVM/vmctl.swift \
-		-framework Virtualization \
-		-framework AppKit \
-		-framework CoreGraphics
-	codesign --entitlements GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" $(TARGET)
+# Build the vmctl CLI (depends on framework)
+cli: $(XCODE_PROJECT)
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme vmctl \
+		-configuration $(XCODE_CONFIG) \
+		-derivedDataPath $(BUILD_DIR) \
+		build
+	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl"
 
 # Build the SwiftUI app via xcodebuild
 app: $(XCODE_PROJECT)
 	xcodebuild -project $(XCODE_PROJECT) \
-		-scheme $(XCODE_SCHEME) \
+		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
 		build
@@ -58,16 +62,16 @@ launch: app
 
 # Run unit tests
 test: $(XCODE_PROJECT)
-	xcodebuild test -scheme GhostVMTests -destination 'platform=macOS'
+	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
 
 clean:
-	rm -f $(TARGET)
 	rm -rf $(BUILD_DIR)
 	rm -rf $(XCODE_PROJECT)
 
 help:
 	@echo "GhostVM Build Targets:"
 	@echo "  make          - Show this help"
+	@echo "  make framework- Build GhostVMKit framework"
 	@echo "  make cli      - Build vmctl CLI"
 	@echo "  make generate - Generate Xcode project from project.yml"
 	@echo "  make app      - Build SwiftUI app via xcodebuild"
