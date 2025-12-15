@@ -32,9 +32,11 @@ app:
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
 		build
-	@# Copy icon into app bundle Resources
+	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources"
-	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/ghostvm.icns"
+	@cp ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/"
+	@cp ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/"
+	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app/Contents/Resources/GhostVMIcon.icns"
 	@# Re-sign after adding resources
 	codesign --entitlements entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app"
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/GhostVMSwiftUI.app"
