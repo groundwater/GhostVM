@@ -25,12 +25,12 @@ $(XCODE_PROJECT): project.yml
 # Build the standalone vmctl CLI
 cli: $(TARGET)
 
-$(TARGET): vmctl.swift entitlements.plist
-	$(SWIFTC) -O -parse-as-library -o $(TARGET) vmctl.swift \
+$(TARGET): GhostVM/vmctl.swift GhostVM/entitlements.plist
+	$(SWIFTC) -O -parse-as-library -o $(TARGET) GhostVM/vmctl.swift \
 		-framework Virtualization \
 		-framework AppKit \
 		-framework CoreGraphics
-	codesign --entitlements entitlements.plist --force -s "$(CODESIGN_ID)" $(TARGET)
+	codesign --entitlements GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" $(TARGET)
 
 # Build the SwiftUI app via xcodebuild
 app: $(XCODE_PROJECT)
@@ -41,11 +41,11 @@ app: $(XCODE_PROJECT)
 		build
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
-	@cp ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
-	@cp ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+	@cp GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+	@cp GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Re-sign after adding resources
-	codesign --entitlements entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+	codesign --entitlements GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
 # Build and run the app

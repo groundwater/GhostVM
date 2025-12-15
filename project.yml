@@ -18,12 +18,15 @@ targets:
     platform: macOS
     sources:
       - path: GhostVM
+        excludes:
+          - "vmctl.swift"
+          - "*.plist"
     settings:
       base:
         PRODUCT_NAME: GhostVM
         PRODUCT_BUNDLE_IDENTIFIER: sh.fixie.vm
-        INFOPLIST_FILE: VMApp-Info.plist
-        CODE_SIGN_ENTITLEMENTS: entitlements.plist
+        INFOPLIST_FILE: GhostVM/VMApp-Info.plist
+        CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: 3FGZQE8AW3
