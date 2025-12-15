@@ -3,3 +3,5 @@ vmctl
 *.dmg
 .env
 build/
+*.local.json
+*.xcodeproj/

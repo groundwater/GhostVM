@@ -5,15 +5,21 @@ SWIFTC ?= swiftc
 CODESIGN_ID ?= -
 TARGET ?= vmctl
 
-# Xcode project settings
+# Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = GhostVMSwiftUI.xcodeproj
 XCODE_SCHEME = GhostVMSwiftUI
 XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 
-.PHONY: all cli app clean help run
+.PHONY: all cli app clean help run generate
 
 all: cli
+
+# Generate Xcode project from project.yml
+generate: $(XCODE_PROJECT)
+
+$(XCODE_PROJECT): project.yml
+	xcodegen generate
 
 # Build the standalone vmctl CLI
 cli: $(TARGET)
@@ -26,7 +32,7 @@ $(TARGET): vmctl.swift entitlements.plist
 	codesign --entitlements entitlements.plist --force -s "$(CODESIGN_ID)" $(TARGET)
 
 # Build the SwiftUI app via xcodebuild
-app:
+app: $(XCODE_PROJECT)
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(XCODE_SCHEME) \
 		-configuration $(XCODE_CONFIG) \
@@ -48,16 +54,19 @@ run: app
 clean:
 	rm -f $(TARGET)
 	rm -rf $(BUILD_DIR)
-	xcodebuild -project $(XCODE_PROJECT) -scheme $(XCODE_SCHEME) clean 2>/dev/null || true
+	rm -rf $(XCODE_PROJECT)
 
 help:
 	@echo "GhostVM Build Targets:"
 	@echo "  make          - Build vmctl CLI (default)"
 	@echo "  make cli      - Build vmctl CLI"
+	@echo "  make generate - Generate Xcode project from project.yml"
 	@echo "  make app      - Build SwiftUI app via xcodebuild"
 	@echo "  make run      - Build and launch the app"
-	@echo "  make clean    - Remove build artifacts"
+	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
 	@echo "Variables:"
 	@echo "  CODESIGN_ID   - Code signing identity (default: - for ad-hoc)"
 	@echo "  XCODE_CONFIG  - Xcode build configuration (default: Release)"
+	@echo ""
+	@echo "Requires: xcodegen (brew install xcodegen)"

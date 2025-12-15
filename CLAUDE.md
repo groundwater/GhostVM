@@ -7,12 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 make          # Build vmctl CLI (default)
 make cli      # Build vmctl CLI
-make app      # Build SwiftUI app via xcodebuild
+make generate # Generate Xcode project from project.yml
+make app      # Build SwiftUI app (auto-generates project)
 make run      # Build and launch the app
-make clean    # Remove build artifacts
+make clean    # Remove build artifacts and generated project
 ```
 
-The Xcode project builds `GhostVMSwiftUI.app` from the `App2*.swift` and `SwiftUIDemoApp.swift` files. The standalone `vmctl` binary is built via swiftc with `-parse-as-library` flag.
+The Xcode project is generated from `project.yml` using XcodeGen (`brew install xcodegen`). The standalone `vmctl` binary is built via swiftc with `-parse-as-library` flag.
 
 ## Architecture
 
@@ -48,6 +49,7 @@ GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framewo
 
 - macOS 15+ on Apple Silicon (arm64)
 - Xcode 15+ for building
+- XcodeGen (`brew install xcodegen`)
 - `com.apple.security.virtualization` entitlement required
 
 ## Agent Workflow Notes
