@@ -54,6 +54,6 @@ GhostVM manages macOS VMs on Apple Silicon using Apple's `Virtualization.framewo
 
 ## Agent Workflow Notes
 
-- Use `gh` CLI for GitHub operations (see `docs/gh.md`)
+- Use `gh` CLI for GitHub operations (see `Documents/gh.md`)
 - When done with a task, run: `terminal-notifier -title "$TITLE" -message "$MESSAGE" -sound default -sender com.apple.Terminal`
 - Update `AGENTS.md` `<Agent>` section with implementation notes for future reference
