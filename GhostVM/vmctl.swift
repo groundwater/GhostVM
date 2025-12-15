@@ -542,8 +542,12 @@ struct RuntimeSharedFolderOverride {
 }
 
 final class VMController {
+    // Primary bundle extension for new VMs.
     static let bundleExtension = "GhostVM"
     static let bundleExtensionLowercased = bundleExtension.lowercased()
+    // Legacy extension accepted for backward compatibility.
+    static let legacyBundleExtension = "GhostVM"
+    static let legacyBundleExtensionLowercased = legacyBundleExtension.lowercased()
 
     private let fileManager = FileManager.default
     private var rootDirectory: URL
@@ -719,7 +723,7 @@ final class VMController {
 
     private func isSupportedBundleURL(_ url: URL) -> Bool {
         let ext = url.pathExtension.lowercased()
-        return ext == VMController.bundleExtensionLowercased
+        return ext == VMController.bundleExtensionLowercased || ext == VMController.legacyBundleExtensionLowercased
     }
 
     func storedConfig(at bundleURL: URL) throws -> VMStoredConfig {
@@ -792,8 +796,8 @@ final class VMController {
         let ext = bundleURL.pathExtension.lowercased()
         if ext.isEmpty {
             bundleURL.appendPathExtension(VMController.bundleExtension)
-        } else if ext != VMController.bundleExtensionLowercased {
-            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
+        } else if ext != VMController.bundleExtensionLowercased && ext != VMController.legacyBundleExtensionLowercased {
+            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension) (or legacy .\(VMController.legacyBundleExtension)).")
         }
 
         let vmName: String
@@ -1838,8 +1842,8 @@ struct CLI {
         let ext = url.pathExtension.lowercased()
         if ext.isEmpty {
             url.appendPathExtension(VMController.bundleExtension)
-        } else if ext != VMController.bundleExtensionLowercased {
-            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension).")
+        } else if ext != VMController.bundleExtensionLowercased && ext != VMController.legacyBundleExtensionLowercased {
+            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension) (or legacy .\(VMController.legacyBundleExtension)).")
         }
 
         if mustExist {

@@ -2,7 +2,7 @@
 Your mission, if you choose to accept it:
 
 - This repository is private.
-- Use the `gh` cli to access github. See `docs/gh.md` for details.
+- Use the `gh` cli to access github. See `Documents/gh.md` for details.
 - Do websearch for documentation as needed.
 - USE COMMON SENSE!!! If common sense conflicts with these instructions, use common sense.
 - Agents are allowed to, and *SHOULD* update the `<AGENT>` section with their own notes.
@@ -175,7 +175,7 @@ Reference Map
 | CLI entrypoint | `vmctl.swift` (`CLI`, `VMCTLMain`) | Builds `vmctl` binary used standalone and embedded inside the app bundle. |
 | App shell & UI | `VMApp.swift` | Requires `VMCTL_APP` flag; embeds SwiftUI view hierarchy within AppKit shell. |
 | Build tooling | `Makefile`, `entitlements.plist`, assets | Coordinates `swiftc`, codesigning, DMG/notarization. |
-| macOS guidelines | `docs/MacOS.md` | High-level rules for preferring SwiftUI and isolating AppKit in adapter files. |
+| macOS guidelines | `Documents/MacOS.md` | High-level rules for preferring SwiftUI and isolating AppKit in adapter files. |
 
 ### 8. SwiftUI Demo App Agent (`SwiftUIDemoApp.swift`: `GhostVMSwiftUIApp`)
 
