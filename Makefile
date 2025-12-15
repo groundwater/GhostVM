@@ -12,7 +12,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run generate
+.PHONY: all cli app clean help run generate test
 
 all: cli
 
@@ -52,6 +52,10 @@ app: $(XCODE_PROJECT)
 run: app
 	open "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
+# Run unit tests
+test: $(XCODE_PROJECT)
+	xcodebuild test -scheme GhostVMTests -destination 'platform=macOS'
+
 clean:
 	rm -f $(TARGET)
 	rm -rf $(BUILD_DIR)
@@ -64,6 +68,7 @@ help:
 	@echo "  make generate - Generate Xcode project from project.yml"
 	@echo "  make app      - Build SwiftUI app via xcodebuild"
 	@echo "  make run      - Build and launch the app"
+	@echo "  make test     - Run unit tests"
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
 	@echo "Variables:"

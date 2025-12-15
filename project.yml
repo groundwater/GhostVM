@@ -37,3 +37,15 @@ targets:
       configs:
         Debug:
           ONLY_ACTIVE_ARCH: YES
+
+  GhostVMTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GhostVMTests
+      - path: GhostVM/vmctl.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
