@@ -1269,6 +1269,34 @@ final class VMController {
         try status(bundleURL: bundleURL(for: name))
     }
 
+    func snapshotList(bundleURL: URL) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let snapshotsDir = layout.snapshotsDirectoryURL
+
+        guard fileManager.fileExists(atPath: snapshotsDir.path) else {
+            print("No snapshots.")
+            return
+        }
+
+        let contents = try fileManager.contentsOfDirectory(
+            at: snapshotsDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        let snapshots = contents.filter { url in
+            (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }.map { $0.lastPathComponent }.sorted()
+
+        if snapshots.isEmpty {
+            print("No snapshots.")
+        } else {
+            for name in snapshots {
+                print(name)
+            }
+        }
+    }
+
     func snapshot(bundleURL: URL, subcommand: String, snapshotName: String) throws {
         let layout = try layoutForExistingBundle(at: bundleURL)
         let vmName = displayName(for: bundleURL)
@@ -1331,8 +1359,15 @@ final class VMController {
             try fileManager.removeItem(at: tempDir)
             print("Reverted VM '\(vmName)' to snapshot '\(sanitized)'.")
 
+        case "delete":
+            guard fileManager.fileExists(atPath: snapshotDir.path) else {
+                throw VMError.message("Snapshot '\(sanitized)' does not exist for '\(vmName)'.")
+            }
+            try fileManager.removeItem(at: snapshotDir)
+            print("Deleted snapshot '\(sanitized)' from '\(vmName)'.")
+
         default:
-            throw VMError.message("Unknown snapshot subcommand '\(subcommand)'. Use 'create' or 'revert'.")
+            throw VMError.message("Unknown snapshot subcommand '\(subcommand)'. Use 'create', 'revert', or 'delete'.")
         }
     }
 
@@ -1974,13 +2009,24 @@ struct CLI {
     }
 
     private func handleSnapshot(arguments: [String]) throws {
-        guard arguments.count >= 3 else {
-            throw VMError.message("Usage: vmctl snapshot <bundle-path> <create|revert> <snapshot>")
+        guard arguments.count >= 2 else {
+            throw VMError.message("Usage: vmctl snapshot <bundle-path> <list|create|revert|delete> [snapshot-name]")
         }
         let bundleURL = try resolveBundleURL(argument: arguments[0], mustExist: true)
         let subcommand = arguments[1]
-        let snapshotName = arguments[2]
-        try controller.snapshot(bundleURL: bundleURL, subcommand: subcommand, snapshotName: snapshotName)
+
+        switch subcommand {
+        case "list":
+            try controller.snapshotList(bundleURL: bundleURL)
+        case "create", "revert", "delete":
+            guard arguments.count >= 3 else {
+                throw VMError.message("Usage: vmctl snapshot <bundle-path> \(subcommand) <snapshot-name>")
+            }
+            let snapshotName = arguments[2]
+            try controller.snapshot(bundleURL: bundleURL, subcommand: subcommand, snapshotName: snapshotName)
+        default:
+            throw VMError.message("Unknown snapshot subcommand '\(subcommand)'. Use 'list', 'create', 'revert', or 'delete'.")
+        }
     }
 
     private func showHelp(exitCode: Int32) -> Never {
@@ -1993,7 +2039,8 @@ Commands:
   start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
   stop <bundle-path>
   status <bundle-path>
-  snapshot <bundle-path> <create|revert> <snapshot>
+  snapshot <bundle-path> list
+  snapshot <bundle-path> <create|revert|delete> <snapshot-name>
 
 Examples:
   vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
@@ -2003,8 +2050,10 @@ Examples:
   vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
   vmctl stop ~/VMs/sandbox.GhostVM
   vmctl status ~/VMs/sandbox.GhostVM
+  vmctl snapshot ~/VMs/sandbox.GhostVM list
   vmctl snapshot ~/VMs/sandbox.GhostVM create clean
   vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
+  vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
 
 Note: After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
       Apple’s EULA requires macOS guests to run on Apple-branded hardware.
