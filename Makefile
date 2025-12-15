@@ -12,7 +12,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run generate test
+.PHONY: all cli app clean help run launch generate test
 
 all: help
 
@@ -48,8 +48,12 @@ app: $(XCODE_PROJECT)
 	codesign --entitlements GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
-# Build and run the app
+# Build and run the app (attached to terminal)
 run: app
+	"$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)"
+
+# Build and launch the app (detached)
+launch: app
 	open "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
 # Run unit tests
@@ -67,7 +71,8 @@ help:
 	@echo "  make cli      - Build vmctl CLI"
 	@echo "  make generate - Generate Xcode project from project.yml"
 	@echo "  make app      - Build SwiftUI app via xcodebuild"
-	@echo "  make run      - Build and launch the app"
+	@echo "  make run      - Build and run attached to terminal"
+	@echo "  make launch   - Build and launch detached"
 	@echo "  make test     - Run unit tests"
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""

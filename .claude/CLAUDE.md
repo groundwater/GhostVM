@@ -23,7 +23,8 @@ make          # Show available targets
 make cli      # Build vmctl CLI
 make generate # Generate Xcode project from project.yml
 make app      # Build SwiftUI app (auto-generates project)
-make run      # Build and launch the app
+make run      # Build and run attached to terminal
+make launch   # Build and launch detached
 make test     # Run unit tests
 make clean    # Remove build artifacts and generated project
 ```
