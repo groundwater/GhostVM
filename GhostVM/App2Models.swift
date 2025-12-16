@@ -10,6 +10,7 @@ struct App2VM: Identifiable, Hashable, Codable {
     var status: String
     var guestOSType: String
     var installerISOPath: String?
+    var installed: Bool
 
     var bundleURL: URL {
         URL(fileURLWithPath: bundlePath).standardizedFileURL
@@ -21,6 +22,10 @@ struct App2VM: Identifiable, Hashable, Codable {
 
     var isMacOS: Bool {
         guestOSType == "macOS"
+    }
+
+    var needsInstall: Bool {
+        isMacOS && !installed
     }
 }
 
@@ -138,7 +143,8 @@ final class App2VMStore: ObservableObject {
             osVersion: reloaded.osVersion,
             status: reloaded.status,
             guestOSType: reloaded.guestOSType,
-            installerISOPath: reloaded.installerISOPath
+            installerISOPath: reloaded.installerISOPath,
+            installed: reloaded.installed
         )
         vms[index] = updated
     }
@@ -218,7 +224,8 @@ final class App2VMStore: ObservableObject {
             osVersion: osVersion,
             status: entry.statusDescription,
             guestOSType: entry.guestOSType,
-            installerISOPath: entry.installerISOPath
+            installerISOPath: entry.installerISOPath,
+            installed: entry.installed
         )
     }
 }

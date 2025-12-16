@@ -38,8 +38,13 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
     private var ownsLock = false
     private var didTerminate = false
     private var stopContinuations: [(Result<Void, Error>) -> Void] = []
+    private let fileManager = FileManager.default
+
+    /// Whether the VM was suspended and should be resumed instead of started fresh.
+    public let wasSuspended: Bool
 
     public init(name: String, bundleURL: URL, layout: VMFileLayout, storedConfig: VMStoredConfig, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
+        self.wasSuspended = storedConfig.isSuspended && FileManager.default.fileExists(atPath: layout.suspendStateURL.path)
         self.name = name
         self.bundlePath = bundleURL.path
         self.layout = layout
@@ -88,6 +93,70 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
         }
     }
 
+    /// Resumes the VM from a suspended state by restoring saved machine state.
+    public func resume(completion: @escaping (Result<Void, Error>) -> Void) {
+        guard state == .initialized || state == .stopped else {
+            completion(.failure(VMError.message("VM '\(name)' is already starting or running.")))
+            return
+        }
+
+        guard fileManager.fileExists(atPath: layout.suspendStateURL.path) else {
+            completion(.failure(VMError.message("No suspend state found for VM '\(name)'. Use start instead.")))
+            return
+        }
+
+        state = .starting
+        do {
+            try writeVMLockOwner(.embedded(ProcessInfo.processInfo.processIdentifier), to: layout.pidFileURL)
+            ownsLock = true
+        } catch {
+            state = .stopped
+            completion(.failure(error))
+            return
+        }
+
+        vmQueue.async {
+            self._virtualMachine.restoreMachineStateFrom(url: self.layout.suspendStateURL) { restoreError in
+                if let error = restoreError {
+                    DispatchQueue.main.async {
+                        self.state = .stopped
+                        if self.ownsLock {
+                            removeVMLock(at: self.layout.pidFileURL)
+                            self.ownsLock = false
+                        }
+                        completion(.failure(error))
+                    }
+                    return
+                }
+
+                self._virtualMachine.resume { resumeResult in
+                    DispatchQueue.main.async {
+                        switch resumeResult {
+                        case .success:
+                            // Clear the suspend state after successful resume
+                            try? self.fileManager.removeItem(at: self.layout.suspendStateURL)
+                            let store = VMConfigStore(layout: self.layout)
+                            if var config = try? store.load() {
+                                config.isSuspended = false
+                                config.modifiedAt = Date()
+                                try? store.save(config)
+                            }
+                            self.state = .running
+                            completion(.success(()))
+                        case .failure(let error):
+                            self.state = .stopped
+                            if self.ownsLock {
+                                removeVMLock(at: self.layout.pidFileURL)
+                                self.ownsLock = false
+                            }
+                            completion(.failure(error))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     public func requestStop(force: Bool = false, completion: ((Result<Void, Error>) -> Void)? = nil) {
         if state == .stopped {
             completion?(.success(()))
@@ -118,6 +187,9 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
         }
 
         state = .suspending
+
+        // Remove any existing suspend file before saving new state
+        try? fileManager.removeItem(at: layout.suspendStateURL)
 
         vmQueue.async {
             self._virtualMachine.pause { pauseResult in

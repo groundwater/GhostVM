@@ -93,6 +93,8 @@ struct VMListDemoView: View {
     @State private var snapshotToDelete: (vm: App2VM, name: String)?
     // Edit VM state
     @State private var vmToEdit: App2VM?
+    // Install VM state
+    @State private var vmToInstall: App2VM?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -151,6 +153,9 @@ struct VMListDemoView: View {
                         },
                         requestTerminate: {
                             App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                        },
+                        requestInstall: {
+                            vmToInstall = vm
                         }
                     )
                     .tag(vm.id)
@@ -177,6 +182,9 @@ struct VMListDemoView: View {
                             },
                             requestTerminate: {
                                 App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                            },
+                            requestInstall: {
+                                vmToInstall = vm
                             }
                         )
                     }
@@ -232,6 +240,14 @@ struct VMListDemoView: View {
                 get: { vmToEdit != nil },
                 set: { if !$0 { vmToEdit = nil } }
             ))
+        }
+        // Install VM sheet
+        .sheet(item: $vmToInstall) { vm in
+            InstallVMView(vm: vm, isPresented: Binding(
+                get: { vmToInstall != nil },
+                set: { if !$0 { vmToInstall = nil } }
+            ))
+            .environmentObject(store)
         }
         // Revert Snapshot confirmation
         .alert("Revert to snapshot?", isPresented: Binding(
@@ -706,6 +722,7 @@ struct VMRowView: View {
     let requestDeleteSnapshot: (String) -> Void
     let requestEdit: () -> Void
     let requestTerminate: () -> Void
+    let requestInstall: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -729,14 +746,23 @@ struct VMRowView: View {
             }
 
             HStack(spacing: 8) {
-                Button {
-                    play()
-                } label: {
-                    Image(systemName: "play.circle.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 28, height: 28)
+                if vm.needsInstall {
+                    Button("Install") {
+                        requestInstall()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .fixedSize()
+                } else {
+                    Button {
+                        play()
+                    } label: {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 18, weight: .semibold))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless)
                 }
-                .buttonStyle(.borderless)
 
                 Menu {
                     VMContextMenu(
@@ -747,7 +773,8 @@ struct VMRowView: View {
                         requestRevertSnapshot: requestRevertSnapshot,
                         requestDeleteSnapshot: requestDeleteSnapshot,
                         requestEdit: requestEdit,
-                        requestTerminate: requestTerminate
+                        requestTerminate: requestTerminate,
+                        requestInstall: requestInstall
                     )
                 } label: {
                     Image(systemName: "ellipsis")
@@ -757,7 +784,7 @@ struct VMRowView: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
             }
-            .frame(width: 64, alignment: .trailing)
+            .fixedSize()
         }
     }
 
@@ -1097,6 +1124,7 @@ struct VMContextMenu: View {
     let requestDeleteSnapshot: (String) -> Void
     let requestEdit: () -> Void
     let requestTerminate: () -> Void
+    let requestInstall: () -> Void
     @EnvironmentObject private var store: App2VMStore
 
     init(
@@ -1107,7 +1135,8 @@ struct VMContextMenu: View {
         requestRevertSnapshot: @escaping (String) -> Void,
         requestDeleteSnapshot: @escaping (String) -> Void,
         requestEdit: @escaping () -> Void = {},
-        requestTerminate: @escaping () -> Void = {}
+        requestTerminate: @escaping () -> Void = {},
+        requestInstall: @escaping () -> Void = {}
     ) {
         self.vm = vm
         self.play = play
@@ -1117,17 +1146,25 @@ struct VMContextMenu: View {
         self.requestDeleteSnapshot = requestDeleteSnapshot
         self.requestEdit = requestEdit
         self.requestTerminate = requestTerminate
+        self.requestInstall = requestInstall
     }
 
     var body: some View {
         let lowerStatus = vm.status.lowercased()
         let isRunning = lowerStatus.contains("running") || lowerStatus.contains("starting") || lowerStatus.contains("stopping")
-        let isInstalled = lowerStatus != "not installed"
+
+        // Show Install for macOS VMs that need installation
+        if vm.needsInstall {
+            Button("Install macOS…") {
+                requestInstall()
+            }
+            .disabled(isRunning)
+        }
 
         Button("Start") {
             play()
         }
-        .disabled(!isInstalled || isRunning)
+        .disabled(vm.needsInstall || isRunning)
 
         Button("Stop") {
             // VM stop is coordinated by closing the VM window; for now this
@@ -1207,6 +1244,98 @@ struct VMContextMenu: View {
     }
 }
 
+// MARK: - Install VM View
+
+@available(macOS 13.0, *)
+struct InstallVMView: View {
+    let vm: App2VM
+    @Binding var isPresented: Bool
+    @EnvironmentObject private var store: App2VMStore
+
+    @State private var progress: Double = 0
+    @State private var statusMessage: String = "Starting installation..."
+    @State private var errorMessage: String?
+    @State private var isComplete = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Installing macOS")
+                .font(.headline)
+
+            Text("Installing macOS onto \"\(vm.name)\"")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if let error = errorMessage {
+                Text(error)
+                    .foregroundStyle(.red)
+                    .font(.caption)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+
+                Text(statusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Spacer()
+                if isComplete {
+                    Button("Done") {
+                        isPresented = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Cancel") {
+                        isPresented = false
+                    }
+                }
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
+        .onAppear {
+            startInstall()
+        }
+    }
+
+    private func startInstall() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try performInstall()
+                DispatchQueue.main.async {
+                    statusMessage = "Installation complete!"
+                    progress = 1.0
+                    isComplete = true
+                    store.reloadVM(at: vm.bundleURL)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    errorMessage = error.localizedDescription
+                    statusMessage = "Installation failed"
+                }
+            }
+        }
+    }
+
+    private func performInstall() throws {
+        let bundleURL = vm.bundleURL
+        let controller = VMController()
+
+        try controller.installVMWithProgress(bundleURL: bundleURL) { fraction, description in
+            DispatchQueue.main.async {
+                self.progress = fraction
+                if let desc = description {
+                    self.statusMessage = desc
+                }
+            }
+        }
+    }
+}
+
 @available(macOS 13.0, *)
 struct VMWindowView: View {
     let vm: App2VM
@@ -1238,6 +1367,16 @@ struct VMWindowView: View {
         }
     }
 
+    private var isStarting: Bool {
+        if case .starting = session.state { return true }
+        return false
+    }
+
+    private var errorMessage: String? {
+        if case .failed(let message) = session.state { return message }
+        return nil
+    }
+
     var body: some View {
         ZStack {
             App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys)
@@ -1245,6 +1384,19 @@ struct VMWindowView: View {
             // Invisible view that coordinates window close behavior with the VM.
             App2VMWindowCoordinatorHost(session: session)
                 .frame(width: 0, height: 0)
+
+            // Dark overlay when starting to show progress
+            if isStarting {
+                Color.black.opacity(0.7)
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(.white)
+                    Text("Starting…")
+                        .font(.title2)
+                        .foregroundColor(.white)
+                }
+            }
 
             // Dark overlay when suspending to indicate the VM is not interactive
             if isSuspending {
@@ -1256,6 +1408,25 @@ struct VMWindowView: View {
                     Text("Suspending…")
                         .font(.title2)
                         .foregroundColor(.white)
+                }
+            }
+
+            // Error overlay when VM fails to start
+            if let error = errorMessage {
+                Color.black.opacity(0.8)
+                VStack(spacing: 16) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 48))
+                        .foregroundColor(.yellow)
+                    Text("Failed to Start VM")
+                        .font(.title2)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white)
+                    Text(error)
+                        .font(.body)
+                        .foregroundColor(.white.opacity(0.8))
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 40)
                 }
             }
         }
@@ -1280,25 +1451,22 @@ struct VMWindowView: View {
             }
         }
         .onAppear {
-            session.onStateChange = { [vmID = vm.id, store] state in
-                let status: String
+            session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store] state in
                 switch state {
                 case .running:
-                    status = "Running"
+                    store.updateStatus(for: vmID, status: "Running")
                 case .starting:
-                    status = "Starting…"
+                    store.updateStatus(for: vmID, status: "Starting…")
                 case .suspending:
-                    status = "Suspending…"
+                    store.updateStatus(for: vmID, status: "Suspending…")
                 case .stopping:
-                    status = "Stopping…"
-                case .stopped:
-                    status = "Stopped"
+                    store.updateStatus(for: vmID, status: "Stopping…")
+                case .stopped, .idle:
+                    // Reload from disk to get actual suspended state
+                    store.reloadVM(at: bundleURL)
                 case .failed:
-                    status = "Error"
-                case .idle:
-                    status = "Stopped"
+                    store.updateStatus(for: vmID, status: "Error")
                 }
-                store.updateStatus(for: vmID, status: status)
             }
             session.startIfNeeded()
         }

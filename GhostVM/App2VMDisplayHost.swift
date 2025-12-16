@@ -113,6 +113,10 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
                     .sink { [weak self] newState in
                         guard let self, let window = self.window else { return }
                         switch newState {
+                        case .running:
+                            // Activate the window and bring it to front when VM starts running
+                            NSApp.activate(ignoringOtherApps: true)
+                            window.makeKeyAndOrderFront(nil)
                         case .stopped, .failed:
                             if window.isVisible {
                                 window.close()

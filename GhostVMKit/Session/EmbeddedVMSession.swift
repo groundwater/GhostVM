@@ -136,6 +136,9 @@ public final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachi
         state = .suspending
         statusChanged?("Suspending \(name)…")
 
+        // Remove any existing suspend file before saving new state
+        try? FileManager.default.removeItem(at: layout.suspendStateURL)
+
         vmQueue.async {
             self.virtualMachine.pause { pauseResult in
                 switch pauseResult {

@@ -140,7 +140,8 @@ public final class VMController {
             diskBytes: config.diskBytes,
             lastInstallVersion: config.lastInstallVersion,
             guestOSType: config.guestOSType,
-            installerISOPath: config.installerISOPath
+            installerISOPath: config.installerISOPath,
+            isSuspended: config.isSuspended
         )
     }
 
@@ -675,6 +676,72 @@ public final class VMController {
 
     public func installVM(name: String) throws {
         try installVM(bundleURL: bundleURL(for: name))
+    }
+
+    /// GUI-friendly install method that reports progress via a callback
+    public func installVMWithProgress(bundleURL: URL, progressHandler: @escaping (Double, String?) -> Void) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let store = VMConfigStore(layout: layout)
+        var config = try store.load()
+        let vmName = displayName(for: bundleURL)
+
+        guard !isVMProcessRunning(layout: layout) else {
+            throw VMError.message("VM '\(vmName)' appears to be running. Stop it before installing.")
+        }
+
+        let restoreImageURL = URL(fileURLWithPath: config.restoreImagePath)
+        let restoreImage = try loadRestoreImage(from: restoreImageURL)
+
+        let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
+        let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+
+        let vmQueue = DispatchQueue(label: "ghostvm.install.\(vmName)")
+        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
+
+        let installer: VZMacOSInstaller = vmQueue.sync {
+            VZMacOSInstaller(virtualMachine: virtualMachine, restoringFromImageAt: restoreImageURL)
+        }
+
+        let progress = installer.progress
+        let observation = progress.observe(\.fractionCompleted, options: [.new]) { prog, _ in
+            progressHandler(prog.fractionCompleted, prog.localizedDescription)
+        }
+
+        let group = DispatchGroup()
+        var installError: Error?
+        group.enter()
+        vmQueue.async {
+            installer.install { result in
+                switch result {
+                case .success:
+                    break
+                case .failure(let error):
+                    installError = error
+                }
+                group.leave()
+            }
+        }
+        group.wait()
+        observation.invalidate()
+
+        if let error = installError {
+            throw error
+        }
+
+        if installer.progress.isCancelled {
+            throw VMError.message("Installation cancelled.")
+        }
+
+        if installer.progress.completedUnitCount < installer.progress.totalUnitCount {
+            throw VMError.message("Installation did not complete.")
+        }
+
+        config.installed = true
+        config.lastInstallBuild = restoreImage.buildVersion
+        let osVersion = restoreImage.operatingSystemVersion
+        config.lastInstallVersion = "\(osVersion.majorVersion).\(osVersion.minorVersion).\(osVersion.patchVersion)"
+        config.lastInstallDate = Date()
+        try store.save(config)
     }
 
     // MARK: - Start VM (CLI mode - returns Never)

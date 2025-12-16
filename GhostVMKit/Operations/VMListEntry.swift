@@ -13,6 +13,7 @@ public struct VMListEntry {
     public let lastInstallVersion: String?
     public let guestOSType: String
     public let installerISOPath: String?
+    public let isSuspended: Bool
 
     public var isRunning: Bool {
         return managedInProcess || runningPID != nil
@@ -31,6 +32,9 @@ public struct VMListEntry {
         if !installed {
             return "Not Installed"
         }
+        if isSuspended {
+            return "Suspended"
+        }
         return "Stopped"
     }
 
@@ -45,7 +49,8 @@ public struct VMListEntry {
         diskBytes: UInt64,
         lastInstallVersion: String? = nil,
         guestOSType: String = "macOS",
-        installerISOPath: String? = nil
+        installerISOPath: String? = nil,
+        isSuspended: Bool = false
     ) {
         self.name = name
         self.bundleURL = bundleURL
@@ -58,6 +63,7 @@ public struct VMListEntry {
         self.lastInstallVersion = lastInstallVersion
         self.guestOSType = guestOSType
         self.installerISOPath = installerISOPath
+        self.isSuspended = isSuspended
     }
 
     public func withManagedInProcess(_ value: Bool) -> VMListEntry {
@@ -72,7 +78,8 @@ public struct VMListEntry {
             diskBytes: diskBytes,
             lastInstallVersion: lastInstallVersion,
             guestOSType: guestOSType,
-            installerISOPath: installerISOPath
+            installerISOPath: installerISOPath,
+            isSuspended: isSuspended
         )
     }
 }

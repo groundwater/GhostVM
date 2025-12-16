@@ -128,14 +128,19 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 }
             }
 
-            session.start { [weak self] result in
+            // Use resume if VM was suspended, otherwise start fresh
+            let startOrResume: (@escaping (Result<Void, Error>) -> Void) -> Void = session.wasSuspended
+                ? session.resume
+                : session.start
+
+            startOrResume { [weak self] result in
                 guard let self = self else { return }
                 switch result {
                 case .success:
                     App2VMSessionRegistry.shared.register(self)
                     self.transition(to: .running, message: "Running")
                 case .failure(let error):
-                    print("[App2VMRunSession] start callback error: \(error)")
+                    print("[App2VMRunSession] start/resume callback error: \(error)")
                     self.windowlessSession = nil
                     self.virtualMachine = nil
                     self.transition(to: .failed(error.localizedDescription))
