@@ -8,6 +8,7 @@ public struct InitOptions {
     public var restoreImagePath: String?
     public var sharedFolderPath: String?
     public var sharedFolderWritable: Bool
+    public var sharedFolders: [SharedFolderConfig]
 
     public init(
         cpus: Int = 4,
@@ -15,7 +16,8 @@ public struct InitOptions {
         diskGiB: UInt64 = 64,
         restoreImagePath: String? = nil,
         sharedFolderPath: String? = nil,
-        sharedFolderWritable: Bool = false
+        sharedFolderWritable: Bool = false,
+        sharedFolders: [SharedFolderConfig] = []
     ) {
         self.cpus = cpus
         self.memoryGiB = memoryGiB
@@ -23,5 +25,6 @@ public struct InitOptions {
         self.restoreImagePath = restoreImagePath
         self.sharedFolderPath = sharedFolderPath
         self.sharedFolderWritable = sharedFolderWritable
+        self.sharedFolders = sharedFolders
     }
 }

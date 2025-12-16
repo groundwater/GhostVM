@@ -39,10 +39,12 @@ struct GhostVMSwiftUIApp: App {
                 VMWindowView(vm: vm)
                     .environmentObject(store)
             } else {
-                Text("No VM selected")
-                    .frame(minWidth: 320, minHeight: 200)
+                // Empty view - window should not open without a VM
+                EmptyView()
             }
         }
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
     }
 }
 
@@ -88,6 +90,8 @@ struct VMListDemoView: View {
     @State private var vmForSnapshot: App2VM?
     @State private var snapshotToRevert: (vm: App2VM, name: String)?
     @State private var snapshotToDelete: (vm: App2VM, name: String)?
+    // Edit VM state
+    @State private var vmToEdit: App2VM?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -148,6 +152,9 @@ struct VMListDemoView: View {
                             },
                             requestDeleteSnapshot: { name in
                                 snapshotToDelete = (vm, name)
+                            },
+                            requestEdit: {
+                                vmToEdit = vm
                             }
                         )
                     }
@@ -195,6 +202,13 @@ struct VMListDemoView: View {
             CreateSnapshotView(vm: vm, isPresented: Binding(
                 get: { vmForSnapshot != nil },
                 set: { if !$0 { vmForSnapshot = nil } }
+            ))
+        }
+        // Edit VM sheet
+        .sheet(item: $vmToEdit) { vm in
+            EditVMView(vm: vm, isPresented: Binding(
+                get: { vmToEdit != nil },
+                set: { if !$0 { vmToEdit = nil } }
             ))
         }
         // Revert Snapshot confirmation
@@ -296,8 +310,7 @@ struct CreateVMDemoView: View {
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
     @State private var diskGiB: String = "64"
-    @State private var sharedFolderPath: String = ""
-    @State private var sharedFolderWritable: Bool = false
+    @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
     @State private var isCreating: Bool = false
@@ -351,14 +364,23 @@ struct CreateVMDemoView: View {
                 restorePicker
             }
 
-            labeledRow("Shared Folder") {
+            labeledRow("Shared Folders") {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack(spacing: 8) {
-                        TextField("Optional shared folder path", text: $sharedFolderPath)
-                            .textFieldStyle(.roundedBorder)
+                    ForEach(sharedFolders.indices, id: \.self) { index in
+                        SharedFolderRowView(
+                            folder: $sharedFolders[index],
+                            onDelete: {
+                                sharedFolders.remove(at: index)
+                            }
+                        )
                     }
-                    Toggle("Allow writes to shared folder", isOn: $sharedFolderWritable)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Button {
+                        sharedFolders.append(SharedFolderConfig(path: "", readOnly: true))
+                    } label: {
+                        Label("Add Shared Folder", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderless)
                 }
             }
 
@@ -502,15 +524,15 @@ struct CreateVMDemoView: View {
             bundleURL.appendPathExtension("GhostVM")
         }
 
-        let trimmedShared = sharedFolderPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Filter out empty shared folders
+        let validFolders = sharedFolders.filter { !$0.path.trimmingCharacters(in: .whitespaces).isEmpty }
 
         var opts = InitOptions()
         opts.cpus = Int(cpuCount) ?? 4
         opts.memoryGiB = UInt64(memoryGiB) ?? 8
         opts.diskGiB = UInt64(diskGiB) ?? 64
         opts.restoreImagePath = restorePath
-        opts.sharedFolderPath = trimmedShared.isEmpty ? nil : trimmedShared
-        opts.sharedFolderWritable = sharedFolderWritable
+        opts.sharedFolders = validFolders
 
         isCreating = true
 
@@ -677,6 +699,225 @@ struct CreateSnapshotView: View {
     }
 }
 
+// MARK: - Edit VM View
+
+@available(macOS 13.0, *)
+struct EditVMView: View {
+    let vm: App2VM
+    @Binding var isPresented: Bool
+
+    @State private var cpuCount: String = "4"
+    @State private var memoryGiB: String = "8"
+    @State private var sharedFolders: [SharedFolderConfig] = []
+    @State private var isSaving: Bool = false
+    @State private var errorMessage: String?
+    @State private var isShowingError: Bool = false
+    @State private var isLoading: Bool = true
+
+    private let labelWidth: CGFloat = 120
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit \"\(vm.name)\"")
+                .font(.headline)
+
+            if isLoading {
+                ProgressView("Loading settings…")
+                    .padding(.vertical, 8)
+            } else {
+                labeledRow("CPUs") {
+                    HStack(spacing: 8) {
+                        TextField("Number of vCPUs", text: $cpuCount)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 120)
+                        Text("cores")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                labeledRow("Memory") {
+                    HStack(spacing: 8) {
+                        TextField("GiB", text: $memoryGiB)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(maxWidth: 120)
+                        Text("GiB")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                labeledRow("Shared Folders") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(sharedFolders.indices, id: \.self) { index in
+                            SharedFolderRowView(
+                                folder: $sharedFolders[index],
+                                onDelete: {
+                                    sharedFolders.remove(at: index)
+                                }
+                            )
+                        }
+
+                        Button {
+                            sharedFolders.append(SharedFolderConfig(path: "", readOnly: true))
+                        } label: {
+                            Label("Add Shared Folder", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+
+                Text("Changes will take effect the next time you start the VM.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 8)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(isSaving)
+
+                Button("Save") {
+                    save()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isSaving || isLoading)
+            }
+        }
+        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+        .frame(minWidth: 520)
+        .onAppear {
+            loadCurrentSettings()
+        }
+        .alert("Unable to Save Settings", isPresented: $isShowingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "An unknown error occurred.")
+        }
+    }
+
+    @ViewBuilder
+    private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+            content()
+        }
+    }
+
+    private func loadCurrentSettings() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = VMController()
+            do {
+                let config = try controller.storedConfig(at: vm.bundleURL)
+                DispatchQueue.main.async {
+                    self.cpuCount = "\(config.cpus)"
+                    self.memoryGiB = "\(config.memoryBytes / (1 << 30))"
+
+                    // Load shared folders: prefer new array, fall back to legacy single folder
+                    if !config.sharedFolders.isEmpty {
+                        self.sharedFolders = config.sharedFolders
+                    } else if let legacyPath = config.sharedFolderPath {
+                        self.sharedFolders = [SharedFolderConfig(path: legacyPath, readOnly: config.sharedFolderReadOnly)]
+                    } else {
+                        self.sharedFolders = []
+                    }
+
+                    self.isLoading = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.errorMessage = error.localizedDescription
+                    self.isShowingError = true
+                    self.isLoading = false
+                }
+            }
+        }
+    }
+
+    private func save() {
+        isSaving = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = VMController()
+            do {
+                let cpus = Int(cpuCount) ?? 4
+                let memory = UInt64(memoryGiB) ?? 8
+
+                // Filter out empty paths
+                let validFolders = sharedFolders.filter { !$0.path.trimmingCharacters(in: .whitespaces).isEmpty }
+
+                try controller.updateVMSettings(
+                    bundleURL: vm.bundleURL,
+                    cpus: cpus,
+                    memoryGiB: memory,
+                    sharedFolders: validFolders
+                )
+
+                DispatchQueue.main.async {
+                    self.isSaving = false
+                    self.isPresented = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isSaving = false
+                    self.errorMessage = error.localizedDescription
+                    self.isShowingError = true
+                }
+            }
+        }
+    }
+}
+
+@available(macOS 13.0, *)
+struct SharedFolderRowView: View {
+    @Binding var folder: SharedFolderConfig
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField("Folder path", text: $folder.path)
+                .textFieldStyle(.roundedBorder)
+
+            Button {
+                selectFolder()
+            } label: {
+                Image(systemName: "folder")
+            }
+            .buttonStyle(.borderless)
+
+            Toggle("Read-only", isOn: $folder.readOnly)
+                .toggleStyle(.checkbox)
+                .fixedSize()
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    private func selectFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Select"
+        panel.message = "Choose a folder to share with the VM"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            folder.path = url.path
+        }
+    }
+}
+
 // MARK: - Snapshot Helpers
 
 @available(macOS 13.0, *)
@@ -707,7 +948,26 @@ struct VMContextMenu: View {
     let requestCreateSnapshot: () -> Void
     let requestRevertSnapshot: (String) -> Void
     let requestDeleteSnapshot: (String) -> Void
+    let requestEdit: () -> Void
     @EnvironmentObject private var store: App2VMStore
+
+    init(
+        vm: App2VM,
+        play: @escaping () -> Void,
+        requestDelete: @escaping () -> Void,
+        requestCreateSnapshot: @escaping () -> Void,
+        requestRevertSnapshot: @escaping (String) -> Void,
+        requestDeleteSnapshot: @escaping (String) -> Void,
+        requestEdit: @escaping () -> Void = {}
+    ) {
+        self.vm = vm
+        self.play = play
+        self.requestDelete = requestDelete
+        self.requestCreateSnapshot = requestCreateSnapshot
+        self.requestRevertSnapshot = requestRevertSnapshot
+        self.requestDeleteSnapshot = requestDeleteSnapshot
+        self.requestEdit = requestEdit
+    }
 
     var body: some View {
         let lowerStatus = vm.status.lowercased()
@@ -724,6 +984,11 @@ struct VMContextMenu: View {
             // entry is present but handled via the window close behavior.
         }
         .disabled(!isRunning)
+
+        Button("Edit Settings…") {
+            requestEdit()
+        }
+        .disabled(isRunning)
 
         Divider()
 
@@ -775,6 +1040,16 @@ struct VMWindowView: View {
         _session = StateObject(wrappedValue: App2VMRunSession(bundleURL: vm.bundleURL))
     }
 
+    private var isSuspending: Bool {
+        if case .suspending = session.state { return true }
+        return false
+    }
+
+    private var isRunning: Bool {
+        if case .running = session.state { return true }
+        return false
+    }
+
     var body: some View {
         ZStack {
             App2VMDisplayHost(virtualMachine: session.virtualMachine)
@@ -783,6 +1058,31 @@ struct VMWindowView: View {
             // Invisible view that coordinates window close behavior with the VM.
             App2VMWindowCoordinatorHost(session: session)
                 .frame(width: 0, height: 0)
+
+            // Dark overlay when suspending to indicate the VM is not interactive
+            if isSuspending {
+                Color.black.opacity(0.5)
+                    .ignoresSafeArea()
+                VStack(spacing: 12) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(.white)
+                    Text("Suspending…")
+                        .font(.title2)
+                        .foregroundColor(.white)
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    session.suspend()
+                } label: {
+                    Label("Suspend", systemImage: "moon.zzz")
+                }
+                .disabled(!isRunning)
+                .help("Suspend VM and save state to disk")
+            }
         }
         .onAppear {
             session.onStateChange = { [vmID = vm.id, store] state in
@@ -792,6 +1092,8 @@ struct VMWindowView: View {
                     status = "Running"
                 case .starting:
                     status = "Starting…"
+                case .suspending:
+                    status = "Suspending…"
                 case .stopping:
                     status = "Stopping…"
                 case .stopped:

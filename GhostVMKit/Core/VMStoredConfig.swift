@@ -15,6 +15,7 @@ public struct VMStoredConfig: Codable {
     public var diskPath: String
     public var sharedFolderPath: String?
     public var sharedFolderReadOnly: Bool
+    public var sharedFolders: [SharedFolderConfig]
     public var installed: Bool
     public var lastInstallBuild: String?
     public var lastInstallVersion: String?
@@ -37,6 +38,7 @@ public struct VMStoredConfig: Codable {
         case diskPath
         case sharedFolderPath
         case sharedFolderReadOnly
+        case sharedFolders
         case installed
         case lastInstallBuild
         case lastInstallVersion
@@ -60,6 +62,7 @@ public struct VMStoredConfig: Codable {
         diskPath: String,
         sharedFolderPath: String?,
         sharedFolderReadOnly: Bool,
+        sharedFolders: [SharedFolderConfig] = [],
         installed: Bool,
         lastInstallBuild: String?,
         lastInstallVersion: String?,
@@ -81,6 +84,7 @@ public struct VMStoredConfig: Codable {
         self.diskPath = diskPath
         self.sharedFolderPath = sharedFolderPath
         self.sharedFolderReadOnly = sharedFolderReadOnly
+        self.sharedFolders = sharedFolders
         self.installed = installed
         self.lastInstallBuild = lastInstallBuild
         self.lastInstallVersion = lastInstallVersion
@@ -105,6 +109,7 @@ public struct VMStoredConfig: Codable {
         diskPath = try container.decode(String.self, forKey: .diskPath)
         sharedFolderPath = try container.decodeIfPresent(String.self, forKey: .sharedFolderPath)
         sharedFolderReadOnly = try container.decode(Bool.self, forKey: .sharedFolderReadOnly)
+        sharedFolders = try container.decodeIfPresent([SharedFolderConfig].self, forKey: .sharedFolders) ?? []
         installed = try container.decode(Bool.self, forKey: .installed)
         lastInstallBuild = try container.decodeIfPresent(String.self, forKey: .lastInstallBuild)
         lastInstallVersion = try container.decodeIfPresent(String.self, forKey: .lastInstallVersion)
@@ -175,6 +180,12 @@ public struct VMStoredConfig: Codable {
             let (absoluteShared, sharedChanged) = makeAbsolute(shared)
             if sharedChanged {
                 sharedFolderPath = absoluteShared
+                changed = true
+            }
+        }
+
+        for i in sharedFolders.indices {
+            if sharedFolders[i].normalize() {
                 changed = true
             }
         }

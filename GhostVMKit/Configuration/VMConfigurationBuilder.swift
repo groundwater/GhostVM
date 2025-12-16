@@ -74,29 +74,43 @@ public final class VMConfigurationBuilder {
             config.pointingDevices = []
         }
 
-        let sharedFolderSelection: (path: String, readOnly: Bool)?
+        // Build list of shared folders from config and runtime override
+        var sharedFolders: [SharedFolderConfig] = []
+
+        // Priority: runtime override > stored sharedFolders > legacy sharedFolderPath
         if let runtimeSharedFolder = runtimeSharedFolder {
-            sharedFolderSelection = (runtimeSharedFolder.path, runtimeSharedFolder.readOnly)
+            sharedFolders = [SharedFolderConfig(path: runtimeSharedFolder.path, readOnly: runtimeSharedFolder.readOnly)]
+        } else if !storedConfig.sharedFolders.isEmpty {
+            sharedFolders = storedConfig.sharedFolders
         } else if let storedPath = storedConfig.sharedFolderPath {
-            sharedFolderSelection = (storedPath, storedConfig.sharedFolderReadOnly)
-        } else {
-            sharedFolderSelection = nil
+            sharedFolders = [SharedFolderConfig(path: storedPath, readOnly: storedConfig.sharedFolderReadOnly)]
         }
 
-        if let selection = sharedFolderSelection {
+        var directorySharingDevices: [VZDirectorySharingDeviceConfiguration] = []
+
+        for (index, folder) in sharedFolders.enumerated() {
             var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: selection.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw VMError.message("Shared folder path \(selection.path) does not exist or is not a directory.")
+            guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("Shared folder path \(folder.path) does not exist or is not a directory.")
             }
-            let url = URL(fileURLWithPath: selection.path)
-            let sharedDirectory = VZSharedDirectory(url: url, readOnly: selection.readOnly)
+            let url = URL(fileURLWithPath: folder.path)
+            let sharedDirectory = VZSharedDirectory(url: url, readOnly: folder.readOnly)
             let singleShare = VZSingleDirectoryShare(directory: sharedDirectory)
-            let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag)
+
+            // First folder uses macOS automount tag, subsequent folders use custom tags
+            let tag: String
+            if index == 0 {
+                tag = VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
+            } else {
+                tag = "ghostvm-share-\(index)"
+            }
+
+            let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: tag)
             shareDevice.share = singleShare
-            config.directorySharingDevices = [shareDevice]
-        } else {
-            config.directorySharingDevices = []
+            directorySharingDevices.append(shareDevice)
         }
+
+        config.directorySharingDevices = directorySharingDevices
 
         do {
             try config.validate()

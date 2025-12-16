@@ -10,6 +10,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         case idle
         case starting
         case running
+        case suspending
         case stopping
         case stopped
         case failed(String)
@@ -68,7 +69,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                     case .stopping:
                         self.transition(to: .stopping, message: "Stopping…")
                     case .suspending:
-                        self.transition(to: .stopping, message: "Suspending…")
+                        self.transition(to: .suspending, message: "Suspending…")
                     case .stopped:
                         self.windowlessSession = nil
                         self.virtualMachine = nil
@@ -141,6 +142,29 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    func suspend() {
+        guard let session = windowlessSession else {
+            return
+        }
+        guard case .running = state else {
+            return
+        }
+
+        transition(to: .suspending, message: "Suspending…")
+        session.suspend { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success:
+                self.windowlessSession = nil
+                self.virtualMachine = nil
+                self.transition(to: .stopped, message: "Suspended")
+            case .failure(let error):
+                self.transition(to: .running, message: "Running")
+                print("[App2VMRunSession] suspend error: \(error)")
+            }
+        }
+    }
+
     private func transition(to newState: State, message: String? = nil) {
         state = newState
         if let message = message {
@@ -153,6 +177,8 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 statusText = "Starting…"
             case .running:
                 statusText = "Running"
+            case .suspending:
+                statusText = "Suspending…"
             case .stopping:
                 statusText = "Stopping…"
             case .stopped:
