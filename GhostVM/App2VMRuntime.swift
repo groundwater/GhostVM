@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import Combine
 @preconcurrency import Virtualization
 import GhostVMKit
 
@@ -66,25 +67,28 @@ final class App2VMSessionRegistry {
         }
 
         let group = DispatchGroup()
+        var observations: [AnyCancellable] = []
+
         for session in runningSessions {
             group.enter()
-            session.suspend()
-            // Observe state change to know when suspend completes
+            var didLeave = false
             let observation = session.$state.sink { state in
+                guard !didLeave else { return }
                 switch state {
                 case .stopped, .failed, .idle:
+                    didLeave = true
                     group.leave()
                 default:
                     break
                 }
             }
-            // Store observation to keep it alive until suspend completes
-            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-                _ = observation // Keep alive
-            }
+            observations.append(observation)
+            session.suspend()
         }
 
         group.notify(queue: .main) {
+            // Cancel observations after completion
+            observations.forEach { $0.cancel() }
             completion()
         }
     }
