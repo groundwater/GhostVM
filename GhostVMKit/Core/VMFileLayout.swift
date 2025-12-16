@@ -16,6 +16,7 @@ public final class VMFileLayout {
     public var auxiliaryStorageURL: URL { bundleURL.appendingPathComponent("AuxiliaryStorage.bin") }
     public var pidFileURL: URL { bundleURL.appendingPathComponent("vmctl.pid") }
     public var snapshotsDirectoryURL: URL { bundleURL.appendingPathComponent("Snapshots") }
+    public var suspendStateURL: URL { bundleURL.appendingPathComponent("suspend.vzvmsave") }
 
     public func ensureBundleDirectory() throws {
         if !fileManager.fileExists(atPath: bundleURL.path) {

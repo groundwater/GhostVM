@@ -20,6 +20,8 @@ public struct VMStoredConfig: Codable {
     public var lastInstallVersion: String?
     public var lastInstallDate: Date?
     public var legacyName: String?
+    public var isSuspended: Bool
+    public var macAddress: String?
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -40,6 +42,8 @@ public struct VMStoredConfig: Codable {
         case lastInstallVersion
         case lastInstallDate
         case legacyName = "name"
+        case isSuspended
+        case macAddress
     }
 
     public init(
@@ -60,7 +64,9 @@ public struct VMStoredConfig: Codable {
         lastInstallBuild: String?,
         lastInstallVersion: String?,
         lastInstallDate: Date?,
-        legacyName: String?
+        legacyName: String?,
+        isSuspended: Bool = false,
+        macAddress: String? = nil
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -80,6 +86,32 @@ public struct VMStoredConfig: Codable {
         self.lastInstallVersion = lastInstallVersion
         self.lastInstallDate = lastInstallDate
         self.legacyName = legacyName
+        self.isSuspended = isSuspended
+        self.macAddress = macAddress
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        modifiedAt = try container.decode(Date.self, forKey: .modifiedAt)
+        cpus = try container.decode(Int.self, forKey: .cpus)
+        memoryBytes = try container.decode(UInt64.self, forKey: .memoryBytes)
+        diskBytes = try container.decode(UInt64.self, forKey: .diskBytes)
+        restoreImagePath = try container.decode(String.self, forKey: .restoreImagePath)
+        hardwareModelPath = try container.decode(String.self, forKey: .hardwareModelPath)
+        machineIdentifierPath = try container.decode(String.self, forKey: .machineIdentifierPath)
+        auxiliaryStoragePath = try container.decode(String.self, forKey: .auxiliaryStoragePath)
+        diskPath = try container.decode(String.self, forKey: .diskPath)
+        sharedFolderPath = try container.decodeIfPresent(String.self, forKey: .sharedFolderPath)
+        sharedFolderReadOnly = try container.decode(Bool.self, forKey: .sharedFolderReadOnly)
+        installed = try container.decode(Bool.self, forKey: .installed)
+        lastInstallBuild = try container.decodeIfPresent(String.self, forKey: .lastInstallBuild)
+        lastInstallVersion = try container.decodeIfPresent(String.self, forKey: .lastInstallVersion)
+        lastInstallDate = try container.decodeIfPresent(Date.self, forKey: .lastInstallDate)
+        legacyName = try container.decodeIfPresent(String.self, forKey: .legacyName)
+        isSuspended = try container.decodeIfPresent(Bool.self, forKey: .isSuspended) ?? false
+        macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {

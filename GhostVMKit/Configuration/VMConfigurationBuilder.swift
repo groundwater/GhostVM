@@ -1,24 +1,6 @@
 import Foundation
 import AppKit
 import Virtualization
-import CoreGraphics
-
-private func pixelsPerInch(for screen: NSScreen) -> Int {
-    if let screenNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
-        let sizeMillimeters = CGDisplayScreenSize(displayID)
-        let pixelWidth = CGDisplayPixelsWide(displayID)
-        if sizeMillimeters.width > 0 {
-            let widthInches = Double(sizeMillimeters.width) / 25.4
-            let computed = Double(pixelWidth) / widthInches
-            if computed.isFinite, computed > 0 {
-                return max(Int(computed.rounded()), 72)
-            }
-        }
-    }
-    let scale = max(screen.backingScaleFactor, 1.0)
-    return max(Int((110.0 * scale).rounded()), 110)
-}
 
 /// Builds VZVirtualMachineConfiguration from stored config and layout.
 public final class VMConfigurationBuilder {
@@ -53,6 +35,11 @@ public final class VMConfigurationBuilder {
         // Basic NAT networking so the guest can reach the internet via the host.
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
+        // Use persistent MAC address from config to ensure suspend/resume consistency.
+        if let macAddressString = storedConfig.macAddress,
+           let macAddress = VZMACAddress(string: macAddressString) {
+            networkDevice.macAddress = macAddress
+        }
         config.networkDevices = [networkDevice]
 
         // Serial console is always present; in headless mode we bridge STDIN/STDOUT so the user
@@ -73,30 +60,10 @@ public final class VMConfigurationBuilder {
 
         if !headless {
             // GUI mode attaches a single display plus keyboard and pointing devices so VZVirtualMachineView works.
+            // Use fixed display dimensions to ensure suspend/resume compatibility.
+            // The display will auto-resize after start if automaticallyReconfiguresDisplay is enabled (macOS 14+).
             let graphics = VZMacGraphicsDeviceConfiguration()
-            let display: VZMacGraphicsDisplayConfiguration
-            if let mainScreen = NSScreen.main {
-                if #available(macOS 14.0, *) {
-                    display = VZMacGraphicsDisplayConfiguration(for: mainScreen, sizeInPoints: mainScreen.frame.size)
-                } else {
-                    let scale = max(mainScreen.backingScaleFactor, 1.0)
-                    var width = max(Int((mainScreen.frame.width * scale).rounded()), 1024)
-                    var height = max(Int((mainScreen.frame.height * scale).rounded()), 768)
-                    if let screenNumber = mainScreen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
-                        let displayID = CGDirectDisplayID(screenNumber.uint32Value)
-                        let displayWidth = CGDisplayPixelsWide(displayID)
-                        let displayHeight = CGDisplayPixelsHigh(displayID)
-                        if displayWidth > 0, displayHeight > 0 {
-                            width = max(Int(displayWidth), 1024)
-                            height = max(Int(displayHeight), 768)
-                        }
-                    }
-                    let defaultPixelsPerInch = pixelsPerInch(for: mainScreen)
-                    display = VZMacGraphicsDisplayConfiguration(widthInPixels: width, heightInPixels: height, pixelsPerInch: defaultPixelsPerInch)
-                }
-            } else {
-                display = VZMacGraphicsDisplayConfiguration(widthInPixels: 2560, heightInPixels: 1600, pixelsPerInch: 110)
-            }
+            let display = VZMacGraphicsDisplayConfiguration(widthInPixels: 2560, heightInPixels: 1600, pixelsPerInch: 110)
             graphics.displays = [display]
             config.graphicsDevices = [graphics]
             config.keyboards = [VZUSBKeyboardConfiguration()]

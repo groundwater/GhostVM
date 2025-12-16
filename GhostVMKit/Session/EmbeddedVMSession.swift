@@ -10,6 +10,7 @@ public final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachi
         case running
         case stopping
         case stopped
+        case suspending
     }
 
     public enum SpecialKey {
@@ -123,6 +124,73 @@ public final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachi
         } else if !alreadyStopping {
             issueGracefulStop()
         }
+    }
+
+    /// Suspends the VM by pausing execution and saving state to disk.
+    public func suspend(completion: @escaping (Result<Void, Error>) -> Void) {
+        guard state == .running else {
+            completion(.failure(VMError.message("VM '\(name)' is not running.")))
+            return
+        }
+
+        state = .suspending
+        statusChanged?("Suspending \(name)…")
+
+        vmQueue.async {
+            self.virtualMachine.pause { pauseResult in
+                switch pauseResult {
+                case .success:
+                    self.virtualMachine.saveMachineStateTo(url: self.layout.suspendStateURL) { saveError in
+                        DispatchQueue.main.async {
+                            if let error = saveError {
+                                self.statusChanged?("Failed to save VM state: \(error.localizedDescription)")
+                                // Resume the VM since we failed to save
+                                self.vmQueue.async {
+                                    self.virtualMachine.resume { _ in
+                                        DispatchQueue.main.async {
+                                            self.state = .running
+                                            completion(.failure(error))
+                                        }
+                                    }
+                                }
+                                return
+                            }
+                            // Update config to mark as suspended
+                            let store = VMConfigStore(layout: self.layout)
+                            if var config = try? store.load() {
+                                config.isSuspended = true
+                                config.modifiedAt = Date()
+                                try? store.save(config)
+                            }
+                            self.statusChanged?("VM '\(self.name)' suspended.")
+                            self.handleSuspendCompletion()
+                            completion(.success(()))
+                        }
+                    }
+                case .failure(let error):
+                    DispatchQueue.main.async {
+                        self.state = .running
+                        self.statusChanged?("Failed to pause VM: \(error.localizedDescription)")
+                        completion(.failure(error))
+                    }
+                }
+            }
+        }
+    }
+
+    private func handleSuspendCompletion() {
+        if ownsLock {
+            removeVMLock(at: layout.pidFileURL)
+            ownsLock = false
+        }
+
+        state = .stopped
+        vmView.virtualMachine = nil
+        if window.isVisible {
+            window.orderOut(nil)
+        }
+
+        terminationHandler?(.success(()))
     }
 
     public func bringToFront() {

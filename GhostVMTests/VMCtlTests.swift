@@ -157,6 +157,63 @@ final class VMStoredConfigTests: XCTestCase {
         let config = try decoder.decode(VMStoredConfig.self, from: json.data(using: .utf8)!)
         XCTAssertEqual(config.legacyName, "OldVMName")
     }
+
+    func testIsSuspendedDefaultsToFalse() throws {
+        // JSON without isSuspended field should default to false
+        let json = """
+        {
+            "version": 1,
+            "createdAt": 0,
+            "modifiedAt": 0,
+            "cpus": 2,
+            "memoryBytes": 4294967296,
+            "diskBytes": 34359738368,
+            "restoreImagePath": "/restore.ipsw",
+            "hardwareModelPath": "HardwareModel.bin",
+            "machineIdentifierPath": "MachineIdentifier.bin",
+            "auxiliaryStoragePath": "AuxiliaryStorage.bin",
+            "diskPath": "disk.img",
+            "sharedFolderReadOnly": true,
+            "installed": false
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let config = try decoder.decode(VMStoredConfig.self, from: json.data(using: .utf8)!)
+        XCTAssertFalse(config.isSuspended)
+    }
+
+    func testIsSuspendedEncodeDecode() throws {
+        // JSON with isSuspended = true should decode correctly
+        let json = """
+        {
+            "version": 1,
+            "createdAt": 0,
+            "modifiedAt": 0,
+            "cpus": 2,
+            "memoryBytes": 4294967296,
+            "diskBytes": 34359738368,
+            "restoreImagePath": "/restore.ipsw",
+            "hardwareModelPath": "HardwareModel.bin",
+            "machineIdentifierPath": "MachineIdentifier.bin",
+            "auxiliaryStoragePath": "AuxiliaryStorage.bin",
+            "diskPath": "disk.img",
+            "sharedFolderReadOnly": true,
+            "installed": false,
+            "isSuspended": true
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let config = try decoder.decode(VMStoredConfig.self, from: json.data(using: .utf8)!)
+        XCTAssertTrue(config.isSuspended)
+
+        // Test round-trip
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(config)
+        let decoded = try decoder.decode(VMStoredConfig.self, from: data)
+        XCTAssertTrue(decoded.isSuspended)
+    }
 }
 
 final class VMFileLayoutTests: XCTestCase {
@@ -171,6 +228,13 @@ final class VMFileLayoutTests: XCTestCase {
         XCTAssertEqual(layout.auxiliaryStorageURL.path, "/Users/test/VMs/MyVM.GhostVM/AuxiliaryStorage.bin")
         XCTAssertEqual(layout.pidFileURL.path, "/Users/test/VMs/MyVM.GhostVM/vmctl.pid")
         XCTAssertEqual(layout.snapshotsDirectoryURL.path, "/Users/test/VMs/MyVM.GhostVM/Snapshots")
+    }
+
+    func testSuspendStateURL() {
+        let bundleURL = URL(fileURLWithPath: "/Users/test/VMs/MyVM.GhostVM")
+        let layout = VMFileLayout(bundleURL: bundleURL)
+
+        XCTAssertEqual(layout.suspendStateURL.path, "/Users/test/VMs/MyVM.GhostVM/suspend.vzvmsave")
     }
 }
 

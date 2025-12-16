@@ -4,7 +4,7 @@ import AppKit
 import GhostVMKit
 
 // Minimal runtime controller for a single VM bundle.
-// This wraps the framework's EmbeddedVMSession for SwiftUI integration.
+// Uses WindowlessVMSession so SwiftUI can manage the window.
 final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     enum State {
         case idle
@@ -24,16 +24,12 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     // Callbacks so the SwiftUI layer can reflect status into the list.
     var onStateChange: ((State) -> Void)?
 
-    private var embeddedSession: EmbeddedVMSession?
+    private var windowlessSession: WindowlessVMSession?
     private let controller = VMController()
 
     init(bundleURL: URL) {
         self.bundleURL = bundleURL.standardizedFileURL
         super.init()
-    }
-
-    var window: NSWindow? {
-        return embeddedSession?.window
     }
 
     func startIfNeeded() {
@@ -55,8 +51,9 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         transition(to: .starting, message: "Starting…")
 
         do {
-            let session = try controller.makeEmbeddedSession(bundleURL: bundleURL, runtimeSharedFolder: nil)
-            self.embeddedSession = session
+            let session = try controller.makeWindowlessSession(bundleURL: bundleURL, runtimeSharedFolder: nil)
+            self.windowlessSession = session
+            self.virtualMachine = session.virtualMachine
 
             session.stateDidChange = { [weak self] sessionState in
                 guard let self = self else { return }
@@ -70,8 +67,11 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                         self.transition(to: .running, message: "Running")
                     case .stopping:
                         self.transition(to: .stopping, message: "Stopping…")
+                    case .suspending:
+                        self.transition(to: .stopping, message: "Suspending…")
                     case .stopped:
-                        self.embeddedSession = nil
+                        self.windowlessSession = nil
+                        self.virtualMachine = nil
                         self.transition(to: .stopped, message: "Stopped")
                     }
                 }
@@ -80,11 +80,13 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             session.terminationHandler = { [weak self] result in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
-                    self.embeddedSession = nil
+                    self.windowlessSession = nil
+                    self.virtualMachine = nil
                     switch result {
                     case .success:
                         self.transition(to: .stopped, message: "Stopped")
                     case .failure(let error):
+                        print("[App2VMRunSession] termination error: \(error)")
                         self.transition(to: .failed(error.localizedDescription))
                     }
                 }
@@ -96,12 +98,16 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 case .success:
                     self.transition(to: .running, message: "Running")
                 case .failure(let error):
-                    self.embeddedSession = nil
+                    print("[App2VMRunSession] start callback error: \(error)")
+                    self.windowlessSession = nil
+                    self.virtualMachine = nil
                     self.transition(to: .failed(error.localizedDescription))
                 }
             }
         } catch {
-            self.embeddedSession = nil
+            print("[App2VMRunSession] makeWindowlessSession/start error: \(error)")
+            self.windowlessSession = nil
+            self.virtualMachine = nil
             transition(to: .failed(error.localizedDescription))
         }
     }
@@ -116,7 +122,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func stop() {
-        guard let session = embeddedSession else {
+        guard let session = windowlessSession else {
             transition(to: .stopped, message: "Stopped")
             return
         }
@@ -124,7 +130,8 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         transition(to: .stopping, message: "Stopping…")
         session.requestStop(force: false) { [weak self] result in
             guard let self = self else { return }
-            self.embeddedSession = nil
+            self.windowlessSession = nil
+            self.virtualMachine = nil
             switch result {
             case .success:
                 self.transition(to: .stopped, message: "Stopped")
@@ -132,10 +139,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 self.transition(to: .failed(error.localizedDescription))
             }
         }
-    }
-
-    func bringToFront() {
-        embeddedSession?.bringToFront()
     }
 
     private func transition(to newState: State, message: String? = nil) {

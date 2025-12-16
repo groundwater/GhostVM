@@ -17,7 +17,7 @@ targets:
     type: framework
     platform: macOS
     sources:
-      - path: Sources/GhostVMKit
+      - path: GhostVMKit
     settings:
       base:
         PRODUCT_NAME: GhostVMKit
@@ -39,7 +39,7 @@ targets:
     type: tool
     platform: macOS
     sources:
-      - path: Sources/vmctl
+      - path: GhostVM/vmctl
     dependencies:
       - target: GhostVMKit
         link: true
@@ -63,6 +63,7 @@ targets:
     sources:
       - path: GhostVM
         excludes:
+          - "vmctl"
           - "vmctl.swift"
           - "*.plist"
     dependencies:
