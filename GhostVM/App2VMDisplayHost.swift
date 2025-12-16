@@ -136,7 +136,8 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
             case .stopped, .failed:
                 return true
             default:
-                session.stopIfNeeded()
+                // Closing window triggers suspend (preserves VM state)
+                session.suspendIfNeeded()
                 return false
             }
         }

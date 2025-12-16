@@ -36,6 +36,58 @@ final class App2VMSessionRegistry {
         lock.unlock()
         session?.terminate()
     }
+
+    /// Returns true if there are any active (running) sessions.
+    var hasActiveSessions: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions.values.contains { session in
+            switch session.state {
+            case .running, .starting, .stopping, .suspending:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    /// Suspends all running sessions. Calls completion when all are done.
+    func suspendAllSessions(completion: @escaping () -> Void) {
+        lock.lock()
+        let runningSessions = sessions.values.filter { session in
+            if case .running = session.state { return true }
+            return false
+        }
+        lock.unlock()
+
+        guard !runningSessions.isEmpty else {
+            completion()
+            return
+        }
+
+        let group = DispatchGroup()
+        for session in runningSessions {
+            group.enter()
+            session.suspend()
+            // Observe state change to know when suspend completes
+            let observation = session.$state.sink { state in
+                switch state {
+                case .stopped, .failed, .idle:
+                    group.leave()
+                default:
+                    break
+                }
+            }
+            // Store observation to keep it alive until suspend completes
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                _ = observation // Keep alive
+            }
+        }
+
+        group.notify(queue: .main) {
+            completion()
+        }
+    }
 }
 
 // Minimal runtime controller for a single VM bundle.
@@ -158,6 +210,15 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         switch state {
         case .running, .starting:
             stop()
+        default:
+            break
+        }
+    }
+
+    func suspendIfNeeded() {
+        switch state {
+        case .running:
+            suspend()
         default:
             break
         }

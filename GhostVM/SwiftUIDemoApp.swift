@@ -1433,12 +1433,12 @@ struct VMWindowView: View {
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    session.suspend()
+                    session.stop()
                 } label: {
-                    Label("Suspend", systemImage: "moon.zzz")
+                    Label("Shut Down", systemImage: "stop.fill")
                 }
                 .disabled(!isRunning)
-                .help("Suspend VM and save state to disk")
+                .help("Shut down the guest OS gracefully")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button {
