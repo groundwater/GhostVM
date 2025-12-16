@@ -3,6 +3,41 @@ import AppKit
 @preconcurrency import Virtualization
 import GhostVMKit
 
+// Registry for active VM sessions, keyed by bundle path.
+// This allows the VM list to send terminate commands to running VMs.
+final class App2VMSessionRegistry {
+    static let shared = App2VMSessionRegistry()
+    private var sessions: [String: App2VMRunSession] = [:]
+    private let lock = NSLock()
+
+    private init() {}
+
+    func register(_ session: App2VMRunSession) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessions[session.bundleURL.path] = session
+    }
+
+    func unregister(_ session: App2VMRunSession) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessions.removeValue(forKey: session.bundleURL.path)
+    }
+
+    func session(for bundlePath: String) -> App2VMRunSession? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions[bundlePath]
+    }
+
+    func terminateSession(for bundlePath: String) {
+        lock.lock()
+        let session = sessions[bundlePath]
+        lock.unlock()
+        session?.terminate()
+    }
+}
+
 // Minimal runtime controller for a single VM bundle.
 // Uses WindowlessVMSession so SwiftUI can manage the window.
 final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
@@ -97,6 +132,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 guard let self = self else { return }
                 switch result {
                 case .success:
+                    App2VMSessionRegistry.shared.register(self)
                     self.transition(to: .running, message: "Running")
                 case .failure(let error):
                     print("[App2VMRunSession] start callback error: \(error)")
@@ -122,6 +158,8 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    private var stopTimeoutWorkItem: DispatchWorkItem?
+
     func stop() {
         guard let session = windowlessSession else {
             transition(to: .stopped, message: "Stopped")
@@ -129,13 +167,53 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         }
 
         transition(to: .stopping, message: "Stopping…")
+
+        // Set up a 15-second timeout
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            // Only trigger timeout if still in stopping state
+            if case .stopping = self.state {
+                self.transition(to: .failed("Stop timed out. Use Terminate to force quit."))
+            }
+        }
+        stopTimeoutWorkItem = timeoutWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeoutWorkItem)
+
         session.requestStop(force: false) { [weak self] result in
             guard let self = self else { return }
+            // Cancel the timeout since we got a response
+            self.stopTimeoutWorkItem?.cancel()
+            self.stopTimeoutWorkItem = nil
+
             self.windowlessSession = nil
             self.virtualMachine = nil
             switch result {
             case .success:
                 self.transition(to: .stopped, message: "Stopped")
+            case .failure(let error):
+                self.transition(to: .failed(error.localizedDescription))
+            }
+        }
+    }
+
+    func terminate() {
+        // Cancel any pending stop timeout
+        stopTimeoutWorkItem?.cancel()
+        stopTimeoutWorkItem = nil
+
+        guard let session = windowlessSession else {
+            transition(to: .stopped, message: "Stopped")
+            return
+        }
+
+        transition(to: .stopping, message: "Terminating…")
+        session.requestStop(force: true) { [weak self] result in
+            guard let self = self else { return }
+            self.windowlessSession = nil
+            self.virtualMachine = nil
+            switch result {
+            case .success:
+                self.transition(to: .stopped, message: "Terminated")
             case .failure(let error):
                 self.transition(to: .failed(error.localizedDescription))
             }
@@ -187,6 +265,15 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 statusText = "Error: \(text)"
             }
         }
+
+        // Unregister from session registry when VM is no longer running
+        switch newState {
+        case .stopped, .failed:
+            App2VMSessionRegistry.shared.unregister(self)
+        default:
+            break
+        }
+
         onStateChange?(newState)
     }
 }

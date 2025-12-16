@@ -23,6 +23,10 @@ public struct VMStoredConfig: Codable {
     public var legacyName: String?
     public var isSuspended: Bool
     public var macAddress: String?
+    // Linux guest support
+    public var guestOSType: String  // "macOS" or "Linux", defaults to "macOS"
+    public var efiVariableStorePath: String?  // "NVRAM.bin" for Linux
+    public var installerISOPath: String?  // Absolute path to installer ISO (not copied into bundle)
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -46,6 +50,9 @@ public struct VMStoredConfig: Codable {
         case legacyName = "name"
         case isSuspended
         case macAddress
+        case guestOSType
+        case efiVariableStorePath
+        case installerISOPath
     }
 
     public init(
@@ -69,7 +76,10 @@ public struct VMStoredConfig: Codable {
         lastInstallDate: Date?,
         legacyName: String?,
         isSuspended: Bool = false,
-        macAddress: String? = nil
+        macAddress: String? = nil,
+        guestOSType: String = "macOS",
+        efiVariableStorePath: String? = nil,
+        installerISOPath: String? = nil
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -92,6 +102,9 @@ public struct VMStoredConfig: Codable {
         self.legacyName = legacyName
         self.isSuspended = isSuspended
         self.macAddress = macAddress
+        self.guestOSType = guestOSType
+        self.efiVariableStorePath = efiVariableStorePath
+        self.installerISOPath = installerISOPath
     }
 
     public init(from decoder: Decoder) throws {
@@ -117,6 +130,10 @@ public struct VMStoredConfig: Codable {
         legacyName = try container.decodeIfPresent(String.self, forKey: .legacyName)
         isSuspended = try container.decodeIfPresent(Bool.self, forKey: .isSuspended) ?? false
         macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
+        // Linux guest support - defaults to macOS for backwards compatibility
+        guestOSType = try container.decodeIfPresent(String.self, forKey: .guestOSType) ?? "macOS"
+        efiVariableStorePath = try container.decodeIfPresent(String.self, forKey: .efiVariableStorePath)
+        installerISOPath = try container.decodeIfPresent(String.self, forKey: .installerISOPath)
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
@@ -167,6 +184,15 @@ public struct VMStoredConfig: Codable {
             case "hardwareModelPath": hardwareModelPath = relative
             case "machineIdentifierPath": machineIdentifierPath = relative
             default: break
+            }
+        }
+
+        // Normalize efiVariableStorePath (relative path for Linux VMs)
+        if let efiPath = efiVariableStorePath {
+            let (relative, didChange) = makeRelative(efiPath)
+            if didChange {
+                efiVariableStorePath = relative
+                changed = true
             }
         }
 

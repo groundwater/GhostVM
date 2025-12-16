@@ -45,6 +45,7 @@ struct GhostVMSwiftUIApp: App {
         }
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
+        .defaultSize(width: 1280, height: 800)
     }
 }
 
@@ -132,6 +133,24 @@ struct VMListDemoView: View {
                         isSelected: selectedVMID == vm.id,
                         play: {
                             openWindow(id: "vm", value: vm)
+                        },
+                        requestDelete: {
+                            vmPendingDelete = vm
+                        },
+                        requestCreateSnapshot: {
+                            vmForSnapshot = vm
+                        },
+                        requestRevertSnapshot: { name in
+                            snapshotToRevert = (vm, name)
+                        },
+                        requestDeleteSnapshot: { name in
+                            snapshotToDelete = (vm, name)
+                        },
+                        requestEdit: {
+                            vmToEdit = vm
+                        },
+                        requestTerminate: {
+                            App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
                         }
                     )
                     .tag(vm.id)
@@ -155,6 +174,9 @@ struct VMListDemoView: View {
                             },
                             requestEdit: {
                                 vmToEdit = vm
+                            },
+                            requestTerminate: {
+                                App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
                             }
                         )
                     }
@@ -307,12 +329,14 @@ struct CreateVMDemoView: View {
     @EnvironmentObject private var restoreStore: App2RestoreImageStore
     @Environment(\.openWindow) private var openWindow
 
+    @State private var osType: String = "macOS"
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
     @State private var diskGiB: String = "64"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
+    @State private var selectedISOPath: String?
     @State private var isCreating: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -327,8 +351,19 @@ struct CreateVMDemoView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Provide the required .ipsw restore image. Adjust CPU, memory, and disk as needed. Shared folder is optional.")
+            Text(osType == "macOS"
+                ? "Provide the required .ipsw restore image. Adjust CPU, memory, and disk as needed."
+                : "Provide an ARM64 Linux installer ISO. Adjust CPU, memory, and disk as needed.")
                 .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("Guest OS") {
+                Picker("", selection: $osType) {
+                    Text("macOS").tag("macOS")
+                    Text("Linux").tag("Linux")
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 200)
+            }
 
             labeledRow("CPUs") {
                 HStack(spacing: 8) {
@@ -360,8 +395,14 @@ struct CreateVMDemoView: View {
                 }
             }
 
-            labeledRow("Restore Image*") {
-                restorePicker
+            if osType == "macOS" {
+                labeledRow("Restore Image*") {
+                    restorePicker
+                }
+            } else {
+                labeledRow("Installer ISO") {
+                    isoPicker
+                }
             }
 
             labeledRow("Shared Folders") {
@@ -413,7 +454,12 @@ struct CreateVMDemoView: View {
     }
 
     private var canCreate: Bool {
-        hasRestoreOptions && selectedRestorePath != nil
+        if osType == "macOS" {
+            return hasRestoreOptions && selectedRestorePath != nil
+        } else {
+            // Linux can be created without an ISO (user can attach later)
+            return true
+        }
     }
 
     @ViewBuilder
@@ -458,6 +504,44 @@ struct CreateVMDemoView: View {
     }
 
     @ViewBuilder
+    private var isoPicker: some View {
+        HStack(spacing: 8) {
+            if let isoPath = selectedISOPath {
+                Text(URL(fileURLWithPath: isoPath).lastPathComponent)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button("Clear") {
+                    selectedISOPath = nil
+                }
+                .buttonStyle(.borderless)
+            } else {
+                Text("No ISO selected (optional)")
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Choose ISO…") {
+                chooseISOFile()
+            }
+        }
+    }
+
+    private func chooseISOFile() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowedContentTypes = [.init(filenameExtension: "iso")!]
+        panel.message = "Select an ARM64 Linux installer ISO"
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                DispatchQueue.main.async {
+                    self.selectedISOPath = url.path
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
     private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(title)
@@ -496,20 +580,36 @@ struct CreateVMDemoView: View {
     }
 
     private func create() {
-        guard canCreate, !isCreating, let restorePath = selectedRestorePath else { return }
+        guard canCreate, !isCreating else { return }
 
-        let suggestedName: String = {
+        let suggestedName: String
+        if osType == "macOS" {
+            guard let restorePath = selectedRestorePath else { return }
             let filename = URL(fileURLWithPath: restorePath)
                 .deletingPathExtension()
                 .lastPathComponent
             let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "Virtual Machine" : trimmed
-        }()
+            suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
+        } else {
+            if let isoPath = selectedISOPath {
+                let filename = URL(fileURLWithPath: isoPath)
+                    .deletingPathExtension()
+                    .lastPathComponent
+                let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+                suggestedName = trimmed.isEmpty ? "Linux VM" : trimmed
+            } else {
+                suggestedName = "Linux VM"
+            }
+        }
 
         SavePanelAdapter.chooseVMBundleURL(suggestedName: suggestedName) { url in
             guard let url else { return }
             DispatchQueue.main.async {
-                self.performCreate(at: url)
+                if self.osType == "macOS" {
+                    self.performCreate(at: url)
+                } else {
+                    self.performCreateLinux(at: url)
+                }
             }
         }
     }
@@ -554,6 +654,45 @@ struct CreateVMDemoView: View {
             }
         }
     }
+
+    private func performCreateLinux(at initialURL: URL) {
+        var bundleURL = initialURL.standardizedFileURL
+        let ext = bundleURL.pathExtension.lowercased()
+        if ext != "ghostvm" {
+            bundleURL.deletePathExtension()
+            bundleURL.appendPathExtension("GhostVM")
+        }
+
+        // Filter out empty shared folders
+        let validFolders = sharedFolders.filter { !$0.path.trimmingCharacters(in: .whitespaces).isEmpty }
+
+        var opts = LinuxInitOptions()
+        opts.cpus = Int(cpuCount) ?? 4
+        opts.memoryGiB = UInt64(memoryGiB) ?? 8
+        opts.diskGiB = UInt64(diskGiB) ?? 64
+        opts.isoPath = selectedISOPath
+        opts.sharedFolders = validFolders
+
+        isCreating = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = VMController()
+            do {
+                try controller.initLinuxVM(at: bundleURL, preferredName: nil, options: opts)
+                DispatchQueue.main.async {
+                    self.isCreating = false
+                    self.store.addBundles(from: [bundleURL])
+                    self.isPresented = false
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.isCreating = false
+                    self.errorMessage = error.localizedDescription
+                    self.isShowingError = true
+                }
+            }
+        }
+    }
 }
 
 @available(macOS 13.0, *)
@@ -561,6 +700,12 @@ struct VMRowView: View {
     let vm: App2VM
     let isSelected: Bool
     let play: () -> Void
+    let requestDelete: () -> Void
+    let requestCreateSnapshot: () -> Void
+    let requestRevertSnapshot: (String) -> Void
+    let requestDeleteSnapshot: (String) -> Void
+    let requestEdit: () -> Void
+    let requestTerminate: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -597,10 +742,12 @@ struct VMRowView: View {
                     VMContextMenu(
                         vm: vm,
                         play: play,
-                        requestDelete: {},
-                        requestCreateSnapshot: {},
-                        requestRevertSnapshot: { _ in },
-                        requestDeleteSnapshot: { _ in }
+                        requestDelete: requestDelete,
+                        requestCreateSnapshot: requestCreateSnapshot,
+                        requestRevertSnapshot: requestRevertSnapshot,
+                        requestDeleteSnapshot: requestDeleteSnapshot,
+                        requestEdit: requestEdit,
+                        requestTerminate: requestTerminate
                     )
                 } label: {
                     Image(systemName: "ellipsis")
@@ -949,6 +1096,7 @@ struct VMContextMenu: View {
     let requestRevertSnapshot: (String) -> Void
     let requestDeleteSnapshot: (String) -> Void
     let requestEdit: () -> Void
+    let requestTerminate: () -> Void
     @EnvironmentObject private var store: App2VMStore
 
     init(
@@ -958,7 +1106,8 @@ struct VMContextMenu: View {
         requestCreateSnapshot: @escaping () -> Void,
         requestRevertSnapshot: @escaping (String) -> Void,
         requestDeleteSnapshot: @escaping (String) -> Void,
-        requestEdit: @escaping () -> Void = {}
+        requestEdit: @escaping () -> Void = {},
+        requestTerminate: @escaping () -> Void = {}
     ) {
         self.vm = vm
         self.play = play
@@ -967,6 +1116,7 @@ struct VMContextMenu: View {
         self.requestRevertSnapshot = requestRevertSnapshot
         self.requestDeleteSnapshot = requestDeleteSnapshot
         self.requestEdit = requestEdit
+        self.requestTerminate = requestTerminate
     }
 
     var body: some View {
@@ -982,6 +1132,11 @@ struct VMContextMenu: View {
         Button("Stop") {
             // VM stop is coordinated by closing the VM window; for now this
             // entry is present but handled via the window close behavior.
+        }
+        .disabled(!isRunning)
+
+        Button("Terminate") {
+            requestTerminate()
         }
         .disabled(!isRunning)
 
@@ -1015,6 +1170,14 @@ struct VMContextMenu: View {
             }
         }
 
+        // Show "Detach Installer ISO" for Linux VMs with an attached ISO
+        if vm.isLinux && vm.installerISOPath != nil {
+            Button("Detach Installer ISO") {
+                detachISO()
+            }
+            .disabled(isRunning)
+        }
+
         Divider()
         Button("Show in Finder") {
             FinderAdapter.revealItem(at: vm.bundleURL)
@@ -1027,6 +1190,21 @@ struct VMContextMenu: View {
         }
         .disabled(isRunning)
     }
+
+    private func detachISO() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let controller = VMController()
+            do {
+                try controller.detachISO(bundleURL: vm.bundleURL)
+                // Refresh the VM in store by reloading it
+                DispatchQueue.main.async {
+                    store.reloadVM(at: vm.bundleURL)
+                }
+            } catch {
+                print("Failed to detach ISO: \(error)")
+            }
+        }
+    }
 }
 
 @available(macOS 13.0, *)
@@ -1034,6 +1212,7 @@ struct VMWindowView: View {
     let vm: App2VM
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
+    @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     init(vm: App2VM) {
         self.vm = vm
@@ -1050,11 +1229,19 @@ struct VMWindowView: View {
         return false
     }
 
+    private var isRunningOrStopping: Bool {
+        switch session.state {
+        case .running, .stopping:
+            return true
+        default:
+            return false
+        }
+    }
+
     var body: some View {
         ZStack {
-            App2VMDisplayHost(virtualMachine: session.virtualMachine)
-                .frame(minWidth: 800, minHeight: 500)
-                .ignoresSafeArea()
+            App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys)
+                .frame(minWidth: 1024, minHeight: 640)
             // Invisible view that coordinates window close behavior with the VM.
             App2VMWindowCoordinatorHost(session: session)
                 .frame(width: 0, height: 0)
@@ -1062,7 +1249,6 @@ struct VMWindowView: View {
             // Dark overlay when suspending to indicate the VM is not interactive
             if isSuspending {
                 Color.black.opacity(0.5)
-                    .ignoresSafeArea()
                 VStack(spacing: 12) {
                     ProgressView()
                         .scaleEffect(1.5)
@@ -1082,6 +1268,15 @@ struct VMWindowView: View {
                 }
                 .disabled(!isRunning)
                 .help("Suspend VM and save state to disk")
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    session.terminate()
+                } label: {
+                    Label("Terminate", systemImage: "xmark.circle")
+                }
+                .disabled(!isRunningOrStopping)
+                .help("Force terminate VM immediately")
             }
         }
         .onAppear {
@@ -1123,6 +1318,7 @@ struct SettingsDemoView: View {
     @State private var isVerifying: Bool = false
     @State private var showRacecarBackground: Bool = true
     @State private var iconMode: DemoIconMode = .system
+    @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     private let labelWidth: CGFloat = 130
 
@@ -1184,6 +1380,16 @@ struct SettingsDemoView: View {
             labeledRow("VM List Artwork") {
                 Toggle("Show racecar background", isOn: $showRacecarBackground)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            labeledRow("Keyboard") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Capture system keys (Cmd+Tab, etc.)", isOn: $captureSystemKeys)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("When enabled, system shortcuts are sent to the VM instead of macOS. Requires restarting the VM window.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             labeledRow("App Icon") {

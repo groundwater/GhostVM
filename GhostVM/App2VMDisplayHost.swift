@@ -6,19 +6,88 @@ import Combine
 // SwiftUI wrapper around VZVirtualMachineView so AppKit stays isolated here.
 struct App2VMDisplayHost: NSViewRepresentable {
     let virtualMachine: VZVirtualMachine?
+    let isLinux: Bool
+    let captureSystemKeys: Bool
 
-    func makeNSView(context: Context) -> VZVirtualMachineView {
-        let view = VZVirtualMachineView()
-        view.capturesSystemKeys = true
+    init(virtualMachine: VZVirtualMachine?, isLinux: Bool = false, captureSystemKeys: Bool = true) {
+        self.virtualMachine = virtualMachine
+        self.isLinux = isLinux
+        self.captureSystemKeys = captureSystemKeys
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> FocusableVMView {
+        let view = FocusableVMView()
+        view.capturesSystemKeys = captureSystemKeys
         if #available(macOS 14.0, *) {
-            view.automaticallyReconfiguresDisplay = true
+            // Only enable automatic display reconfiguration for macOS guests.
+            // Linux guests with VirtIO graphics use a fixed scanout resolution
+            // and don't handle dynamic resolution changes well.
+            view.automaticallyReconfiguresDisplay = !isLinux
         }
         view.autoresizingMask = [.width, .height]
+        context.coordinator.view = view
         return view
     }
 
-    func updateNSView(_ nsView: VZVirtualMachineView, context: Context) {
+    func updateNSView(_ nsView: FocusableVMView, context: Context) {
         nsView.virtualMachine = virtualMachine
+        // Make the view first responder when VM is attached
+        if virtualMachine != nil {
+            DispatchQueue.main.async {
+                nsView.window?.makeFirstResponder(nsView)
+            }
+        }
+    }
+
+    class Coordinator: NSObject {
+        weak var view: FocusableVMView?
+    }
+}
+
+// Custom VZVirtualMachineView subclass that properly handles first responder status
+// to ensure keyboard and mouse events are received.
+class FocusableVMView: VZVirtualMachineView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        return super.becomeFirstResponder()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Ensure we become first responder on click
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Become first responder when added to window
+        if let window = window {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                window.makeFirstResponder(self)
+            }
+            // Also observe when window becomes key
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(windowDidBecomeKey),
+                name: NSWindow.didBecomeKeyNotification,
+                object: window
+            )
+        }
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+        // When window becomes key, make sure we're first responder
+        window?.makeFirstResponder(self)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 }
 

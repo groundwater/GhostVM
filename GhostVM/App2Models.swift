@@ -8,9 +8,19 @@ struct App2VM: Identifiable, Hashable, Codable {
     var bundlePath: String
     var osVersion: String
     var status: String
+    var guestOSType: String
+    var installerISOPath: String?
 
     var bundleURL: URL {
         URL(fileURLWithPath: bundlePath).standardizedFileURL
+    }
+
+    var isLinux: Bool {
+        guestOSType == "Linux"
+    }
+
+    var isMacOS: Bool {
+        guestOSType == "macOS"
     }
 }
 
@@ -115,6 +125,24 @@ final class App2VMStore: ObservableObject {
         vms[index].status = status
     }
 
+    func reloadVM(at bundleURL: URL) {
+        let standardized = bundleURL.standardizedFileURL
+        guard let index = vms.firstIndex(where: { $0.bundleURL.path == standardized.path }) else { return }
+        guard let reloaded = try? loadVM(from: standardized) else { return }
+        // Preserve the existing ID to maintain SwiftUI identity
+        var updated = reloaded
+        updated = App2VM(
+            id: vms[index].id,
+            name: reloaded.name,
+            bundlePath: reloaded.bundlePath,
+            osVersion: reloaded.osVersion,
+            status: reloaded.status,
+            guestOSType: reloaded.guestOSType,
+            installerISOPath: reloaded.installerISOPath
+        )
+        vms[index] = updated
+    }
+
     func removeFromList(_ vm: App2VM) {
         vms.removeAll { $0.id == vm.id }
         persistKnownVMs()
@@ -173,7 +201,9 @@ final class App2VMStore: ObservableObject {
         let entry = try controller.loadEntry(for: bundleURL)
 
         let osVersion: String
-        if let version = entry.lastInstallVersion {
+        if entry.guestOSType == "Linux" {
+            osVersion = "Linux"
+        } else if let version = entry.lastInstallVersion {
             osVersion = "macOS \(version)"
         } else if entry.installed {
             osVersion = "Installed"
@@ -186,7 +216,9 @@ final class App2VMStore: ObservableObject {
             name: entry.name,
             bundlePath: bundleURL.path,
             osVersion: osVersion,
-            status: entry.statusDescription
+            status: entry.statusDescription,
+            guestOSType: entry.guestOSType,
+            installerISOPath: entry.installerISOPath
         )
     }
 }

@@ -17,6 +17,7 @@ public final class VMFileLayout {
     public var pidFileURL: URL { bundleURL.appendingPathComponent("vmctl.pid") }
     public var snapshotsDirectoryURL: URL { bundleURL.appendingPathComponent("Snapshots") }
     public var suspendStateURL: URL { bundleURL.appendingPathComponent("suspend.vzvmsave") }
+    public var efiVariableStoreURL: URL { bundleURL.appendingPathComponent("NVRAM.bin") }
 
     public func ensureBundleDirectory() throws {
         if !fileManager.fileExists(atPath: bundleURL.path) {
