@@ -49,11 +49,24 @@ struct GhostVMSwiftUIApp: App {
     }
 }
 
+// FocusedValue for passing active VM session to menu commands
+struct FocusedVMSessionKey: FocusedValueKey {
+    typealias Value = App2VMRunSession
+}
+
+extension FocusedValues {
+    var vmSession: App2VMRunSession? {
+        get { self[FocusedVMSessionKey.self] }
+        set { self[FocusedVMSessionKey.self] = newValue }
+    }
+}
+
 @available(macOS 13.0, *)
 struct DemoAppCommands: Commands {
     @ObservedObject var store: App2VMStore
     @ObservedObject var restoreStore: App2RestoreImageStore
     @Environment(\.openWindow) private var openWindow
+    @FocusedValue(\.vmSession) private var activeSession
 
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
@@ -61,6 +74,35 @@ struct DemoAppCommands: Commands {
                 openWindow(id: "settings")
             }
             .keyboardShortcut(",", modifiers: [.command])
+        }
+
+        CommandMenu("VM") {
+            Button("Start") {
+                activeSession?.startIfNeeded()
+            }
+            .keyboardShortcut("r", modifiers: [.command])
+            .disabled(!canStart)
+
+            Divider()
+
+            Button("Suspend") {
+                activeSession?.suspend()
+            }
+            .keyboardShortcut("s", modifiers: [.command, .option])
+            .disabled(!canSuspend)
+
+            Button("Shut Down") {
+                activeSession?.stop()
+            }
+            .keyboardShortcut("q", modifiers: [.command, .option])
+            .disabled(!canShutDown)
+
+            Divider()
+
+            Button("Terminate") {
+                activeSession?.terminate()
+            }
+            .disabled(!canTerminate)
         }
 
         CommandGroup(after: .windowList) {
@@ -73,6 +115,38 @@ struct DemoAppCommands: Commands {
             Button("Market") {
                 openWindow(id: "store")
             }
+        }
+    }
+
+    private var canStart: Bool {
+        guard let session = activeSession else { return false }
+        switch session.state {
+        case .idle, .stopped, .failed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private var canSuspend: Bool {
+        guard let session = activeSession else { return false }
+        if case .running = session.state { return true }
+        return false
+    }
+
+    private var canShutDown: Bool {
+        guard let session = activeSession else { return false }
+        if case .running = session.state { return true }
+        return false
+    }
+
+    private var canTerminate: Bool {
+        guard let session = activeSession else { return false }
+        switch session.state {
+        case .running, .stopping:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -1473,6 +1547,7 @@ struct VMWindowView: View {
         .onDisappear {
             session.stopIfNeeded()
         }
+        .focusedSceneValue(\.vmSession, session)
     }
 }
 
