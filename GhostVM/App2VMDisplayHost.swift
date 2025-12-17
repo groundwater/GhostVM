@@ -141,6 +141,17 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
                 return false
             }
         }
+
+        func windowWillEnterFullScreen(_ notification: Notification) {
+            guard let window = window else { return }
+            // Hide toolbar in fullscreen for immersive VM experience
+            window.toolbar?.isVisible = false
+        }
+
+        func windowWillExitFullScreen(_ notification: Notification) {
+            guard let window = window else { return }
+            window.toolbar?.isVisible = true
+        }
     }
 
     func makeCoordinator() -> Coordinator {
