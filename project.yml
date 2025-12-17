@@ -69,6 +69,11 @@ targets:
     dependencies:
       - target: GhostVMKit
         embed: true
+      - target: vmctl
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
     settings:
       base:
         PRODUCT_NAME: GhostVM
