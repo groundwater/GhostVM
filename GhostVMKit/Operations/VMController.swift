@@ -1228,6 +1228,19 @@ public final class VMController {
                 }
             }
 
+            // Clear any suspend state since it's incompatible with the reverted disk
+            if fileManager.fileExists(atPath: layout.suspendStateURL.path) {
+                try fileManager.removeItem(at: layout.suspendStateURL)
+            }
+
+            // Update config to ensure isSuspended is false
+            var updatedConfig = try store.load()
+            if updatedConfig.isSuspended {
+                updatedConfig.isSuspended = false
+                updatedConfig.modifiedAt = Date()
+                try store.save(updatedConfig)
+            }
+
             try fileManager.removeItem(at: tempDir)
             print("Reverted VM '\(vmName)' to snapshot '\(sanitized)'.")
 
