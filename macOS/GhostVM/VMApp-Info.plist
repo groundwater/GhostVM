@@ -3,32 +3,16 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>vmctl-gui</string>
-	<key>CFBundleExecutable</key>
-	<string>vmctl-gui</string>
-	<key>CFBundleIdentifier</key>
-	<string>com.groundwater.vmctl.gui</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
-	<key>CFBundleName</key>
-	<string>vmctl-gui</string>
-	<key>CFBundlePackageType</key>
-	<string>APPL</string>
-	<key>CFBundleIconFile</key>
-	<string>ghostvm</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
-	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>GhostVM</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
+			<key>CFBundleTypeIconFile</key>
+			<string>GhostVMIcon</string>
 			<key>CFBundleTypeName</key>
 			<string>GhostVM Bundle</string>
 			<key>CFBundleTypeRole</key>
 			<string>Editor</string>
-			<key>CFBundleTypeIconFile</key>
-			<string>GhostVMIcon</string>
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>com.groundwater.ghostvm</string>
@@ -37,19 +21,39 @@
 			<true/>
 		</dict>
 	</array>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIconFile</key>
+	<string>ghostvm</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>GhostVM</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>com.groundwater.ghostvm</string>
-			<key>UTTypeDescription</key>
-			<string>GhostVM bundle</string>
 			<key>UTTypeConformsTo</key>
 			<array>
 				<string>com.apple.package</string>
 			</array>
+			<key>UTTypeDescription</key>
+			<string>GhostVM bundle</string>
 			<key>UTTypeIconFile</key>
 			<string>GhostVMIcon</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.groundwater.ghostvm</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>
@@ -60,9 +64,5 @@
 			</dict>
 		</dict>
 	</array>
-	<key>LSMinimumSystemVersion</key>
-	<string>13.0</string>
-	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
 </dict>
 </plist>

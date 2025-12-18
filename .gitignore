@@ -1,7 +1,8 @@
-vmctl
 *.app
 *.dmg
 .env
 build/
+*.local.json
+*.xcodeproj/
 .claude/
 .vscode/

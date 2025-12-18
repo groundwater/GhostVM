@@ -1,0 +1,106 @@
+name: GhostVM
+options:
+  bundleIdPrefix: com.groundwater
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "15.4"
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    CLANG_ENABLE_OBJC_ARC: YES
+    CLANG_WARN_DOCUMENTATION_COMMENTS: YES
+    CLANG_WARN_UNGUARDED_AVAILABILITY: YES
+
+targets:
+  GhostVMKit:
+    type: framework
+    platform: macOS
+    sources:
+      - path: GhostVMKit
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMKit
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvmkit
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SWIFT_VERSION: "5.0"
+        DYLIB_INSTALL_NAME_BASE: "@rpath"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@loader_path/../Frameworks"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+
+  vmctl:
+    type: tool
+    platform: macOS
+    sources:
+      - path: GhostVM/vmctl
+    dependencies:
+      - target: GhostVMKit
+        link: true
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: vmctl
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+          - "@executable_path"
+
+  GhostVM:
+    type: application
+    platform: macOS
+    sources:
+      - path: GhostVM
+        excludes:
+          - "vmctl"
+          - "vmctl.swift"
+          - "*.plist"
+    dependencies:
+      - target: GhostVMKit
+        embed: true
+      - target: vmctl
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+    settings:
+      base:
+        PRODUCT_NAME: GhostVM
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm
+        INFOPLIST_FILE: GhostVM/VMApp-Info.plist
+        CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: NO
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        SWIFT_EMIT_LOC_STRINGS: NO
+        SWIFT_VERSION: "5.0"
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: YES
+
+  GhostVMTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GhostVMTests
+    dependencies:
+      - target: GhostVMKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"

@@ -1,103 +1,112 @@
 # GhostVM
 
-GhostVM ships both a native macOS app (`GhostVM.app`) and the accompanying `vmctl` command-line tool. Together they provision and manage macOS virtual machines on Apple Silicon using Apple’s `Virtualization.framework`, producing self-contained `.GhostVM` bundles wherever you choose to store them (the app defaults to `~/VMs` but any writable location works). The UI surfaces your VM inventory, status, and common actions; the CLI remains available for scripting and automation.
+GhostVM is a native macOS app and CLI tool for provisioning and managing macOS and Linux virtual machines on Apple Silicon using Apple's `Virtualization.framework`. VMs are stored as self-contained `.GhostVM` bundles.
 
 ## Requirements
 
-### Running the App
-
-- macOS 15 or newer on Apple Silicon (arm64).
-- Apple’s macOS virtualization entitlement enabled on the host.
-- Apple’s `Virtualization.framework`, which is part of macOS; end users do **not** need Xcode installed to run the packaged app.
-
-### Using the Command Line Tool
-
-- Same runtime requirements as the app.
-- Run commands against the full path to a `.GhostVM` bundle, no matter where it lives.
-
-### Building From Source
-
-- Xcode 15 (or newer) with the corresponding command-line tools installed so `swiftc` can link against `Virtualization.framework` and `AppKit`.
-- macOS 15 or newer on Apple Silicon.
-- The ability to run binaries with the macOS virtualization entitlement (granted via Terminal once per host).
+- macOS 15+ on Apple Silicon (arm64)
+- Xcode 15+ and XcodeGen for building (`brew install xcodegen`)
+- `com.apple.security.virtualization` entitlement (included in builds)
 
 ## Building
 
 ```bash
-make            # builds ./vmctl (codesigned ad-hoc with entitlements)
-make app        # builds GhostVM.app alongside vmctl
-make dmg        # produces a signed, notarized DMG ready for distribution
-make clean      # removes the binary and app bundle
+make              # Show available targets
+make cli          # Build vmctl CLI
+make app          # Build GhostVM.app via xcodebuild
+make run          # Build and run attached to terminal
+make launch       # Build and launch detached
+make test         # Run unit tests
+make dist         # Create distribution DMG with app + vmctl
+make clean        # Remove build artifacts and generated project
 ```
 
-The `make` targets rely on `swiftc` to compile both targets and link against the system frameworks in `/System/Library/Frameworks`. By default the binaries are ad-hoc signed so the virtualization entitlement is present. Override `CODESIGN_ID` with a Developer ID or other identity if you prefer. You can also override `SWIFTC`, `TARGET`, or `APP_TARGET` for custom toolchains or names.
+Builds are ad-hoc signed by default. Override `CODESIGN_ID` for a different identity.
 
-### Packaging, Signing, and Notarization
+## GUI App
 
-Local builds (`make`/`make app`) intentionally default to ad-hoc codesigning (`CODESIGN_ID=-`) so you can iterate without touching Apple’s notarization services. When you’re ready to ship the app elsewhere, run `make dmg`. That target:
+The GhostVM.app provides a SwiftUI interface for managing VMs:
 
-1. Re-signs the compiled app bundle (including the embedded `vmctl`) with Hardened Runtime using `RELEASE_CODESIGN_ID`.
-2. Creates a traditional `/Applications`-style DMG via `hdiutil`.
-3. Submits the DMG to Apple with `xcrun notarytool`, waits for approval, and staples the ticket to both the `.app` and `.dmg`.
+- Create macOS or Linux VMs with customizable CPU, memory, and disk
+- Manage restore images (IPSW) with built-in download support
+- Start, stop, suspend, and resume VMs
+- Create, revert, and delete snapshots
+- Configure shared folders (read-only or writable)
+- VM menu with keyboard shortcuts for Start, Suspend, Shut Down, and Terminate
 
-Run `make notary-info` at any time to see the Developer ID identity and Team ID discovered on your machine plus the exact `notarytool store-credentials` command to create a reusable profile. If a profile already exists, `make dmg` will auto-populate `RELEASE_CODESIGN_ID`, `NOTARY_KEYCHAIN_PROFILE`, and `NOTARY_TEAM_ID` so you only need to set overrides when using a different identity.
-
-To use it, set a Developer ID identity and either a `notarytool` keychain profile or direct credentials:
-
-```bash
-# One-time: store credentials so notarytool can use a profile
-xcrun notarytool store-credentials ghostvm-notary --apple-id "you@example.com" \
-  --team-id ABCDE12345 --password "app-specific-password"
-
-# Release build
-RELEASE_CODESIGN_ID="Developer ID Application: Your Name (ABCDE12345)" \
-NOTARY_KEYCHAIN_PROFILE=ghostvm-notary \
-make dmg
-```
-
-Alternatively, omit `NOTARY_KEYCHAIN_PROFILE` and provide `NOTARY_APPLE_ID`, `NOTARY_TEAM_ID`, and `NOTARY_PASSWORD` env vars when invoking `make dmg`. The finished DMG appears at the repository root; `GhostVM.app` inside it is already stapled, so users can copy it directly into `/Applications` without Gatekeeper warnings.
-
-## Usage
+## CLI Usage
 
 ```bash
 ./vmctl --help
 ```
 
-Key commands (all expect a full path to `*.GhostVM`):
+**macOS VM Commands:**
 
-- `init <bundle-path>` – Create a new VM bundle, generate hardware identifiers, auxiliary storage, empty disk, and config. Options: `--cpus`, `--memory`, `--disk`, `--restore-image`, `--shared-folder`, `--writable`.
-- `install <bundle-path>` – Boot the VM with `VZMacOSInstaller` using the restore image. Progress updates print to stdout.
-- `start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]` – Launch the VM. GUI mode displays a minimal AppKit window hosting `VZVirtualMachineView`; headless mode hooks the serial console to STDIO. Supplying `--shared-folder` lets you override or add a shared directory for this run (default read-only unless `--writable` is provided).
-- `stop <bundle-path>` – Request graceful shutdown; escalates to SIGKILL if the guest ignores requests.
-- `status <bundle-path>` – Report running state, PID, and configuration summary.
-- `snapshot <bundle-path> create|revert <snapname>` – External snapshots by copying bundle artifacts (coarse and space-heavy but simple).
-- The macOS app mirrors the same workflow: create a VM, then choose **Install** to run the installer with a live log/progress window, no Terminal required. Once installed, start/stop the VM directly in the UI.
+- `init <bundle-path>` – Create a new macOS VM bundle
+  - Options: `--cpus N`, `--memory GiB`, `--disk GiB`, `--restore-image PATH`, `--shared-folder PATH`, `--writable`
+- `install <bundle-path>` – Install macOS from restore image
 
-Restore images are auto-discovered (e.g. `~/Downloads/*.ipsw`, `/Applications/Install macOS*.app/Contents/SharedSupport/SharedSupport.dmg`) unless `--restore-image` is specified.
+**Linux VM Commands:**
 
-https://developer.apple.com/download/os/
+- `create-linux <bundle-path>` – Create a new Linux VM bundle
+  - Options: `--iso PATH`, `--cpus N`, `--memory GiB`, `--disk GiB`
+- `detach-iso <bundle-path>` – Remove installer ISO after installation
 
-After installation, enable Remote Login (SSH) inside the guest for comfortable headless use.
+**Common Commands:**
+
+- `start <bundle-path>` – Launch the VM (GUI by default)
+  - Options: `--headless`, `--shared-folder PATH`, `--writable|--read-only`
+- `stop <bundle-path>` – Graceful shutdown
+- `status <bundle-path>` – Report running state and config
+- `resume <bundle-path>` – Resume from suspended state
+  - Options: `--headless`, `--shared-folder PATH`, `--writable|--read-only`
+- `discard-suspend <bundle-path>` – Discard suspended state
+- `snapshot <bundle-path> list` – List snapshots
+- `snapshot <bundle-path> create|revert|delete <name>` – Manage snapshots
+
+Restore images are auto-discovered from `~/Downloads/*.ipsw` and `/Applications/Install macOS*.app`.
+
+## Examples
+
+**macOS VM:**
+
+```bash
+make cli
+./vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+./vmctl install ~/VMs/sandbox.GhostVM
+./vmctl start ~/VMs/sandbox.GhostVM
+./vmctl stop ~/VMs/sandbox.GhostVM
+```
+
+**Linux VM:**
+
+```bash
+./vmctl create-linux ~/VMs/ubuntu.GhostVM --iso ~/Downloads/ubuntu-24.04-live-server-arm64.iso --disk 50 --memory 4 --cpus 4
+./vmctl start ~/VMs/ubuntu.GhostVM
+./vmctl detach-iso ~/VMs/ubuntu.GhostVM  # After installation
+```
+
+**Suspend and Resume:**
+
+```bash
+# Use VM > Suspend menu (Cmd+Option+S) in the app, then:
+./vmctl resume ~/VMs/sandbox.GhostVM
+```
+
+**Snapshots:**
+
+```bash
+./vmctl snapshot ~/VMs/sandbox.GhostVM list
+./vmctl snapshot ~/VMs/sandbox.GhostVM create clean
+./vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
+./vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
+```
 
 ## Notes
 
-- Disk images are raw sparse files by default (64 GiB). Adjust via `--disk`.
-- NAT networking is configured via `VZNATNetworkDeviceAttachment`.
-- Shared folders (optional) use `VZVirtioFileSystemDeviceConfiguration` and default to read-only.
-- Signal handling ensures Ctrl+C issues a graceful ACPI power button request before force-stopping.
-
-## Example Workflow
-
-```bash
-make
-./vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
-./vmctl install ~/VMs/sandbox.GhostVM
-./vmctl start ~/VMs/sandbox.GhostVM          # GUI
-./vmctl start ~/VMs/sandbox.GhostVM --headless
-./vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
-./vmctl snapshot ~/VMs/sandbox.GhostVM create clean
-./vmctl stop ~/VMs/sandbox.GhostVM
-./vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
-```
-
-Enjoy experimenting with macOS VMs on Apple Silicon!
+- Disk images are raw sparse files (default 64 GiB)
+- NAT networking via `VZNATNetworkDeviceAttachment`
+- Shared folders use `VZVirtioFileSystemDeviceConfiguration` (read-only by default)
+- Linux VMs require ARM64 ISOs (aarch64); x86_64 ISOs will not work
+- Enable Remote Login (SSH) in guest for headless use
+- Apple's EULA requires macOS guests to run on Apple-branded hardware
