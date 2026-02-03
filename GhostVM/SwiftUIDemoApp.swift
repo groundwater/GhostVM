@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 import GhostVMKit
 
 @main
@@ -101,10 +102,10 @@ struct DemoAppCommands: Commands {
             }
             .disabled(activeSession == nil)
 
-            Button("Install Guest Tools…") {
-                GuestToolsInstaller.shared.installGuestTools(for: activeSession)
+            Button("Reinstall Guest Tools…") {
+                GuestToolsInstaller.shared.reinstallGuestTools(for: activeSession)
             }
-            .disabled(!canInstallGuestTools)
+            .disabled(!canReinstallGuestTools)
 
             Divider()
 
@@ -173,7 +174,7 @@ struct DemoAppCommands: Commands {
         }
     }
 
-    private var canInstallGuestTools: Bool {
+    private var canReinstallGuestTools: Bool {
         guard let session = activeSession else { return false }
         if case .running = session.state { return true }
         return false
@@ -2071,8 +2072,9 @@ final class GuestToolsInstaller: ObservableObject {
 
     private init() {}
 
-    /// Install guest tools by copying GhostTools.dmg to the VM's shared folder
-    func installGuestTools(for session: App2VMRunSession?) {
+    /// Reinstall guest tools by resetting the flag and restarting the VM.
+    /// On next start, GhostTools.dmg will be auto-attached.
+    func reinstallGuestTools(for session: App2VMRunSession?) {
         guard let session = session else {
             showError("No active VM session")
             return
@@ -2080,92 +2082,59 @@ final class GuestToolsInstaller: ObservableObject {
 
         // Check if VM is running
         guard case .running = session.state else {
-            showError("The VM must be running to install guest tools.")
+            showError("The VM must be running to reinstall guest tools.")
             return
         }
 
-        // Get the VM's shared folder configuration
         let bundleURL = session.bundleURL
-        let config: VMStoredConfig
+
+        // Reset guestToolsInstalled flag
         do {
-            config = try controller.storedConfig(at: bundleURL)
+            let layout = VMFileLayout(bundleURL: bundleURL)
+            let store = VMConfigStore(layout: layout)
+            var config = try store.load()
+            config.guestToolsInstalled = false
+            config.modifiedAt = Date()
+            try store.save(config)
         } catch {
-            showError("Unable to read VM configuration: \(error.localizedDescription)")
+            showError("Unable to update VM configuration: \(error.localizedDescription)")
             return
         }
 
-        // Find a writable shared folder
-        let writableFolder = findWritableSharedFolder(config: config)
-        guard let sharedFolderPath = writableFolder else {
-            showError("No writable shared folder is configured for this VM. Add a shared folder with read-write access in the VM settings to install guest tools.")
-            return
-        }
+        // Show info and restart the VM
+        showInfo("Guest tools will be reinstalled on next VM start.\n\nThe VM will now restart. After it boots, GhostTools.dmg will appear as a mounted disk in the guest.")
 
-        // Find the GhostTools.dmg
-        guard let dmgURL = findGhostToolsDMG() else {
-            showError("GhostTools.dmg not found. Please build it with 'make dmg' first.")
-            return
-        }
+        // Stop then start the VM to trigger reinstall
+        session.stop()
 
-        // Copy to shared folder
-        let destinationURL = URL(fileURLWithPath: sharedFolderPath).appendingPathComponent("GhostTools.dmg")
-        do {
-            let fileManager = FileManager.default
-            // Remove existing file if present
-            if fileManager.fileExists(atPath: destinationURL.path) {
-                try fileManager.removeItem(at: destinationURL)
-            }
-            try fileManager.copyItem(at: dmgURL, to: destinationURL)
-            showSuccess("GhostTools.dmg has been copied to the shared folder.\n\nIn the guest VM, open the shared folder and double-click GhostTools.dmg to install.")
-        } catch {
-            showError("Failed to copy GhostTools.dmg: \(error.localizedDescription)")
-        }
-    }
-
-    private func findWritableSharedFolder(config: VMStoredConfig) -> String? {
-        // First check the sharedFolders array for a writable folder
-        for folder in config.sharedFolders {
-            if !folder.readOnly && !folder.path.isEmpty {
-                return folder.path
+        // Observe state changes using Combine to restart the VM after it stops
+        var cancellable: AnyCancellable?
+        cancellable = session.$state.sink { newState in
+            if case .stopped = newState {
+                cancellable?.cancel()
+                // Small delay to ensure clean state
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    session.start()
+                }
             }
         }
-
-        // Fall back to legacy single shared folder
-        if let legacyPath = config.sharedFolderPath,
-           !legacyPath.isEmpty,
-           !config.sharedFolderReadOnly {
-            return legacyPath
-        }
-
-        return nil
+        // Store the cancellable to keep it alive
+        self.restartCancellable = cancellable
     }
 
-    private func findGhostToolsDMG() -> URL? {
-        // First check inside the app bundle Resources
-        if let bundleURL = Bundle.main.url(forResource: "GhostTools", withExtension: "dmg") {
-            return bundleURL
-        }
-
-        // Then check in build output directory (for development)
-        let buildDMG = URL(fileURLWithPath: "build/xcode/GhostTools.dmg")
-        if FileManager.default.fileExists(atPath: buildDMG.path) {
-            return buildDMG
-        }
-
-        return nil
-    }
+    private var restartCancellable: AnyCancellable?
 
     private func showError(_ message: String) {
         DispatchQueue.main.async {
-            self.alertTitle = "Cannot Install Guest Tools"
+            self.alertTitle = "Cannot Reinstall Guest Tools"
             self.alertMessage = message
             self.showAlert = true
         }
     }
 
-    private func showSuccess(_ message: String) {
+    private func showInfo(_ message: String) {
         DispatchQueue.main.async {
-            self.alertTitle = "Guest Tools Ready"
+            self.alertTitle = "Reinstalling Guest Tools"
             self.alertMessage = message
             self.showAlert = true
         }

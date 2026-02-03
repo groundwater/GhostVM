@@ -27,6 +27,8 @@ public struct VMStoredConfig: Codable {
     public var guestOSType: String  // "macOS" or "Linux", defaults to "macOS"
     public var efiVariableStorePath: String?  // "NVRAM.bin" for Linux
     public var installerISOPath: String?  // Absolute path to installer ISO (not copied into bundle)
+    // Guest tools installation tracking
+    public var guestToolsInstalled: Bool
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -53,6 +55,7 @@ public struct VMStoredConfig: Codable {
         case guestOSType
         case efiVariableStorePath
         case installerISOPath
+        case guestToolsInstalled
     }
 
     public init(
@@ -79,7 +82,8 @@ public struct VMStoredConfig: Codable {
         macAddress: String? = nil,
         guestOSType: String = "macOS",
         efiVariableStorePath: String? = nil,
-        installerISOPath: String? = nil
+        installerISOPath: String? = nil,
+        guestToolsInstalled: Bool = false
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -105,6 +109,7 @@ public struct VMStoredConfig: Codable {
         self.guestOSType = guestOSType
         self.efiVariableStorePath = efiVariableStorePath
         self.installerISOPath = installerISOPath
+        self.guestToolsInstalled = guestToolsInstalled
     }
 
     public init(from decoder: Decoder) throws {
@@ -134,6 +139,8 @@ public struct VMStoredConfig: Codable {
         guestOSType = try container.decodeIfPresent(String.self, forKey: .guestOSType) ?? "macOS"
         efiVariableStorePath = try container.decodeIfPresent(String.self, forKey: .efiVariableStorePath)
         installerISOPath = try container.decodeIfPresent(String.self, forKey: .installerISOPath)
+        // Guest tools installation - defaults to false for backwards compatibility
+        guestToolsInstalled = try container.decodeIfPresent(Bool.self, forKey: .guestToolsInstalled) ?? false
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
