@@ -194,44 +194,11 @@ public final class GhostClient {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
-        // VZVirtioSocketDevice.connect must NOT be called from the main thread
-        // Run the entire vsock operation on a background thread
-        return await Task.detached {
-            await self.performVsockHealthCheck(vm: vm)
-        }.value
-    }
-
-    private nonisolated func performVsockHealthCheck(vm: VZVirtualMachine) async -> Bool {
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            return false
-        }
-
-        let port = UInt32(80)
-
-        do {
-            let connection = try await socketDevice.connect(toPort: port)
-            let fileHandle = FileHandle(fileDescriptor: connection.fileDescriptor, closeOnDealloc: false)
-            defer { try? fileHandle.close() }
-
-            // Build HTTP request
-            let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-            guard let requestData = request.data(using: .utf8) else {
-                return false
-            }
-
-            try fileHandle.write(contentsOf: requestData)
-
-            // Read response (availableData will block until data arrives or connection closes)
-            let responseData = fileHandle.availableData
-
-            // Check for HTTP 200 response
-            if let responseString = String(data: responseData, encoding: .utf8) {
-                return responseString.contains("HTTP/1.1 200") || responseString.contains("HTTP/1.0 200")
-            }
-            return false
-        } catch {
-            return false
-        }
+        // TODO: VZVirtioSocketDevice.connect has strict threading requirements
+        // that conflict with Swift concurrency. Need to investigate proper approach.
+        // For now, disable vsock health check to prevent crashes.
+        // The indicator will show as "disconnected" until this is fixed.
+        return false
     }
 
     // MARK: - TCP Implementation (Development)
