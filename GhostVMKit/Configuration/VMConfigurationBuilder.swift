@@ -58,13 +58,11 @@ public final class VMConfigurationBuilder {
             storageDevices.append(usbDevice)
         }
 
-        // Auto-attach GhostTools.dmg for first-time guest tools installation (macOS only)
-        if !isLinux && !storedConfig.guestToolsInstalled {
-            if let dmgURL = Self.findGhostToolsDMG() {
-                let dmgAttachment = try VZDiskImageStorageDeviceAttachment(url: dmgURL, readOnly: true)
-                let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: dmgAttachment)
-                storageDevices.append(usbDevice)
-            }
+        // Always attach GhostTools.dmg for macOS VMs (user can eject if not needed)
+        if !isLinux, let dmgURL = Self.findGhostToolsDMG() {
+            let dmgAttachment = try VZDiskImageStorageDeviceAttachment(url: dmgURL, readOnly: true)
+            let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: dmgAttachment)
+            storageDevices.append(usbDevice)
         }
 
         config.storageDevices = storageDevices
