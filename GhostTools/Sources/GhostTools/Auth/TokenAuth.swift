@@ -1,10 +1,9 @@
 import Foundation
-import Hummingbird
 
 /// Path where the authentication token is stored on the GhostVM shared volume
 private let tokenPath = "/Volumes/GhostVM/.ghost-token"
 
-/// Token-based authentication for GhostTools HTTP/2 server
+/// Token-based authentication for GhostTools HTTP server
 /// Validates Bearer tokens against the token stored in the GhostVM volume
 actor TokenAuth {
     static let shared = TokenAuth()
@@ -91,32 +90,5 @@ actor TokenAuth {
     func clearCache() {
         cachedToken = nil
         lastTokenCheck = nil
-    }
-}
-
-/// Middleware that validates Bearer token authentication on all requests
-struct TokenAuthMiddleware<Context: RequestContext>: RouterMiddleware {
-    func handle(
-        _ request: Request,
-        context: Context,
-        next: (Request, Context) async throws -> Response
-    ) async throws -> Response {
-        // Skip auth for health check endpoint
-        if request.uri.path == "/health" {
-            return try await next(request, context)
-        }
-
-        let authHeader = request.headers[.authorization]
-        let isValid = await TokenAuth.shared.validateToken(authHeader)
-
-        guard isValid else {
-            return Response(
-                status: .unauthorized,
-                headers: [.wwwAuthenticate: "Bearer"],
-                body: .init(byteBuffer: .init(string: #"{"error":"Unauthorized"}"#))
-            )
-        }
-
-        return try await next(request, context)
     }
 }

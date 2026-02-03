@@ -1,8 +1,9 @@
 import AppKit
 import SwiftUI
+import UserNotifications
 
 /// GhostTools - Menu bar daemon for guest VM integration
-/// Provides HTTP/2 server over vsock for host-guest communication
+/// Provides HTTP/1.1 server over vsock for host-guest communication
 @main
 struct GhostToolsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -19,40 +20,63 @@ struct GhostToolsApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
-    private var server: GhostServer?
-    private var isConnected = false
+    private var server: VsockServer?
+    private var isServerRunning = false
     /// Files queued for sending to host
     private var filesToSend: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
+        requestNotificationPermission()
         startServer()
     }
 
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // Server cleanup happens automatically when app terminates
+        server?.stop()
     }
 
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
 
-        if let button = statusItem?.button {
-            // Use ghost SF Symbol or fallback to text
-            if let image = NSImage(systemSymbolName: "theatermask.and.paintbrush", accessibilityDescription: "GhostTools") {
-                button.image = image
-            } else {
-                button.title = "G"
-            }
+        if statusItem?.button != nil {
+            updateStatusIcon(connected: false)
         }
 
         updateMenu()
     }
 
+    private func updateStatusIcon(connected: Bool) {
+        guard let button = statusItem?.button else { return }
+
+        let symbolName = connected ? "circle.fill" : "circle"
+        let color = connected ? NSColor.systemGreen : NSColor.systemGray
+
+        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "GhostTools Status") {
+            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+            let configuredImage = image.withSymbolConfiguration(config)
+            button.image = configuredImage
+            button.contentTintColor = color
+        } else {
+            button.title = connected ? "G+" : "G"
+        }
+    }
+
     private func updateMenu() {
         let menu = NSMenu()
 
+        // Title (disabled)
+        let titleItem = NSMenuItem(title: "GhostTools", action: nil, keyEquivalent: "")
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         // Status item
-        let statusText = isConnected ? "Status: Connected" : "Status: Disconnected"
+        let statusText = isServerRunning ? "Status: Running" : "Status: Stopped"
         let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
@@ -147,11 +171,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         updateMenu()
 
-        // Show notification
-        let notification = NSUserNotification()
-        notification.title = "Files Ready"
-        notification.informativeText = "\(urls.count) file(s) queued for host. The host can now fetch them."
-        NSUserNotificationCenter.default.deliver(notification)
+        // Show notification using UserNotifications
+        let content = UNMutableNotificationContent()
+        content.title = "Files Ready"
+        content.body = "\(urls.count) file(s) queued for host. The host can now fetch them."
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
     }
 
     @objc private func clearFileQueue() {
@@ -173,13 +200,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startServer() {
         Task {
             do {
-                server = try await GhostServer()
-                isConnected = true
-                updateMenu()
-                try await server?.run()
+                let router = Router()
+                server = VsockServer(port: 80, router: router)
+
+                server?.onStatusChange = { [weak self] running in
+                    Task { @MainActor in
+                        self?.isServerRunning = running
+                        self?.updateStatusIcon(connected: running)
+                        self?.updateMenu()
+                    }
+                }
+
+                print("GhostTools starting vsock server on port 80...")
+                try await server?.start()
             } catch {
                 print("Failed to start server: \(error)")
-                isConnected = false
+                isServerRunning = false
+                updateStatusIcon(connected: false)
                 updateMenu()
             }
         }
