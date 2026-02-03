@@ -111,6 +111,11 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var statusText: String = ""
     @Published private(set) var virtualMachine: VZVirtualMachine?
 
+    // Clipboard sync
+    @Published var clipboardSyncMode: ClipboardSyncMode = .disabled
+    private var clipboardSyncService: ClipboardSyncService?
+    private var ghostClient: GhostClient?
+
     let bundleURL: URL
 
     // Callbacks so the SwiftUI layer can reflect status into the list.
@@ -122,6 +127,55 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     init(bundleURL: URL) {
         self.bundleURL = bundleURL.standardizedFileURL
         super.init()
+
+        // Load persisted clipboard sync mode for this VM
+        let key = "clipboardSyncMode_\(self.bundleURL.path.hashValue)"
+        if let storedMode = UserDefaults.standard.string(forKey: key),
+           let mode = ClipboardSyncMode(rawValue: storedMode) {
+            self.clipboardSyncMode = mode
+        }
+    }
+
+    /// Update clipboard sync mode and persist the setting
+    func setClipboardSyncMode(_ mode: ClipboardSyncMode) {
+        clipboardSyncMode = mode
+
+        // Persist the setting per-VM
+        let key = "clipboardSyncMode_\(bundleURL.path.hashValue)"
+        UserDefaults.standard.set(mode.rawValue, forKey: key)
+
+        // Update running service if active
+        if let service = clipboardSyncService {
+            Task { @MainActor in
+                service.setSyncMode(mode)
+            }
+        }
+    }
+
+    /// Start clipboard sync service when VM is running
+    private func startClipboardSync() {
+        guard let vm = virtualMachine else { return }
+        guard clipboardSyncMode != .disabled else { return }
+
+        Task { @MainActor in
+            let client = GhostClient(virtualMachine: vm)
+            self.ghostClient = client
+
+            let service = ClipboardSyncService(bundlePath: bundleURL.path)
+            service.syncMode = clipboardSyncMode
+            self.clipboardSyncService = service
+
+            service.start(client: client)
+        }
+    }
+
+    /// Stop clipboard sync service
+    private func stopClipboardSync() {
+        Task { @MainActor in
+            clipboardSyncService?.stop()
+            clipboardSyncService = nil
+            ghostClient = nil
+        }
     }
 
     func startIfNeeded() {
@@ -334,6 +388,16 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             case .failed(let text):
                 statusText = "Error: \(text)"
             }
+        }
+
+        // Start/stop clipboard sync based on VM state
+        switch newState {
+        case .running:
+            startClipboardSync()
+        case .stopped, .failed, .stopping, .suspending:
+            stopClipboardSync()
+        default:
+            break
         }
 
         // Unregister from session registry when VM is no longer running

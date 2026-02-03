@@ -85,6 +85,24 @@ struct DemoAppCommands: Commands {
 
             Divider()
 
+            Menu("Clipboard Sync") {
+                ForEach(ClipboardSyncMode.allCases) { mode in
+                    Button {
+                        activeSession?.setClipboardSyncMode(mode)
+                    } label: {
+                        HStack {
+                            Text(mode.displayName)
+                            if activeSession?.clipboardSyncMode == mode {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+            .disabled(activeSession == nil)
+
+            Divider()
+
             Button("Suspend") {
                 activeSession?.suspend()
             }
@@ -1451,6 +1469,23 @@ struct VMWindowView: View {
         return nil
     }
 
+    private var clipboardSyncIcon: String {
+        switch session.clipboardSyncMode {
+        case .bidirectional:
+            return "arrow.left.arrow.right.circle.fill"
+        case .hostToGuest:
+            return "arrow.right.circle.fill"
+        case .guestToHost:
+            return "arrow.left.circle.fill"
+        case .disabled:
+            return "clipboard"
+        }
+    }
+
+    private var clipboardSyncHelp: String {
+        "Clipboard Sync: \(session.clipboardSyncMode.displayName)"
+    }
+
     var body: some View {
         ZStack {
             App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys)
@@ -1505,6 +1540,25 @@ struct VMWindowView: View {
             }
         }
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    ForEach(ClipboardSyncMode.allCases) { mode in
+                        Button {
+                            session.setClipboardSyncMode(mode)
+                        } label: {
+                            HStack {
+                                Text(mode.displayName)
+                                if session.clipboardSyncMode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Clipboard Sync", systemImage: clipboardSyncIcon)
+                }
+                .help(clipboardSyncHelp)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     session.stop()
