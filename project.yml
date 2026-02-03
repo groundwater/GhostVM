@@ -66,6 +66,9 @@ targets:
           - "vmctl"
           - "vmctl.swift"
           - "*.plist"
+    resources:
+      - path: build/xcode/GhostTools.dmg
+        optional: true
     dependencies:
       - target: GhostVMKit
         embed: true

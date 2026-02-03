@@ -161,6 +161,89 @@ public final class GhostClient {
         }
     }
 
+    // MARK: - Health Check
+
+    /// Check if GhostTools is running and reachable in the guest
+    /// - Returns: true if the guest tools are responding, false otherwise
+    public func checkHealth() async -> Bool {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return await checkHealthViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return await checkHealthViaVsock(vm: vm)
+        } else {
+            return false
+        }
+    }
+
+    private func checkHealthViaTCP(host: String, port: Int) async -> Bool {
+        guard let session = urlSession else { return false }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/health")!)
+        urlRequest.httpMethod = "GET"
+        urlRequest.timeoutInterval = 2
+
+        do {
+            let (_, response) = try await session.data(for: urlRequest)
+            if let httpResponse = response as? HTTPURLResponse {
+                return httpResponse.statusCode == 200
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
+        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            return false
+        }
+
+        do {
+            let connection = try await socketDevice.connect(toPort: vsockPort)
+            let fileHandle = FileHandle(fileDescriptor: connection.fileDescriptor, closeOnDealloc: false)
+
+            // Build HTTP request
+            let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            guard let requestData = request.data(using: .utf8) else {
+                try? fileHandle.close()
+                return false
+            }
+
+            try fileHandle.write(contentsOf: requestData)
+
+            // Read response with timeout
+            let responseData = try await withTimeout(seconds: 2) {
+                fileHandle.availableData
+            }
+
+            try? fileHandle.close()
+
+            // Check for HTTP 200 response
+            if let responseString = String(data: responseData, encoding: .utf8) {
+                return responseString.contains("HTTP/1.1 200") || responseString.contains("HTTP/1.0 200")
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    /// Helper for timeout on async operations
+    private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw GhostClientError.timeout
+            }
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
+
     // MARK: - TCP Implementation (Development)
 
     private func getClipboardViaTCP(host: String, port: Int) async throws -> ClipboardGetResponse {

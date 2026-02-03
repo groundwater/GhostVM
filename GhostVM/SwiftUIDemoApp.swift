@@ -1446,6 +1446,7 @@ struct VMWindowView: View {
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
+    @StateObject private var connectionMonitor = GuestToolsConnectionMonitor()
     @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
@@ -1564,6 +1565,17 @@ struct VMWindowView: View {
         }
         .toolbar {
             ToolbarItem(placement: .automatic) {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(connectionMonitor.isConnected ? Color.green : Color.gray.opacity(0.5))
+                        .frame(width: 8, height: 8)
+                    Text("Guest Tools")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .help(connectionMonitor.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
+            }
+            ToolbarItem(placement: .automatic) {
                 Menu {
                     ForEach(ClipboardSyncMode.allCases) { mode in
                         Button {
@@ -1622,13 +1634,17 @@ struct VMWindowView: View {
             session.startIfNeeded()
         }
         .onChange(of: session.virtualMachine) { _, vm in
-            // Configure file transfer service when VM becomes available
+            // Configure services when VM becomes available
             if let vm = vm {
                 let client = GhostClient(virtualMachine: vm)
                 fileTransferService.configure(client: client)
+                connectionMonitor.configure(client: client)
+            } else {
+                connectionMonitor.stopMonitoring()
             }
         }
         .onDisappear {
+            connectionMonitor.stopMonitoring()
             session.stopIfNeeded()
         }
         .focusedSceneValue(\.vmSession, session)
@@ -2055,6 +2071,52 @@ struct MarketplaceDemoView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 380)
+    }
+}
+
+// MARK: - Guest Tools Connection Monitor
+
+@available(macOS 13.0, *)
+@MainActor
+final class GuestToolsConnectionMonitor: ObservableObject {
+    @Published private(set) var isConnected: Bool = false
+    @Published private(set) var isChecking: Bool = false
+
+    private var client: GhostClient?
+    private var checkTask: Task<Void, Never>?
+    private let checkInterval: TimeInterval = 3.0
+
+    func configure(client: GhostClient) {
+        self.client = client
+        startMonitoring()
+    }
+
+    func startMonitoring() {
+        stopMonitoring()
+        checkTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.checkConnection()
+                try? await Task.sleep(nanoseconds: UInt64((self?.checkInterval ?? 3.0) * 1_000_000_000))
+            }
+        }
+    }
+
+    func stopMonitoring() {
+        checkTask?.cancel()
+        checkTask = nil
+        isConnected = false
+    }
+
+    private func checkConnection() async {
+        guard let client = client else {
+            isConnected = false
+            return
+        }
+
+        isChecking = true
+        let connected = await client.checkHealth()
+        isConnected = connected
+        isChecking = false
     }
 }
 
