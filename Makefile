@@ -77,16 +77,21 @@ tools:
 	cd $(GHOSTTOOLS_DIR) && swift build -c release
 	@echo "GhostTools built at: $(GHOSTTOOLS_DIR)/.build/release/GhostTools"
 
-# Create GhostTools.dmg with the built executable and README
+# Create GhostTools.app bundle and package into DMG
 dmg: tools
-	@echo "Creating GhostTools.dmg..."
+	@echo "Creating GhostTools.app bundle..."
 	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)"
-	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@# Copy the built executable
-	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Copy the README
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS"
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources"
+	@# Copy executable
+	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/"
+	@# Copy Info.plist
+	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/"
+	@# Copy README to DMG root
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Create the DMG using hdiutil makehybrid (avoids mounting issues)
+	@# Ad-hoc sign the app
+	codesign --force --deep -s "-" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
+	@# Create the DMG
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
 		-hfs \
