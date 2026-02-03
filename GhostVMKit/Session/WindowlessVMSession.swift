@@ -78,6 +78,13 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
                 DispatchQueue.main.async {
                     switch result {
                     case .success:
+                        // Mark guest tools as installed after first successful start
+                        let store = VMConfigStore(layout: self.layout)
+                        if var config = try? store.load(), !config.guestToolsInstalled {
+                            config.guestToolsInstalled = true
+                            config.modifiedAt = Date()
+                            try? store.save(config)
+                        }
                         self.state = .running
                         completion(.success(()))
                     case .failure(let error):
@@ -138,6 +145,10 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
                             let store = VMConfigStore(layout: self.layout)
                             if var config = try? store.load() {
                                 config.isSuspended = false
+                                // Mark guest tools as installed after first successful start/resume
+                                if !config.guestToolsInstalled {
+                                    config.guestToolsInstalled = true
+                                }
                                 config.modifiedAt = Date()
                                 try? store.save(config)
                             }
