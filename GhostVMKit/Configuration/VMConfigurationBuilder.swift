@@ -145,6 +145,11 @@ public final class VMConfigurationBuilder {
 
         config.directorySharingDevices = directorySharingDevices
 
+        // Add vsock device for host-guest communication
+        // This enables direct socket communication between host and guest without going through the network stack
+        let socketDevice = VZVirtioSocketDeviceConfiguration()
+        config.socketDevices = [socketDevice]
+
         do {
             try config.validate()
         } catch {
