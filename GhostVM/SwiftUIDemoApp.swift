@@ -101,6 +101,11 @@ struct DemoAppCommands: Commands {
             }
             .disabled(activeSession == nil)
 
+            Button("Install Guest Tools…") {
+                GuestToolsInstaller.shared.installGuestTools(for: activeSession)
+            }
+            .disabled(!canInstallGuestTools)
+
             Divider()
 
             Button("Suspend") {
@@ -166,6 +171,12 @@ struct DemoAppCommands: Commands {
         default:
             return false
         }
+    }
+
+    private var canInstallGuestTools: Bool {
+        guard let session = activeSession else { return false }
+        if case .running = session.state { return true }
+        return false
     }
 }
 
@@ -1434,6 +1445,7 @@ struct VMWindowView: View {
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
+    @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     init(vm: App2VM) {
@@ -1619,6 +1631,13 @@ struct VMWindowView: View {
             session.stopIfNeeded()
         }
         .focusedSceneValue(\.vmSession, session)
+        .alert(guestToolsInstaller.alertTitle, isPresented: $guestToolsInstaller.showAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            if let message = guestToolsInstaller.alertMessage {
+                Text(message)
+            }
+        }
     }
 }
 
@@ -2035,5 +2054,120 @@ struct MarketplaceDemoView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 380)
+    }
+}
+
+// MARK: - Guest Tools Installer
+
+@available(macOS 13.0, *)
+final class GuestToolsInstaller: ObservableObject {
+    static let shared = GuestToolsInstaller()
+
+    @Published var alertMessage: String?
+    @Published var showAlert = false
+    @Published var alertTitle: String = ""
+
+    private let controller = VMController()
+
+    private init() {}
+
+    /// Install guest tools by copying GhostTools.dmg to the VM's shared folder
+    func installGuestTools(for session: App2VMRunSession?) {
+        guard let session = session else {
+            showError("No active VM session")
+            return
+        }
+
+        // Check if VM is running
+        guard case .running = session.state else {
+            showError("The VM must be running to install guest tools.")
+            return
+        }
+
+        // Get the VM's shared folder configuration
+        let bundleURL = session.bundleURL
+        let config: VMStoredConfig
+        do {
+            config = try controller.storedConfig(at: bundleURL)
+        } catch {
+            showError("Unable to read VM configuration: \(error.localizedDescription)")
+            return
+        }
+
+        // Find a writable shared folder
+        let writableFolder = findWritableSharedFolder(config: config)
+        guard let sharedFolderPath = writableFolder else {
+            showError("No writable shared folder is configured for this VM. Add a shared folder with read-write access in the VM settings to install guest tools.")
+            return
+        }
+
+        // Find the GhostTools.dmg
+        guard let dmgURL = findGhostToolsDMG() else {
+            showError("GhostTools.dmg not found. Please build it with 'make dmg' first.")
+            return
+        }
+
+        // Copy to shared folder
+        let destinationURL = URL(fileURLWithPath: sharedFolderPath).appendingPathComponent("GhostTools.dmg")
+        do {
+            let fileManager = FileManager.default
+            // Remove existing file if present
+            if fileManager.fileExists(atPath: destinationURL.path) {
+                try fileManager.removeItem(at: destinationURL)
+            }
+            try fileManager.copyItem(at: dmgURL, to: destinationURL)
+            showSuccess("GhostTools.dmg has been copied to the shared folder.\n\nIn the guest VM, open the shared folder and double-click GhostTools.dmg to install.")
+        } catch {
+            showError("Failed to copy GhostTools.dmg: \(error.localizedDescription)")
+        }
+    }
+
+    private func findWritableSharedFolder(config: VMStoredConfig) -> String? {
+        // First check the sharedFolders array for a writable folder
+        for folder in config.sharedFolders {
+            if !folder.readOnly && !folder.path.isEmpty {
+                return folder.path
+            }
+        }
+
+        // Fall back to legacy single shared folder
+        if let legacyPath = config.sharedFolderPath,
+           !legacyPath.isEmpty,
+           !config.sharedFolderReadOnly {
+            return legacyPath
+        }
+
+        return nil
+    }
+
+    private func findGhostToolsDMG() -> URL? {
+        // First check inside the app bundle Resources
+        if let bundleURL = Bundle.main.url(forResource: "GhostTools", withExtension: "dmg") {
+            return bundleURL
+        }
+
+        // Then check in build output directory (for development)
+        let buildDMG = URL(fileURLWithPath: "build/xcode/GhostTools.dmg")
+        if FileManager.default.fileExists(atPath: buildDMG.path) {
+            return buildDMG
+        }
+
+        return nil
+    }
+
+    private func showError(_ message: String) {
+        DispatchQueue.main.async {
+            self.alertTitle = "Cannot Install Guest Tools"
+            self.alertMessage = message
+            self.showAlert = true
+        }
+    }
+
+    private func showSuccess(_ message: String) {
+        DispatchQueue.main.async {
+            self.alertTitle = "Guest Tools Ready"
+            self.alertMessage = message
+            self.showAlert = true
+        }
     }
 }

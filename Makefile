@@ -9,7 +9,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test framework dist
+.PHONY: all cli app clean help run launch generate test framework dist tools dmg
 
 all: help
 
@@ -64,6 +64,35 @@ launch: app
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
 
+# GhostTools settings
+GHOSTTOOLS_DIR = GhostTools
+GHOSTTOOLS_BUILD_DIR = $(BUILD_DIR)/GhostTools
+GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
+
+# Build GhostTools guest agent
+tools:
+	@echo "Building GhostTools..."
+	cd $(GHOSTTOOLS_DIR) && swift build -c release
+	@echo "GhostTools built at: $(GHOSTTOOLS_DIR)/.build/release/GhostTools"
+
+# Create GhostTools.dmg with the built executable and README
+dmg: tools
+	@echo "Creating GhostTools.dmg..."
+	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)"
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@# Copy the built executable
+	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	@# Copy the README
+	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	@# Create the DMG using hdiutil makehybrid (avoids mounting issues)
+	@rm -f "$(GHOSTTOOLS_DMG)"
+	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
+		-hfs \
+		-hfs-volume-name "GhostTools" \
+		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@echo "GhostTools.dmg created at: $(GHOSTTOOLS_DMG)"
+
 # Distribution settings
 DIST_DIR = build/dist
 DMG_NAME = GhostVM
@@ -102,6 +131,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 	rm -rf $(XCODE_PROJECT)
 	rm -rf $(DIST_DIR)
+	cd $(GHOSTTOOLS_DIR) && swift package clean 2>/dev/null || true
 
 help:
 	@echo "GhostVM Build Targets:"
@@ -113,6 +143,8 @@ help:
 	@echo "  make run      - Build and run attached to terminal"
 	@echo "  make launch   - Build and launch detached"
 	@echo "  make test     - Run unit tests"
+	@echo "  make tools    - Build GhostTools guest agent"
+	@echo "  make dmg      - Create GhostTools.dmg"
 	@echo "  make dist     - Create distribution DMG with app + vmctl"
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
