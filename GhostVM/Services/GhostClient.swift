@@ -38,6 +38,16 @@ public struct ClipboardGetResponse: Codable {
     public let changeCount: Int?
 }
 
+/// Response from POST /files/receive endpoint
+public struct FileReceiveResponse: Codable {
+    public let path: String
+}
+
+/// Response from GET /files endpoint
+public struct FileListResponse: Codable {
+    public let files: [String]
+}
+
 /// Request body for POST /clipboard endpoint
 public struct ClipboardPostRequest: Codable {
     public let content: String
@@ -109,6 +119,48 @@ public final class GhostClient {
         }
     }
 
+    // MARK: - File Transfer
+
+    /// Send a file to the guest VM
+    /// - Parameters:
+    ///   - data: The file data to send
+    ///   - filename: The filename for the file in the guest
+    ///   - progressHandler: Optional callback for progress updates (0.0 to 1.0)
+    /// - Returns: The path where the file was saved in the guest
+    public func sendFile(data: Data, filename: String, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, data: data, filename: filename, progressHandler: progressHandler)
+        } else if let vm = virtualMachine {
+            return try await sendFileViaVsock(vm: vm, data: data, filename: filename, progressHandler: progressHandler)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    /// Fetch a file from the guest VM
+    /// - Parameter path: The file path in the guest to fetch
+    /// - Returns: The file data and filename
+    public func fetchFile(at path: String) async throws -> (data: Data, filename: String) {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await fetchFileViaTCP(host: tcpHost, port: tcpPort, path: path)
+        } else if let vm = virtualMachine {
+            return try await fetchFileViaVsock(vm: vm, path: path)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    /// List files available from the guest
+    public func listFiles() async throws -> [String] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await listFilesViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await listFilesViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
     // MARK: - TCP Implementation (Development)
 
     private func getClipboardViaTCP(host: String, port: Int) async throws -> ClipboardGetResponse {
@@ -173,6 +225,110 @@ public final class GhostClient {
         }
     }
 
+    private func sendFileViaTCP(host: String, port: Int, data: Data, filename: String, progressHandler: ((Double) -> Void)?) async throws -> String {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files/receive")!)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        // Encode file as base64 JSON (matching existing GhostTools endpoint)
+        let requestBody: [String: String] = [
+            "filename": filename,
+            "content": data.base64EncodedString()
+        ]
+
+        let encoder = JSONEncoder()
+        guard let body = try? encoder.encode(requestBody) else {
+            throw GhostClientError.encodingError
+        }
+        urlRequest.httpBody = body
+
+        // For TCP we don't have streaming progress, so report 0.5 when starting
+        progressHandler?(0.5)
+
+        let (responseData, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        progressHandler?(1.0)
+
+        let decoder = JSONDecoder()
+        let fileResponse = try decoder.decode(FileReceiveResponse.self, from: responseData)
+        return fileResponse.path
+    }
+
+    private func fetchFileViaTCP(host: String, port: Int, path: String) async throws -> (data: Data, filename: String) {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        // URL encode the path
+        let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files/\(encodedPath)")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        // Extract filename from Content-Disposition header or use path
+        var filename = URL(fileURLWithPath: path).lastPathComponent
+        if let contentDisposition = httpResponse.value(forHTTPHeaderField: "Content-Disposition"),
+           let filenameMatch = contentDisposition.range(of: "filename=\"([^\"]+)\"", options: .regularExpression),
+           let match = contentDisposition[filenameMatch].split(separator: "\"").dropFirst().first {
+            filename = String(match)
+        }
+
+        return (data, filename)
+    }
+
+    private func listFilesViaTCP(host: String, port: Int) async throws -> [String] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let fileResponse = try decoder.decode(FileListResponse.self, from: data)
+        return fileResponse.files
+    }
+
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -225,6 +381,95 @@ public final class GhostClient {
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
         }
+    }
+
+    private func sendFileViaVsock(vm: VZVirtualMachine, data: Data, filename: String, progressHandler: ((Double) -> Void)?) async throws -> String {
+        // Encode file as base64 JSON (matching GhostTools endpoint)
+        let requestBody: [String: String] = [
+            "filename": filename,
+            "content": data.base64EncodedString()
+        ]
+
+        let encoder = JSONEncoder()
+        guard let body = try? encoder.encode(requestBody) else {
+            throw GhostClientError.encodingError
+        }
+
+        progressHandler?(0.3)
+
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "POST",
+            path: "/api/v1/files/receive",
+            body: body,
+            contentType: "application/json"
+        )
+
+        progressHandler?(0.9)
+
+        let (statusCode, responseBody) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let responseBody = responseBody else {
+            throw GhostClientError.noContent
+        }
+
+        let decoder = JSONDecoder()
+        let fileResponse = try decoder.decode(FileReceiveResponse.self, from: responseBody)
+
+        progressHandler?(1.0)
+
+        return fileResponse.path
+    }
+
+    private func fetchFileViaVsock(vm: VZVirtualMachine, path: String) async throws -> (data: Data, filename: String) {
+        let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
+
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/files/\(encodedPath)",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponseBinary(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            throw GhostClientError.noContent
+        }
+
+        let filename = URL(fileURLWithPath: path).lastPathComponent
+        return (body, filename)
+    }
+
+    private func listFilesViaVsock(vm: VZVirtualMachine) async throws -> [String] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/files",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            throw GhostClientError.noContent
+        }
+
+        let decoder = JSONDecoder()
+        let fileResponse = try decoder.decode(FileListResponse.self, from: body)
+        return fileResponse.files
     }
 
     private func sendHTTPRequest(
@@ -344,6 +589,52 @@ public final class GhostClient {
         let body = bodyString?.data(using: .utf8)
 
         return (statusCode, body)
+    }
+
+    /// Parse HTTP response preserving binary body data
+    private func parseHTTPResponseBinary(_ data: Data) throws -> (statusCode: Int, body: Data?) {
+        // Find the header/body separator (CRLFCRLF)
+        let separator = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+        guard let separatorRange = data.range(of: separator) else {
+            // No body, try parsing header only
+            guard let responseString = String(data: data, encoding: .utf8) else {
+                throw GhostClientError.decodingError
+            }
+
+            let headerLines = responseString.components(separatedBy: "\r\n")
+            guard let statusLine = headerLines.first else {
+                throw GhostClientError.decodingError
+            }
+
+            let statusParts = statusLine.components(separatedBy: " ")
+            guard statusParts.count >= 2,
+                  let statusCode = Int(statusParts[1]) else {
+                throw GhostClientError.decodingError
+            }
+
+            return (statusCode, nil)
+        }
+
+        // Parse header section
+        let headerData = data[..<separatorRange.lowerBound]
+        guard let headerString = String(data: headerData, encoding: .utf8) else {
+            throw GhostClientError.decodingError
+        }
+
+        let headerLines = headerString.components(separatedBy: "\r\n")
+        guard let statusLine = headerLines.first else {
+            throw GhostClientError.decodingError
+        }
+
+        let statusParts = statusLine.components(separatedBy: " ")
+        guard statusParts.count >= 2,
+              let statusCode = Int(statusParts[1]) else {
+            throw GhostClientError.decodingError
+        }
+
+        // Extract binary body
+        let bodyData = data[separatorRange.upperBound...]
+        return (statusCode, bodyData.isEmpty ? nil : Data(bodyData))
     }
 
     private func withTimeout<T>(seconds: Double, operation: @escaping () -> T) async throws -> T {

@@ -21,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var server: GhostServer?
     private var isConnected = false
+    /// Files queued for sending to host
+    private var filesToSend: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupMenuBar()
@@ -57,6 +59,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Send to Host menu item
+        let sendToHostItem = NSMenuItem(title: "Send to Host...", action: #selector(sendToHost), keyEquivalent: "s")
+        sendToHostItem.target = self
+        menu.addItem(sendToHostItem)
+
+        // Show queued files submenu if any
+        if !filesToSend.isEmpty {
+            let queuedItem = NSMenuItem(title: "Queued Files (\(filesToSend.count))", action: nil, keyEquivalent: "")
+            let queuedMenu = NSMenu()
+
+            for url in filesToSend {
+                let fileItem = NSMenuItem(title: url.lastPathComponent, action: nil, keyEquivalent: "")
+                fileItem.isEnabled = false
+                queuedMenu.addItem(fileItem)
+            }
+
+            queuedMenu.addItem(NSMenuItem.separator())
+
+            let clearItem = NSMenuItem(title: "Clear Queue", action: #selector(clearFileQueue), keyEquivalent: "")
+            clearItem.target = self
+            queuedMenu.addItem(clearItem)
+
+            queuedItem.submenu = queuedMenu
+            menu.addItem(queuedItem)
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
         // Clipboard sync submenu
         let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: nil, keyEquivalent: "")
         let clipboardMenu = NSMenu()
@@ -87,6 +117,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         self.statusItem?.menu = menu
+    }
+
+    @objc private func sendToHost() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.message = "Select files to send to host"
+        panel.prompt = "Send"
+
+        panel.begin { [weak self] response in
+            guard response == .OK else { return }
+            let urls = panel.urls
+            guard !urls.isEmpty else { return }
+
+            Task { @MainActor in
+                self?.queueFilesForHost(urls)
+            }
+        }
+    }
+
+    private func queueFilesForHost(_ urls: [URL]) {
+        // Add files to queue (they will be available via GET /api/v1/files/{path})
+        for url in urls {
+            if !filesToSend.contains(url) {
+                filesToSend.append(url)
+            }
+        }
+        updateMenu()
+
+        // Show notification
+        let notification = NSUserNotification()
+        notification.title = "Files Ready"
+        notification.informativeText = "\(urls.count) file(s) queued for host. The host can now fetch them."
+        NSUserNotificationCenter.default.deliver(notification)
+    }
+
+    @objc private func clearFileQueue() {
+        filesToSend.removeAll()
+        updateMenu()
     }
 
     @objc private func clipboardModeSelected(_ sender: NSMenuItem) {
