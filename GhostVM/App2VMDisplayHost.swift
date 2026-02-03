@@ -2,21 +2,24 @@ import SwiftUI
 import AppKit
 import Virtualization
 import Combine
+import UniformTypeIdentifiers
 
 // SwiftUI wrapper around VZVirtualMachineView so AppKit stays isolated here.
 struct App2VMDisplayHost: NSViewRepresentable {
     let virtualMachine: VZVirtualMachine?
     let isLinux: Bool
     let captureSystemKeys: Bool
+    let fileTransferService: FileTransferService?
 
-    init(virtualMachine: VZVirtualMachine?, isLinux: Bool = false, captureSystemKeys: Bool = true) {
+    init(virtualMachine: VZVirtualMachine?, isLinux: Bool = false, captureSystemKeys: Bool = true, fileTransferService: FileTransferService? = nil) {
         self.virtualMachine = virtualMachine
         self.isLinux = isLinux
         self.captureSystemKeys = captureSystemKeys
+        self.fileTransferService = fileTransferService
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        Coordinator(fileTransferService: fileTransferService)
     }
 
     func makeNSView(context: Context) -> FocusableVMView {
@@ -29,12 +32,15 @@ struct App2VMDisplayHost: NSViewRepresentable {
             view.automaticallyReconfiguresDisplay = !isLinux
         }
         view.autoresizingMask = [.width, .height]
+        view.coordinator = context.coordinator
         context.coordinator.view = view
         return view
     }
 
     func updateNSView(_ nsView: FocusableVMView, context: Context) {
         nsView.virtualMachine = virtualMachine
+        nsView.coordinator = context.coordinator
+        context.coordinator.fileTransferService = fileTransferService
         // Make the view first responder when VM is attached
         if virtualMachine != nil {
             DispatchQueue.main.async {
@@ -45,13 +51,54 @@ struct App2VMDisplayHost: NSViewRepresentable {
 
     class Coordinator: NSObject {
         weak var view: FocusableVMView?
+        var fileTransferService: FileTransferService?
+
+        init(fileTransferService: FileTransferService?) {
+            self.fileTransferService = fileTransferService
+        }
     }
 }
 
 // Custom VZVirtualMachineView subclass that properly handles first responder status
-// to ensure keyboard and mouse events are received.
+// to ensure keyboard and mouse events are received, and supports file drag-and-drop.
+// Note: VZVirtualMachineView already conforms to NSDraggingDestination via NSView.
 class FocusableVMView: VZVirtualMachineView {
     override var acceptsFirstResponder: Bool { true }
+
+    /// Coordinator for handling file drops
+    weak var coordinator: App2VMDisplayHost.Coordinator?
+
+    /// Drop zone overlay view
+    private lazy var dropZoneOverlay: DropZoneOverlayView = {
+        let overlay = DropZoneOverlayView()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        overlay.isHidden = true
+        return overlay
+    }()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupDropZone()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupDropZone()
+    }
+
+    private func setupDropZone() {
+        // Register for file drops
+        registerForDraggedTypes([.fileURL])
+
+        // Add drop zone overlay
+        addSubview(dropZoneOverlay)
+        NSLayoutConstraint.activate([
+            dropZoneOverlay.topAnchor.constraint(equalTo: topAnchor),
+            dropZoneOverlay.leadingAnchor.constraint(equalTo: leadingAnchor),
+            dropZoneOverlay.trailingAnchor.constraint(equalTo: trailingAnchor),
+            dropZoneOverlay.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
 
     override func becomeFirstResponder() -> Bool {
         return super.becomeFirstResponder()
@@ -88,6 +135,164 @@ class FocusableVMView: VZVirtualMachineView {
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+
+    // MARK: - NSDraggingDestination
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard hasFileURLs(in: sender) else {
+            return []
+        }
+
+        // Show drop zone overlay
+        dropZoneOverlay.isHidden = false
+        dropZoneOverlay.alphaValue = 0
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            dropZoneOverlay.animator().alphaValue = 1
+        }
+
+        // Update service state
+        Task { @MainActor in
+            coordinator?.fileTransferService?.isDropTargetActive = true
+        }
+
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard hasFileURLs(in: sender) else {
+            return []
+        }
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        hideDropZone()
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        return hasFileURLs(in: sender)
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        hideDropZone()
+
+        guard let urls = extractFileURLs(from: sender), !urls.isEmpty else {
+            return false
+        }
+
+        // Send files to guest
+        Task { @MainActor in
+            coordinator?.fileTransferService?.sendFiles(urls)
+        }
+
+        return true
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        hideDropZone()
+    }
+
+    // MARK: - Private Helpers
+
+    private func hasFileURLs(in draggingInfo: NSDraggingInfo) -> Bool {
+        let pasteboard = draggingInfo.draggingPasteboard
+        return pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+
+    private func extractFileURLs(from draggingInfo: NSDraggingInfo) -> [URL]? {
+        let pasteboard = draggingInfo.draggingPasteboard
+        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
+            return nil
+        }
+        // Filter to only include files (not directories)
+        return urls.filter { url in
+            var isDirectory: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+        }
+    }
+
+    private func hideDropZone() {
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.2
+            dropZoneOverlay.animator().alphaValue = 0
+        } completionHandler: { [weak self] in
+            self?.dropZoneOverlay.isHidden = true
+        }
+
+        Task { @MainActor in
+            coordinator?.fileTransferService?.isDropTargetActive = false
+        }
+    }
+}
+
+// MARK: - Drop Zone Overlay View
+
+/// Visual overlay shown when dragging files over the VM window
+class DropZoneOverlayView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        // Semi-transparent overlay
+        NSColor.black.withAlphaComponent(0.5).setFill()
+        dirtyRect.fill()
+
+        // Draw dashed border
+        let borderRect = bounds.insetBy(dx: 20, dy: 20)
+        let path = NSBezierPath(roundedRect: borderRect, xRadius: 16, yRadius: 16)
+        path.lineWidth = 3
+
+        let dashPattern: [CGFloat] = [8, 4]
+        path.setLineDash(dashPattern, count: 2, phase: 0)
+
+        NSColor.white.withAlphaComponent(0.8).setStroke()
+        path.stroke()
+
+        // Draw icon and text
+        let centerX = bounds.midX
+        let centerY = bounds.midY
+
+        // Draw SF Symbol
+        if let image = NSImage(systemSymbolName: "arrow.down.doc.fill", accessibilityDescription: "Drop files") {
+            let config = NSImage.SymbolConfiguration(pointSize: 48, weight: .medium)
+            let configuredImage = image.withSymbolConfiguration(config)
+
+            let imageSize = NSSize(width: 64, height: 64)
+            let imageRect = NSRect(
+                x: centerX - imageSize.width / 2,
+                y: centerY + 10,
+                width: imageSize.width,
+                height: imageSize.height
+            )
+
+            configuredImage?.draw(in: imageRect, from: .zero, operation: .sourceOver, fraction: 0.9)
+        }
+
+        // Draw text
+        let text = "Drop files to send to VM"
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 18, weight: .medium),
+            .foregroundColor: NSColor.white.withAlphaComponent(0.9)
+        ]
+        let textSize = text.size(withAttributes: attributes)
+        let textRect = NSRect(
+            x: centerX - textSize.width / 2,
+            y: centerY - 30,
+            width: textSize.width,
+            height: textSize.height
+        )
+        text.draw(in: textRect, withAttributes: attributes)
     }
 }
 

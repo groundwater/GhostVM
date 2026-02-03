@@ -1433,6 +1433,7 @@ struct VMWindowView: View {
     let vm: App2VM
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
+    @StateObject private var fileTransferService = FileTransferService()
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     init(vm: App2VM) {
@@ -1488,7 +1489,7 @@ struct VMWindowView: View {
 
     var body: some View {
         ZStack {
-            App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys)
+            App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys, fileTransferService: fileTransferService)
                 .frame(minWidth: 1024, minHeight: 640)
             // Invisible view that coordinates window close behavior with the VM.
             App2VMWindowCoordinatorHost(session: session)
@@ -1538,6 +1539,15 @@ struct VMWindowView: View {
                         .padding(.horizontal, 40)
                 }
             }
+
+            // File transfer progress overlay
+            if fileTransferService.isTransferring {
+                VStack {
+                    Spacer()
+                    FileTransferProgressView(transfers: fileTransferService.transfers)
+                        .padding()
+                }
+            }
         }
         .toolbar {
             ToolbarItem(placement: .automatic) {
@@ -1579,7 +1589,7 @@ struct VMWindowView: View {
             }
         }
         .onAppear {
-            session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store] state in
+            session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store, weak fileTransferService] state in
                 switch state {
                 case .running:
                     store.updateStatus(for: vmID, status: "Running")
@@ -1597,6 +1607,13 @@ struct VMWindowView: View {
                 }
             }
             session.startIfNeeded()
+        }
+        .onChange(of: session.virtualMachine) { _, vm in
+            // Configure file transfer service when VM becomes available
+            if let vm = vm {
+                let client = GhostClient(virtualMachine: vm)
+                fileTransferService.configure(client: client)
+            }
         }
         .onDisappear {
             session.stopIfNeeded()
@@ -1865,6 +1882,58 @@ struct RestoreImagesDemoView: View {
         formatter.includesUnit = true
         formatter.includesActualByteCount = false
         return formatter.string(fromByteCount: Int64(speed)) + "/s"
+    }
+}
+
+// MARK: - File Transfer Progress View
+
+@available(macOS 13.0, *)
+struct FileTransferProgressView: View {
+    let transfers: [FileTransfer]
+
+    private var activeTransfers: [FileTransfer] {
+        transfers.filter { $0.state.isActive }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(activeTransfers) { transfer in
+                HStack(spacing: 12) {
+                    Image(systemName: transfer.direction == .hostToGuest ? "arrow.up.doc.fill" : "arrow.down.doc.fill")
+                        .foregroundStyle(.white)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(transfer.filename)
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if case .transferring(let progress) = transfer.state {
+                            ProgressView(value: progress)
+                                .progressViewStyle(.linear)
+                                .tint(.white)
+                        } else {
+                            ProgressView()
+                                .progressViewStyle(.linear)
+                                .tint(.white)
+                        }
+                    }
+
+                    Text(transfer.formattedSize)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+                .shadow(radius: 8)
+        )
+        .frame(maxWidth: 300)
     }
 }
 
