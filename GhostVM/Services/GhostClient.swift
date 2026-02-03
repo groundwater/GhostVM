@@ -194,29 +194,35 @@ public final class GhostClient {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
+        // VZVirtioSocketDevice.connect must NOT be called from the main thread
+        // Run the entire vsock operation on a background thread
+        return await Task.detached {
+            await self.performVsockHealthCheck(vm: vm)
+        }.value
+    }
+
+    private nonisolated func performVsockHealthCheck(vm: VZVirtualMachine) async -> Bool {
         guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
             return false
         }
 
+        let port = UInt32(80)
+
         do {
-            let connection = try await socketDevice.connect(toPort: vsockPort)
+            let connection = try await socketDevice.connect(toPort: port)
             let fileHandle = FileHandle(fileDescriptor: connection.fileDescriptor, closeOnDealloc: false)
+            defer { try? fileHandle.close() }
 
             // Build HTTP request
             let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
             guard let requestData = request.data(using: .utf8) else {
-                try? fileHandle.close()
                 return false
             }
 
             try fileHandle.write(contentsOf: requestData)
 
-            // Read response with timeout
-            let responseData = try await withTimeout(seconds: 2) {
-                fileHandle.availableData
-            }
-
-            try? fileHandle.close()
+            // Read response (availableData will block until data arrives or connection closes)
+            let responseData = fileHandle.availableData
 
             // Check for HTTP 200 response
             if let responseString = String(data: responseData, encoding: .utf8) {
@@ -225,22 +231,6 @@ public final class GhostClient {
             return false
         } catch {
             return false
-        }
-    }
-
-    /// Helper for timeout on async operations
-    private func withTimeout<T>(seconds: TimeInterval, operation: @escaping () async throws -> T) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                try await operation()
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-                throw GhostClientError.timeout
-            }
-            let result = try await group.next()!
-            group.cancelAll()
-            return result
         }
     }
 

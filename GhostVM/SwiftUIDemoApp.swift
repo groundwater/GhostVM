@@ -2093,7 +2093,7 @@ final class GuestToolsConnectionMonitor: ObservableObject {
 
     func startMonitoring() {
         stopMonitoring()
-        checkTask = Task { [weak self] in
+        checkTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 await self?.checkConnection()
                 try? await Task.sleep(nanoseconds: UInt64((self?.checkInterval ?? 3.0) * 1_000_000_000))
