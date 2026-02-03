@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 import GhostVMKit
 
 @main
@@ -85,6 +86,29 @@ struct DemoAppCommands: Commands {
 
             Divider()
 
+            Menu("Clipboard Sync") {
+                ForEach(ClipboardSyncMode.allCases) { mode in
+                    Button {
+                        activeSession?.setClipboardSyncMode(mode)
+                    } label: {
+                        HStack {
+                            Text(mode.displayName)
+                            if activeSession?.clipboardSyncMode == mode {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+            .disabled(activeSession == nil)
+
+            Button("Reinstall Guest Tools…") {
+                GuestToolsInstaller.shared.reinstallGuestTools(for: activeSession)
+            }
+            .disabled(!canReinstallGuestTools)
+
+            Divider()
+
             Button("Suspend") {
                 activeSession?.suspend()
             }
@@ -148,6 +172,12 @@ struct DemoAppCommands: Commands {
         default:
             return false
         }
+    }
+
+    private var canReinstallGuestTools: Bool {
+        guard let session = activeSession else { return false }
+        if case .running = session.state { return true }
+        return false
     }
 }
 
@@ -1415,6 +1445,8 @@ struct VMWindowView: View {
     let vm: App2VM
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
+    @StateObject private var fileTransferService = FileTransferService()
+    @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     init(vm: App2VM) {
@@ -1451,9 +1483,26 @@ struct VMWindowView: View {
         return nil
     }
 
+    private var clipboardSyncIcon: String {
+        switch session.clipboardSyncMode {
+        case .bidirectional:
+            return "arrow.left.arrow.right.circle.fill"
+        case .hostToGuest:
+            return "arrow.right.circle.fill"
+        case .guestToHost:
+            return "arrow.left.circle.fill"
+        case .disabled:
+            return "clipboard"
+        }
+    }
+
+    private var clipboardSyncHelp: String {
+        "Clipboard Sync: \(session.clipboardSyncMode.displayName)"
+    }
+
     var body: some View {
         ZStack {
-            App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys)
+            App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys, fileTransferService: fileTransferService)
                 .frame(minWidth: 1024, minHeight: 640)
             // Invisible view that coordinates window close behavior with the VM.
             App2VMWindowCoordinatorHost(session: session)
@@ -1503,8 +1552,36 @@ struct VMWindowView: View {
                         .padding(.horizontal, 40)
                 }
             }
+
+            // File transfer progress overlay
+            if fileTransferService.isTransferring {
+                VStack {
+                    Spacer()
+                    FileTransferProgressView(transfers: fileTransferService.transfers)
+                        .padding()
+                }
+            }
         }
         .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    ForEach(ClipboardSyncMode.allCases) { mode in
+                        Button {
+                            session.setClipboardSyncMode(mode)
+                        } label: {
+                            HStack {
+                                Text(mode.displayName)
+                                if session.clipboardSyncMode == mode {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Clipboard Sync", systemImage: clipboardSyncIcon)
+                }
+                .help(clipboardSyncHelp)
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     session.stop()
@@ -1525,7 +1602,7 @@ struct VMWindowView: View {
             }
         }
         .onAppear {
-            session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store] state in
+            session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store, weak fileTransferService] state in
                 switch state {
                 case .running:
                     store.updateStatus(for: vmID, status: "Running")
@@ -1544,10 +1621,24 @@ struct VMWindowView: View {
             }
             session.startIfNeeded()
         }
+        .onChange(of: session.virtualMachine) { _, vm in
+            // Configure file transfer service when VM becomes available
+            if let vm = vm {
+                let client = GhostClient(virtualMachine: vm)
+                fileTransferService.configure(client: client)
+            }
+        }
         .onDisappear {
             session.stopIfNeeded()
         }
         .focusedSceneValue(\.vmSession, session)
+        .alert(guestToolsInstaller.alertTitle, isPresented: $guestToolsInstaller.showAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            if let message = guestToolsInstaller.alertMessage {
+                Text(message)
+            }
+        }
     }
 }
 
@@ -1814,6 +1905,58 @@ struct RestoreImagesDemoView: View {
     }
 }
 
+// MARK: - File Transfer Progress View
+
+@available(macOS 13.0, *)
+struct FileTransferProgressView: View {
+    let transfers: [FileTransfer]
+
+    private var activeTransfers: [FileTransfer] {
+        transfers.filter { $0.state.isActive }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(activeTransfers) { transfer in
+                HStack(spacing: 12) {
+                    Image(systemName: transfer.direction == .hostToGuest ? "arrow.up.doc.fill" : "arrow.down.doc.fill")
+                        .foregroundStyle(.white)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(transfer.filename)
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        if case .transferring(let progress) = transfer.state {
+                            ProgressView(value: progress)
+                                .progressViewStyle(.linear)
+                                .tint(.white)
+                        } else {
+                            ProgressView()
+                                .progressViewStyle(.linear)
+                                .tint(.white)
+                        }
+                    }
+
+                    Text(transfer.formattedSize)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+                .shadow(radius: 8)
+        )
+        .frame(maxWidth: 300)
+    }
+}
+
 @available(macOS 13.0, *)
 struct MarketplaceDemoView: View {
     private struct StoreItem: Identifiable, Hashable {
@@ -1912,5 +2055,88 @@ struct MarketplaceDemoView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 380)
+    }
+}
+
+// MARK: - Guest Tools Installer
+
+@available(macOS 13.0, *)
+final class GuestToolsInstaller: ObservableObject {
+    static let shared = GuestToolsInstaller()
+
+    @Published var alertMessage: String?
+    @Published var showAlert = false
+    @Published var alertTitle: String = ""
+
+    private let controller = VMController()
+
+    private init() {}
+
+    /// Reinstall guest tools by resetting the flag and restarting the VM.
+    /// On next start, GhostTools.dmg will be auto-attached.
+    func reinstallGuestTools(for session: App2VMRunSession?) {
+        guard let session = session else {
+            showError("No active VM session")
+            return
+        }
+
+        // Check if VM is running
+        guard case .running = session.state else {
+            showError("The VM must be running to reinstall guest tools.")
+            return
+        }
+
+        let bundleURL = session.bundleURL
+
+        // Reset guestToolsInstalled flag
+        do {
+            let layout = VMFileLayout(bundleURL: bundleURL)
+            let store = VMConfigStore(layout: layout)
+            var config = try store.load()
+            config.guestToolsInstalled = false
+            config.modifiedAt = Date()
+            try store.save(config)
+        } catch {
+            showError("Unable to update VM configuration: \(error.localizedDescription)")
+            return
+        }
+
+        // Show info and restart the VM
+        showInfo("Guest tools will be reinstalled on next VM start.\n\nThe VM will now restart. After it boots, GhostTools.dmg will appear as a mounted disk in the guest.")
+
+        // Stop then start the VM to trigger reinstall
+        session.stop()
+
+        // Observe state changes using Combine to restart the VM after it stops
+        var cancellable: AnyCancellable?
+        cancellable = session.$state.sink { newState in
+            if case .stopped = newState {
+                cancellable?.cancel()
+                // Small delay to ensure clean state
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    session.start()
+                }
+            }
+        }
+        // Store the cancellable to keep it alive
+        self.restartCancellable = cancellable
+    }
+
+    private var restartCancellable: AnyCancellable?
+
+    private func showError(_ message: String) {
+        DispatchQueue.main.async {
+            self.alertTitle = "Cannot Reinstall Guest Tools"
+            self.alertMessage = message
+            self.showAlert = true
+        }
+    }
+
+    private func showInfo(_ message: String) {
+        DispatchQueue.main.async {
+            self.alertTitle = "Reinstalling Guest Tools"
+            self.alertMessage = message
+            self.showAlert = true
+        }
     }
 }

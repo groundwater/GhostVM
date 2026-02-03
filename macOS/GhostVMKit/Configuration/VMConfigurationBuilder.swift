@@ -58,6 +58,15 @@ public final class VMConfigurationBuilder {
             storageDevices.append(usbDevice)
         }
 
+        // Auto-attach GhostTools.dmg for first-time guest tools installation (macOS only)
+        if !isLinux && !storedConfig.guestToolsInstalled {
+            if let dmgURL = Self.findGhostToolsDMG() {
+                let dmgAttachment = try VZDiskImageStorageDeviceAttachment(url: dmgURL, readOnly: true)
+                let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: dmgAttachment)
+                storageDevices.append(usbDevice)
+            }
+        }
+
         config.storageDevices = storageDevices
 
         // Basic NAT networking so the guest can reach the internet via the host.
@@ -145,11 +154,31 @@ public final class VMConfigurationBuilder {
 
         config.directorySharingDevices = directorySharingDevices
 
+        // Add vsock device for host-guest communication
+        // This enables direct socket communication between host and guest without going through the network stack
+        let socketDevice = VZVirtioSocketDeviceConfiguration()
+        config.socketDevices = [socketDevice]
+
         do {
             try config.validate()
         } catch {
             throw VMError.message("Invalid VM configuration: \(error.localizedDescription)")
         }
         return config
+    }
+
+    /// Finds GhostTools.dmg in the app bundle or build output directory.
+    private static func findGhostToolsDMG() -> URL? {
+        // Check app bundle Resources first
+        if let bundleURL = Bundle.main.url(forResource: "GhostTools", withExtension: "dmg") {
+            return bundleURL
+        }
+        // Check build output directory for development
+        let buildDMG = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("build/xcode/GhostTools.dmg")
+        if FileManager.default.fileExists(atPath: buildDMG.path) {
+            return buildDMG
+        }
+        return nil
     }
 }
