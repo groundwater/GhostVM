@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// AF_VSOCK socket family constant (40 on macOS)
 private let AF_VSOCK: Int32 = 40
@@ -148,28 +149,180 @@ final class VsockServer: @unchecked Sendable {
             close(socket)
         }
 
-        // Read the HTTP request
-        var buffer = [UInt8](repeating: 0, count: 65536)
-        let bytesRead = read(socket, &buffer, buffer.count)
-
-        guard bytesRead > 0 else {
+        // Read headers first
+        guard let (headers, initialBody) = readHTTPHeaders(from: socket) else {
             return
         }
 
-        let requestData = Data(buffer[0..<bytesRead])
-
-        // Parse HTTP request
-        guard let request = HTTPParser.parseRequest(requestData) else {
+        // Parse the request line and headers
+        guard let request = HTTPParser.parseRequest(headers) else {
             let response = HTTPResponse(status: .badRequest, body: Data(#"{"error":"Invalid HTTP request"}"#.utf8))
             writeResponse(response, to: socket)
             return
         }
 
+        // Check if this is a streaming file upload
+        if request.path == "/api/v1/files/receive" && request.method == .POST {
+            let response = await handleStreamingFileReceive(
+                request: request,
+                socket: socket,
+                initialBody: initialBody
+            )
+            writeResponse(response, to: socket)
+            return
+        }
+
+        // For other requests, read the full body if needed
+        let contentLength = Int(request.header("Content-Length") ?? "0") ?? 0
+        var fullBody = initialBody
+
+        if contentLength > initialBody.count {
+            let remaining = contentLength - initialBody.count
+            if let moreData = readExactBytes(from: socket, count: remaining) {
+                fullBody.append(moreData)
+            }
+        }
+
+        // Create request with full body
+        let fullRequest = HTTPRequest(
+            method: request.method,
+            path: request.path,
+            headers: request.headers,
+            body: fullBody.isEmpty ? nil : fullBody
+        )
+
         // Route the request and get response
-        let response = await router.handle(request)
+        let response = await router.handle(fullRequest)
 
         // Write response
         writeResponse(response, to: socket)
+    }
+
+    /// Handle streaming file upload - writes directly to disk
+    private func handleStreamingFileReceive(
+        request: HTTPRequest,
+        socket: Int32,
+        initialBody: Data
+    ) async -> HTTPResponse {
+        let filename = request.header("X-Filename") ?? "received_file_\(Int(Date().timeIntervalSince1970))"
+        let contentLength = Int(request.header("Content-Length") ?? "0") ?? 0
+
+        print("[VsockServer] Streaming file receive: \(filename) (\(contentLength) bytes)")
+
+        // Create destination file
+        let downloadsURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Downloads")
+            .appendingPathComponent("GhostVM")
+
+        do {
+            try FileManager.default.createDirectory(at: downloadsURL, withIntermediateDirectories: true)
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to create directory")
+        }
+
+        let destURL = downloadsURL.appendingPathComponent(filename)
+        FileManager.default.createFile(atPath: destURL.path, contents: nil)
+
+        guard let fileHandle = FileHandle(forWritingAtPath: destURL.path) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to create file")
+        }
+
+        defer {
+            try? fileHandle.close()
+        }
+
+        // Write initial body data
+        var bytesWritten = 0
+        if !initialBody.isEmpty {
+            do {
+                try fileHandle.write(contentsOf: initialBody)
+                bytesWritten += initialBody.count
+            } catch {
+                return HTTPResponse.error(.internalServerError, message: "Failed to write file")
+            }
+        }
+
+        // Stream remaining data directly to file
+        var buffer = [UInt8](repeating: 0, count: 65536)
+        while bytesWritten < contentLength {
+            let toRead = min(buffer.count, contentLength - bytesWritten)
+            let bytesRead = read(socket, &buffer, toRead)
+
+            if bytesRead <= 0 {
+                print("[VsockServer] Read error or EOF at \(bytesWritten)/\(contentLength)")
+                break
+            }
+
+            do {
+                try fileHandle.write(contentsOf: buffer[0..<bytesRead])
+                bytesWritten += bytesRead
+
+                // Progress logging every 10MB
+                if bytesWritten % (10 * 1024 * 1024) < 65536 {
+                    let mb = bytesWritten / (1024 * 1024)
+                    let totalMB = contentLength / (1024 * 1024)
+                    print("[VsockServer] Progress: \(mb)/\(totalMB) MB")
+                }
+            } catch {
+                return HTTPResponse.error(.internalServerError, message: "Failed to write file")
+            }
+        }
+
+        print("[VsockServer] File saved: \(destURL.path) (\(bytesWritten) bytes)")
+
+        // Reveal file in Finder
+        NSWorkspace.shared.activateFileViewerSelecting([destURL])
+
+        let response = FileReceiveResponse(path: destURL.path)
+        guard let data = try? JSONEncoder().encode(response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    /// Reads HTTP headers and returns them along with any body data already read
+    private func readHTTPHeaders(from socket: Int32) -> (headers: Data, initialBody: Data)? {
+        var headerData = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let headerEnd = Data("\r\n\r\n".utf8)
+
+        while true {
+            let bytesRead = read(socket, &buffer, buffer.count)
+            if bytesRead <= 0 {
+                return headerData.isEmpty ? nil : (headerData, Data())
+            }
+
+            headerData.append(contentsOf: buffer[0..<bytesRead])
+
+            // Check for end of headers
+            if let range = headerData.range(of: headerEnd) {
+                let headers = headerData[..<range.upperBound]
+                let body = headerData[range.upperBound...]
+                return (Data(headers), Data(body))
+            }
+
+            // Safety: headers shouldn't be more than 64KB
+            if headerData.count > 65536 {
+                return nil
+            }
+        }
+    }
+
+    /// Reads exactly `count` bytes from socket
+    private func readExactBytes(from socket: Int32, count: Int) -> Data? {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: min(65536, count))
+
+        while data.count < count {
+            let toRead = min(buffer.count, count - data.count)
+            let bytesRead = read(socket, &buffer, toRead)
+            if bytesRead <= 0 {
+                break
+            }
+            data.append(contentsOf: buffer[0..<bytesRead])
+        }
+
+        return data
     }
 
     /// Writes an HTTP response to the socket

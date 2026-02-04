@@ -112,27 +112,26 @@ final class Router: @unchecked Sendable {
             return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
         }
 
-        guard let body = request.body else {
+        guard let body = request.body, !body.isEmpty else {
             return HTTPResponse.error(.badRequest, message: "Request body required")
         }
 
-        guard let fileRequest = try? JSONDecoder().decode(FileReceiveRequest.self, from: body) else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
-        }
+        // Get filename from header or generate one
+        let filename = request.header("X-Filename") ?? "received_file_\(Int(Date().timeIntervalSince1970))"
 
-        guard let content = Data(base64Encoded: fileRequest.content) else {
-            return HTTPResponse.error(.badRequest, message: "Invalid base64 content")
-        }
+        print("[Router] Receiving file: \(filename) (\(body.count) bytes)")
 
         do {
-            let savedURL = try FileService.shared.receiveFile(data: content, filename: fileRequest.filename)
+            let savedURL = try FileService.shared.receiveFile(data: body, filename: filename)
             let response = FileReceiveResponse(path: savedURL.path)
 
             guard let data = try? JSONEncoder().encode(response) else {
                 return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
             }
+            print("[Router] File saved to: \(savedURL.path)")
             return HTTPResponse.json(data)
         } catch {
+            print("[Router] Failed to save file: \(error)")
             return HTTPResponse.error(.internalServerError, message: "Failed to save file: \(error.localizedDescription)")
         }
     }
@@ -187,10 +186,6 @@ struct ClipboardResponse: Codable {
     let content: String
 }
 
-struct FileReceiveRequest: Codable {
-    let filename: String
-    let content: String // base64 encoded
-}
 
 struct FileReceiveResponse: Codable {
     let path: String

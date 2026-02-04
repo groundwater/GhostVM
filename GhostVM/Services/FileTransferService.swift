@@ -69,21 +69,49 @@ public final class FileTransferService: ObservableObject {
         self.ghostClient = client
     }
 
+    /// Queue of files pending transfer
+    private var pendingFiles: [URL] = []
+    private var isProcessingQueue = false
+
     /// Send files to the guest VM
     /// - Parameter urls: File URLs to send
     public func sendFiles(_ urls: [URL]) {
-        guard let client = ghostClient else {
+        print("[FileTransfer] sendFiles called with \(urls.count) file(s)")
+        guard ghostClient != nil else {
+            print("[FileTransfer] ERROR: ghostClient is nil!")
             lastError = "Not connected to guest"
             return
         }
 
-        for url in urls {
-            sendFile(url, client: client)
+        // Add to queue
+        pendingFiles.append(contentsOf: urls)
+        print("[FileTransfer] Queued \(urls.count) file(s), total pending: \(pendingFiles.count)")
+
+        // Start processing if not already
+        processNextFile()
+    }
+
+    /// Process files one at a time
+    private func processNextFile() {
+        guard !isProcessingQueue else { return }
+        guard let client = ghostClient else { return }
+        guard !pendingFiles.isEmpty else { return }
+
+        isProcessingQueue = true
+        let url = pendingFiles.removeFirst()
+
+        print("[FileTransfer] Processing: \(url.lastPathComponent) (\(pendingFiles.count) remaining)")
+        sendFile(url, client: client) { [weak self] in
+            // Completion callback - process next file
+            Task { @MainActor in
+                self?.isProcessingQueue = false
+                self?.processNextFile()
+            }
         }
     }
 
-    /// Send a single file to the guest VM
-    private func sendFile(_ url: URL, client: GhostClient) {
+    /// Send a single file to the guest VM (streaming)
+    private func sendFile(_ url: URL, client: GhostClient, completion: (() -> Void)? = nil) {
         let filename = url.lastPathComponent
 
         // Get file size
@@ -93,6 +121,7 @@ public final class FileTransferService: ObservableObject {
             fileSize = (attributes[.size] as? Int64) ?? 0
         } catch {
             lastError = "Cannot read file: \(error.localizedDescription)"
+            completion?()
             return
         }
 
@@ -103,28 +132,38 @@ public final class FileTransferService: ObservableObject {
 
         let transferId = transfer.id
 
-        Task {
+        // Run transfer on background thread to keep UI responsive
+        Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                // Read file data
-                let data = try Data(contentsOf: url)
+                print("[FileTransfer] Streaming file: \(filename) (\(fileSize) bytes)")
 
-                updateTransferState(id: transferId, state: .transferring(progress: 0))
+                await MainActor.run {
+                    self?.updateTransferState(id: transferId, state: .transferring(progress: 0))
+                }
 
-                // Send to guest
-                let savedPath = try await client.sendFile(data: data, filename: filename) { [weak self] progress in
+                // Stream to guest (no memory loading)
+                let savedPath = try await client.sendFile(fileURL: url) { progress in
                     Task { @MainActor in
                         self?.updateTransferState(id: transferId, state: .transferring(progress: progress))
                     }
                 }
 
-                updateTransferState(id: transferId, state: .completed(path: savedPath))
+                print("[FileTransfer] Success! Saved at: \(savedPath)")
+                await MainActor.run {
+                    self?.updateTransferState(id: transferId, state: .completed(path: savedPath))
+                    self?.updateIsTransferring()
+                    completion?()
+                }
 
             } catch {
-                updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
-                lastError = "Transfer failed: \(error.localizedDescription)"
+                print("[FileTransfer] FAILED: \(error)")
+                await MainActor.run {
+                    self?.updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
+                    self?.lastError = "Transfer failed: \(error.localizedDescription)"
+                    self?.updateIsTransferring()
+                    completion?()
+                }
             }
-
-            updateIsTransferring()
         }
     }
 
@@ -216,11 +255,16 @@ public final class FileTransferService: ObservableObject {
     private func updateTransferState(id: UUID, state: FileTransferState) {
         if let index = transfers.firstIndex(where: { $0.id == id }) {
             transfers[index].state = state
+            print("[FileTransfer] State updated: \(state)")
         }
     }
 
     private func updateIsTransferring() {
+        let wasTransferring = isTransferring
         isTransferring = transfers.contains { $0.state.isActive }
+        if wasTransferring != isTransferring {
+            print("[FileTransfer] isTransferring changed: \(isTransferring)")
+        }
     }
 
     private func showSavePanelAsync(suggestedFilename: String) async -> URL? {
