@@ -26,6 +26,8 @@ final class Router: @unchecked Sendable {
             return handleFileReceive(request)
         } else if path.hasPrefix("/api/v1/files/") {
             return handleFileGet(request)
+        } else if path == "/api/v1/urls" {
+            return handleURLs(request)
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
@@ -179,6 +181,34 @@ final class Router: @unchecked Sendable {
             return HTTPResponse.error(.notFound, message: "File not found")
         }
     }
+
+    // MARK: - URLs
+
+    private func handleURLs(_ request: HTTPRequest) -> HTTPResponse {
+        switch request.method {
+        case .GET:
+            // Get and clear pending URLs atomically
+            let urls = URLService.shared.popAllURLs()
+            if !urls.isEmpty {
+                print("[Router] GET /urls - returning \(urls.count) URL(s)")
+            }
+            let response = URLListResponse(urls: urls)
+
+            guard let data = try? JSONEncoder().encode(response) else {
+                return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+            }
+            return HTTPResponse.json(data)
+
+        case .DELETE:
+            // Clear the URL queue (without returning them)
+            URLService.shared.clearPendingURLs()
+            print("[Router] DELETE /urls - queue cleared")
+            return HTTPResponse(status: .ok)
+
+        default:
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+    }
 }
 
 // MARK: - Request/Response Types
@@ -203,4 +233,8 @@ struct FileReceiveResponse: Codable {
 
 struct FileListResponse: Codable {
     let files: [String]
+}
+
+struct URLListResponse: Codable {
+    let urls: [String]
 }

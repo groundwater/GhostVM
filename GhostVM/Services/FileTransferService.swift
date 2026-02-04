@@ -84,12 +84,27 @@ public final class FileTransferService: ObservableObject {
         }
     }
 
-    /// Check how many files are queued in the guest
+    /// Check how many files are queued in the guest and fetch pending URLs
     private func checkGuestQueue() async {
         guard let client = ghostClient else { return }
+
+        // Check for queued files
         do {
             let files = try await client.listFiles()
             queuedGuestFileCount = files.count
+        } catch {
+            // Silently fail - guest might not be connected
+        }
+
+        // Check for URLs to open on host
+        do {
+            let urls = try await client.fetchPendingURLs()
+            for urlString in urls {
+                if let url = URL(string: urlString) {
+                    print("[FileTransfer] Opening URL from guest: \(urlString)")
+                    NSWorkspace.shared.open(url)
+                }
+            }
         } catch {
             // Silently fail - guest might not be connected
         }

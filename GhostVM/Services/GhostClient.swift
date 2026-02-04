@@ -48,6 +48,11 @@ public struct FileListResponse: Codable {
     public let files: [String]
 }
 
+/// Response from GET /urls endpoint
+public struct URLListResponse: Codable {
+    public let urls: [String]
+}
+
 /// Request body for POST /clipboard endpoint
 public struct ClipboardPostRequest: Codable {
     public let content: String
@@ -175,6 +180,19 @@ public final class GhostClient {
             try await clearFileQueueViaTCP(host: tcpHost, port: tcpPort)
         } else if let vm = virtualMachine {
             try await clearFileQueueViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - URL Forwarding
+
+    /// Fetch and clear pending URLs from guest (URLs to open on host)
+    public func fetchPendingURLs() async throws -> [String] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await fetchURLsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await fetchURLsViaVsock(vm: vm)
         } else {
             throw GhostClientError.notConnected
         }
@@ -444,6 +462,32 @@ public final class GhostClient {
         }
     }
 
+    private func fetchURLsViaTCP(host: String, port: Int) async throws -> [String] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/urls")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let urlResponse = try decoder.decode(URLListResponse.self, from: data)
+        return urlResponse.urls
+    }
+
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -674,6 +718,29 @@ public final class GhostClient {
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
         }
+    }
+
+    private func fetchURLsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/urls",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let urlResponse = try decoder.decode(URLListResponse.self, from: body)
+        return urlResponse.urls
     }
 
     private func sendHTTPRequest(
