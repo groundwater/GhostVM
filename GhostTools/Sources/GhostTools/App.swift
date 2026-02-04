@@ -2,6 +2,9 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
+/// GhostTools version - update this when making changes to verify correct binary is running
+let kGhostToolsVersion = "1.1.0-folder-structure"
+
 /// GhostTools - Menu bar daemon for guest VM integration
 /// Provides HTTP/1.1 server over vsock for host-guest communication
 @main
@@ -29,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("[GhostTools] Application launched")
+        print("[GhostTools] Application launched - version \(kGhostToolsVersion)")
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()

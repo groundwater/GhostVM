@@ -204,23 +204,30 @@ final class VsockServer: @unchecked Sendable {
         socket: Int32,
         initialBody: Data
     ) async -> HTTPResponse {
-        let filename = request.header("X-Filename") ?? "received_file_\(Int(Date().timeIntervalSince1970))"
+        let rawFilename = request.header("X-Filename") ?? "received_file_\(Int(Date().timeIntervalSince1970))"
         let contentLength = Int(request.header("Content-Length") ?? "0") ?? 0
+
+        // Sanitize the path to prevent traversal while preserving folder structure
+        let filename = sanitizeRelativePath(rawFilename)
 
         print("[VsockServer] Streaming file receive: \(filename) (\(contentLength) bytes)")
 
-        // Create destination file
-        let downloadsURL = FileManager.default.homeDirectoryForCurrentUser
+        // Base directory for received files
+        let baseURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Downloads")
             .appendingPathComponent("GhostVM")
 
+        let destURL = baseURL.appendingPathComponent(filename)
+
+        // Create ALL intermediate directories (including subfolders in the relative path)
+        let parentDir = destURL.deletingLastPathComponent()
         do {
-            try FileManager.default.createDirectory(at: downloadsURL, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
         } catch {
-            return HTTPResponse.error(.internalServerError, message: "Failed to create directory")
+            print("[VsockServer] Failed to create directory: \(parentDir.path) - \(error)")
+            return HTTPResponse.error(.internalServerError, message: "Failed to create directory: \(error.localizedDescription)")
         }
 
-        let destURL = downloadsURL.appendingPathComponent(filename)
         FileManager.default.createFile(atPath: destURL.path, contents: nil)
 
         guard let fileHandle = FileHandle(forWritingAtPath: destURL.path) else {
@@ -341,5 +348,20 @@ final class VsockServer: @unchecked Sendable {
             serverSocket = -1
         }
         onStatusChange?(false)
+    }
+
+    /// Sanitize a relative path, preserving folder structure but preventing traversal attacks
+    private func sanitizeRelativePath(_ path: String) -> String {
+        // Split into components and filter out dangerous ones
+        let components = path.components(separatedBy: "/")
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+            .map { $0.replacingOccurrences(of: "..", with: "_").replacingOccurrences(of: "\\", with: "_") }
+
+        // Ensure we have at least a filename
+        if components.isEmpty {
+            return "unnamed"
+        }
+
+        return components.joined(separator: "/")
     }
 }

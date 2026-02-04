@@ -95,14 +95,14 @@ public final class FileTransferService: ObservableObject {
         }
     }
 
-    /// Queue of files pending transfer
-    private var pendingFiles: [URL] = []
+    /// Queue of files pending transfer (with relative paths for folder structure)
+    private var pendingFiles: [FileWithRelativePath] = []
     private var isProcessingQueue = false
 
     /// Send files to the guest VM
-    /// - Parameter urls: File URLs to send
-    public func sendFiles(_ urls: [URL]) {
-        print("[FileTransfer] sendFiles called with \(urls.count) file(s)")
+    /// - Parameter files: Files with their relative paths to send
+    public func sendFiles(_ files: [FileWithRelativePath]) {
+        print("[FileTransfer] sendFiles called with \(files.count) file(s)")
         guard ghostClient != nil else {
             print("[FileTransfer] ERROR: ghostClient is nil!")
             lastError = "Not connected to guest"
@@ -110,8 +110,8 @@ public final class FileTransferService: ObservableObject {
         }
 
         // Add to queue
-        pendingFiles.append(contentsOf: urls)
-        print("[FileTransfer] Queued \(urls.count) file(s), total pending: \(pendingFiles.count)")
+        pendingFiles.append(contentsOf: files)
+        print("[FileTransfer] Queued \(files.count) file(s), total pending: \(pendingFiles.count)")
 
         // Start processing if not already
         processNextFile()
@@ -124,10 +124,10 @@ public final class FileTransferService: ObservableObject {
         guard !pendingFiles.isEmpty else { return }
 
         isProcessingQueue = true
-        let url = pendingFiles.removeFirst()
+        let file = pendingFiles.removeFirst()
 
-        print("[FileTransfer] Processing: \(url.lastPathComponent) (\(pendingFiles.count) remaining)")
-        sendFile(url, client: client) { [weak self] in
+        print("[FileTransfer] Processing: \(file.relativePath) (\(pendingFiles.count) remaining)")
+        sendFile(file.url, relativePath: file.relativePath, client: client) { [weak self] in
             // Completion callback - process next file
             Task { @MainActor in
                 self?.isProcessingQueue = false
@@ -137,8 +137,13 @@ public final class FileTransferService: ObservableObject {
     }
 
     /// Send a single file to the guest VM (streaming)
-    private func sendFile(_ url: URL, client: GhostClient, completion: (() -> Void)? = nil) {
-        let filename = url.lastPathComponent
+    /// - Parameters:
+    ///   - url: The local file URL
+    ///   - relativePath: The relative path to preserve folder structure (e.g., "folder/file.txt")
+    ///   - client: The GhostClient to use for transfer
+    ///   - completion: Callback when transfer completes
+    private func sendFile(_ url: URL, relativePath: String, client: GhostClient, completion: (() -> Void)? = nil) {
+        let displayName = relativePath
 
         // Get file size
         let fileSize: Int64
@@ -151,7 +156,7 @@ public final class FileTransferService: ObservableObject {
             return
         }
 
-        var transfer = FileTransfer(filename: filename, size: fileSize, direction: .hostToGuest)
+        var transfer = FileTransfer(filename: displayName, size: fileSize, direction: .hostToGuest)
         transfer.state = .preparing
         transfers.append(transfer)
         isTransferring = true
@@ -161,14 +166,14 @@ public final class FileTransferService: ObservableObject {
         // Run transfer on background thread to keep UI responsive
         Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                print("[FileTransfer] Streaming file: \(filename) (\(fileSize) bytes)")
+                print("[FileTransfer] Streaming file: \(relativePath) (\(fileSize) bytes)")
 
                 await MainActor.run {
                     self?.updateTransferState(id: transferId, state: .transferring(progress: 0))
                 }
 
-                // Stream to guest (no memory loading)
-                let savedPath = try await client.sendFile(fileURL: url) { progress in
+                // Stream to guest (no memory loading) - pass relative path for folder structure
+                let savedPath = try await client.sendFile(fileURL: url, relativePath: relativePath) { progress in
                     Task { @MainActor in
                         self?.updateTransferState(id: transferId, state: .transferring(progress: progress))
                     }

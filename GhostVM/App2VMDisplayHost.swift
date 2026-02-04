@@ -4,6 +4,12 @@ import Virtualization
 import Combine
 import UniformTypeIdentifiers
 
+/// Represents a file with its path relative to a dropped folder
+public struct FileWithRelativePath {
+    public let url: URL
+    public let relativePath: String  // e.g., "folder/subfolder/file.txt" or just "file.txt"
+}
+
 // SwiftUI wrapper around VZVirtualMachineView so AppKit stays isolated here.
 struct App2VMDisplayHost: NSViewRepresentable {
     let virtualMachine: VZVirtualMachine?
@@ -182,16 +188,16 @@ class FocusableVMView: VZVirtualMachineView {
         isDragging = false
         hideDropZone()
 
-        guard let urls = extractFileURLs(from: sender), !urls.isEmpty else {
+        guard let files = extractFilesWithPaths(from: sender), !files.isEmpty else {
             print("[DragDrop] No valid file URLs extracted")
             return false
         }
 
-        print("[DragDrop] Sending \(urls.count) file(s): \(urls.map { $0.lastPathComponent })")
+        print("[DragDrop] Sending \(files.count) file(s): \(files.map { $0.relativePath })")
 
         // Send files to guest
         if let service = coordinator?.fileTransferService {
-            service.sendFiles(urls)
+            service.sendFiles(files)
         } else {
             print("[DragDrop] ERROR: fileTransferService is nil!")
         }
@@ -218,13 +224,13 @@ class FocusableVMView: VZVirtualMachineView {
         return pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
     }
 
-    private func extractFileURLs(from draggingInfo: NSDraggingInfo) -> [URL]? {
+    private func extractFilesWithPaths(from draggingInfo: NSDraggingInfo) -> [FileWithRelativePath]? {
         let pasteboard = draggingInfo.draggingPasteboard
         guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
             return nil
         }
 
-        var result: [URL] = []
+        var result: [FileWithRelativePath] = []
         let fm = FileManager.default
 
         for url in urls {
@@ -232,17 +238,24 @@ class FocusableVMView: VZVirtualMachineView {
             guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
 
             if isDirectory.boolValue {
+                // For directories, preserve the folder name as the base of relative paths
+                let baseFolderName = url.lastPathComponent
+                let baseURL = url
+
                 // Enumerate all files in directory recursively
                 if let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
                     for case let fileURL as URL in enumerator {
                         var isFile: ObjCBool = false
                         if fm.fileExists(atPath: fileURL.path, isDirectory: &isFile) && !isFile.boolValue {
-                            result.append(fileURL)
+                            // Compute relative path: folder/subfolder/file.txt
+                            let relativePath = baseFolderName + "/" + fileURL.path.dropFirst(baseURL.path.count + 1)
+                            result.append(FileWithRelativePath(url: fileURL, relativePath: String(relativePath)))
                         }
                     }
                 }
             } else {
-                result.append(url)
+                // Single file - relative path is just the filename
+                result.append(FileWithRelativePath(url: url, relativePath: url.lastPathComponent))
             }
         }
 

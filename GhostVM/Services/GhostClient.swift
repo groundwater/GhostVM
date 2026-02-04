@@ -131,13 +131,15 @@ public final class GhostClient {
     /// Send a file to the guest VM (streaming - supports large files)
     /// - Parameters:
     ///   - fileURL: URL of the file to send
+    ///   - relativePath: Optional relative path to preserve folder structure (e.g., "folder/subfolder/file.txt")
     ///   - progressHandler: Optional callback for progress updates (0.0 to 1.0)
     /// - Returns: The path where the file was saved in the guest
-    public nonisolated func sendFile(fileURL: URL, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+    public nonisolated func sendFile(fileURL: URL, relativePath: String? = nil, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+        let pathToSend = relativePath ?? fileURL.lastPathComponent
         if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, progressHandler: progressHandler)
+            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
         } else if let vm = virtualMachine {
-            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, progressHandler: progressHandler)
+            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
         } else {
             throw GhostClientError.notConnected
         }
@@ -325,18 +327,17 @@ public final class GhostClient {
         }
     }
 
-    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, progressHandler: ((Double) -> Void)?) async throws -> String {
+    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
         guard let session = urlSession else {
             throw GhostClientError.notConnected
         }
 
-        let filename = fileURL.lastPathComponent
         let data = try Data(contentsOf: fileURL) // TCP version still loads to memory for simplicity
 
         var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files/receive")!)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue(filename, forHTTPHeaderField: "X-Filename")
+        urlRequest.setValue(relativePath, forHTTPHeaderField: "X-Filename")
         if let token = authToken {
             urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -497,9 +498,7 @@ public final class GhostClient {
         }
     }
 
-    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, progressHandler: ((Double) -> Void)?) async throws -> String {
-        let filename = fileURL.lastPathComponent
-
+    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
         // Get file size
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         guard let fileSize = attributes[.size] as? Int64 else {
@@ -538,12 +537,12 @@ public final class GhostClient {
 
         let fd = connection.fileDescriptor
 
-        // Build and send HTTP headers
+        // Build and send HTTP headers - use relativePath to preserve folder structure
         var httpHeaders = "POST /api/v1/files/receive HTTP/1.1\r\n"
         httpHeaders += "Host: localhost\r\n"
         httpHeaders += "Connection: close\r\n"
         httpHeaders += "Content-Type: application/octet-stream\r\n"
-        httpHeaders += "X-Filename: \(filename)\r\n"
+        httpHeaders += "X-Filename: \(relativePath)\r\n"
         httpHeaders += "Content-Length: \(fileSize)\r\n"
         httpHeaders += "\r\n"
 
