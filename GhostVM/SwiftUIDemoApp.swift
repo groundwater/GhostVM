@@ -1594,6 +1594,16 @@ struct VMWindowView: View {
                 }
                 .help(clipboardSyncHelp)
             }
+            if fileTransferService.queuedGuestFileCount > 0 {
+                ToolbarItem(placement: .automatic) {
+                    Button {
+                        fileTransferService.fetchAllGuestFiles()
+                    } label: {
+                        Label("\(fileTransferService.queuedGuestFileCount)", systemImage: "arrow.down.doc")
+                    }
+                    .help("Receive \(fileTransferService.queuedGuestFileCount) file(s) from guest")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     session.stop()

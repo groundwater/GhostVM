@@ -22,19 +22,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
     private var isServerRunning = false
-    /// Files queued for sending to host
-    private var filesToSend: [URL] = []
+
+    /// Files queued for sending to host (accessor for FileService)
+    private var filesToSend: [URL] {
+        FileService.shared.listOutgoingFiles().compactMap { URL(fileURLWithPath: $0) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[GhostTools] Application launched")
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
+        installLaunchAgentIfNeeded()
         startServer()
     }
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // MARK: - Launch Agent
+
+    private func installLaunchAgentIfNeeded() {
+        let launchAgentsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+        let plistPath = launchAgentsDir.appendingPathComponent("com.ghostvm.ghosttools.plist")
+
+        // Check if already installed
+        if FileManager.default.fileExists(atPath: plistPath.path) {
+            print("[GhostTools] Launch agent already installed")
+            return
+        }
+
+        // Get the path to the current executable
+        guard let executablePath = Bundle.main.executablePath else {
+            print("[GhostTools] Could not determine executable path")
+            return
+        }
+
+        // Create LaunchAgents directory if needed
+        do {
+            try FileManager.default.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
+        } catch {
+            print("[GhostTools] Failed to create LaunchAgents directory: \(error)")
+            return
+        }
+
+        // Create the plist content
+        let plistContent: [String: Any] = [
+            "Label": "com.ghostvm.ghosttools",
+            "ProgramArguments": [executablePath],
+            "RunAtLoad": true,
+            "KeepAlive": false
+        ]
+
+        // Write the plist
+        do {
+            let data = try PropertyListSerialization.data(fromPropertyList: plistContent, format: .xml, options: 0)
+            try data.write(to: plistPath)
+            print("[GhostTools] Launch agent installed at \(plistPath.path)")
+
+            // Show notification
+            let content = UNMutableNotificationContent()
+            content.title = "GhostTools Installed"
+            content.body = "GhostTools will now start automatically at login."
+            content.sound = .default
+            let request = UNNotificationRequest(identifier: "launch-agent-installed", content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        } catch {
+            print("[GhostTools] Failed to write launch agent plist: \(error)")
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -140,12 +197,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func queueFilesForHost(_ urls: [URL]) {
-        // Add files to queue (they will be available via GET /api/v1/files/{path})
-        for url in urls {
-            if !filesToSend.contains(url) {
-                filesToSend.append(url)
-            }
-        }
+        // Add files to queue (they will be available via GET /api/v1/files)
+        FileService.shared.queueOutgoingFiles(urls)
         updateMenu()
 
         // Show notification using UserNotifications
@@ -159,7 +212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func clearFileQueue() {
-        filesToSend.removeAll()
+        FileService.shared.clearOutgoingFiles()
         updateMenu()
     }
 

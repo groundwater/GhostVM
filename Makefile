@@ -80,7 +80,7 @@ tools:
 # Create GhostTools.app bundle and package into DMG
 dmg: tools
 	@echo "Creating GhostTools.app bundle..."
-	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)"
+	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS"
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources"
 	@# Copy executable
@@ -97,7 +97,6 @@ dmg: tools
 		-hfs \
 		-hfs-volume-name "GhostTools" \
 		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@echo "GhostTools.dmg created at: $(GHOSTTOOLS_DMG)"
 
 # Distribution settings

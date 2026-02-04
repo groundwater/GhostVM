@@ -58,15 +58,41 @@ public final class FileTransferService: ObservableObject {
     /// Last error message
     @Published public private(set) var lastError: String?
 
+    /// Number of files queued in guest waiting to be fetched
+    @Published public private(set) var queuedGuestFileCount: Int = 0
+
     private var ghostClient: GhostClient?
     private let maxConcurrentTransfers = 3
     private var activeTransferCount = 0
+    private var pollTimer: Timer?
 
     public init() {}
 
     /// Configure the service with a GhostClient
     public func configure(client: GhostClient) {
         self.ghostClient = client
+        startPollingGuestQueue()
+    }
+
+    /// Start polling guest for queued files
+    private func startPollingGuestQueue() {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.checkGuestQueue()
+            }
+        }
+    }
+
+    /// Check how many files are queued in the guest
+    private func checkGuestQueue() async {
+        guard let client = ghostClient else { return }
+        do {
+            let files = try await client.listFiles()
+            queuedGuestFileCount = files.count
+        } catch {
+            // Silently fail - guest might not be connected
+        }
     }
 
     /// Queue of files pending transfer
@@ -210,6 +236,9 @@ public final class FileTransferService: ObservableObject {
 
                 updateTransferState(id: transferId, state: .completed(path: saveURL.path))
 
+                // Reveal in Finder
+                NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+
             } catch {
                 updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
                 lastError = "Fetch failed: \(error.localizedDescription)"
@@ -225,6 +254,34 @@ public final class FileTransferService: ObservableObject {
             throw GhostClientError.notConnected
         }
         return try await client.listFiles()
+    }
+
+    /// Fetch all queued files from the guest and save to Downloads
+    public func fetchAllGuestFiles() {
+        guard let client = ghostClient else {
+            lastError = "Not connected to guest"
+            return
+        }
+
+        Task {
+            do {
+                let files = try await listGuestFiles()
+                print("[FileTransfer] Found \(files.count) file(s) queued on guest")
+
+                for guestPath in files {
+                    fetchFile(at: guestPath, showSavePanel: false)
+                }
+
+                // Clear the queue on the guest
+                if !files.isEmpty {
+                    try await client.clearFileQueue()
+                    queuedGuestFileCount = 0
+                    print("[FileTransfer] Cleared guest file queue")
+                }
+            } catch {
+                lastError = "Failed to list guest files: \(error.localizedDescription)"
+            }
+        }
     }
 
     /// Clear completed and failed transfers from the list

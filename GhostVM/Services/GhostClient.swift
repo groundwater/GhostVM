@@ -167,6 +167,17 @@ public final class GhostClient {
         }
     }
 
+    /// Clear the file queue on the guest
+    public func clearFileQueue() async throws {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            try await clearFileQueueViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            try await clearFileQueueViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
     // MARK: - Health Check
 
     /// Check if GhostTools is running and reachable in the guest
@@ -410,6 +421,28 @@ public final class GhostClient {
         return fileResponse.files
     }
 
+    private func clearFileQueueViaTCP(host: String, port: Int) async throws {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files")!)
+        urlRequest.httpMethod = "DELETE"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (_, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+    }
+
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -627,6 +660,21 @@ public final class GhostClient {
         let decoder = JSONDecoder()
         let fileResponse = try decoder.decode(FileListResponse.self, from: body)
         return fileResponse.files
+    }
+
+    private func clearFileQueueViaVsock(vm: VZVirtualMachine) async throws {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "DELETE",
+            path: "/api/v1/files",
+            body: nil
+        )
+
+        let (statusCode, _) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
     }
 
     private func sendHTTPRequest(

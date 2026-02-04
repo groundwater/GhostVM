@@ -7,6 +7,9 @@ final class FileService {
     /// Base directory for received files
     private let receiveDirectory: URL
 
+    /// Files queued for sending to host
+    private var outgoingFiles: [URL] = []
+
     private init() {
         // Use Downloads folder for received files
         receiveDirectory = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
@@ -54,6 +57,40 @@ final class FileService {
     func listReceivedFiles() -> [String] {
         let contents = try? FileManager.default.contentsOfDirectory(atPath: receiveDirectory.path)
         return contents ?? []
+    }
+
+    /// Lists files queued for sending to host (full paths)
+    func listOutgoingFiles() -> [String] {
+        return outgoingFiles.map { $0.path }
+    }
+
+    /// Queue a file for sending to host
+    func queueOutgoingFile(_ url: URL) {
+        if !outgoingFiles.contains(url) {
+            outgoingFiles.append(url)
+        }
+    }
+
+    /// Queue multiple files for sending to host
+    func queueOutgoingFiles(_ urls: [URL]) {
+        for url in urls {
+            queueOutgoingFile(url)
+        }
+    }
+
+    /// Remove a file from the outgoing queue
+    func removeOutgoingFile(_ url: URL) {
+        outgoingFiles.removeAll { $0 == url }
+    }
+
+    /// Clear all outgoing files
+    func clearOutgoingFiles() {
+        outgoingFiles.removeAll()
+    }
+
+    /// Check if a path is in the outgoing queue
+    func isOutgoingFile(_ path: String) -> Bool {
+        return outgoingFiles.contains { $0.path == path }
     }
 
     // MARK: - Private Helpers

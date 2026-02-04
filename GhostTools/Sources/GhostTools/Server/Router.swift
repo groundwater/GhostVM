@@ -94,17 +94,27 @@ final class Router: @unchecked Sendable {
     // MARK: - Files
 
     private func handleFileList(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
+        switch request.method {
+        case .GET:
+            // Return outgoing files (queued for host to fetch)
+            let files = FileService.shared.listOutgoingFiles()
+            print("[Router] GET /files - returning \(files.count) outgoing file(s)")
+            let response = FileListResponse(files: files)
+
+            guard let data = try? JSONEncoder().encode(response) else {
+                return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+            }
+            return HTTPResponse.json(data)
+
+        case .DELETE:
+            // Clear the outgoing file queue
+            FileService.shared.clearOutgoingFiles()
+            print("[Router] DELETE /files - queue cleared")
+            return HTTPResponse(status: .ok)
+
+        default:
             return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
         }
-
-        let files = FileService.shared.listReceivedFiles()
-        let response = FileListResponse(files: files)
-
-        guard let data = try? JSONEncoder().encode(response) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-        }
-        return HTTPResponse.json(data)
     }
 
     private func handleFileReceive(_ request: HTTPRequest) -> HTTPResponse {
