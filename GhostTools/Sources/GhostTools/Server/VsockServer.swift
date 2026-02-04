@@ -73,9 +73,12 @@ final class VsockServer: @unchecked Sendable {
 
     /// Starts the vsock server
     func start() async throws {
+        print("[VsockServer] Creating socket with AF_VSOCK=\(AF_VSOCK), SOCK_STREAM=\(SOCK_STREAM)")
         // Create vsock socket
         serverSocket = socket(AF_VSOCK, SOCK_STREAM, 0)
+        print("[VsockServer] socket() returned: \(serverSocket), errno: \(errno)")
         guard serverSocket >= 0 else {
+            print("[VsockServer] Socket creation failed! errno=\(errno)")
             throw VsockServerError.socketCreationFailed(errno)
         }
 

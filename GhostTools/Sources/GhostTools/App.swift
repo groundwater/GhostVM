@@ -26,7 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var filesToSend: [URL] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        print("[GhostTools] Application launched")
         setupMenuBar()
+        print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
         startServer()
     }
@@ -198,23 +200,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startServer() {
+        print("[GhostTools] startServer() called")
         Task {
             do {
+                print("[GhostTools] Creating router...")
                 let router = Router()
+                print("[GhostTools] Creating VsockServer on port 80...")
                 server = VsockServer(port: 80, router: router)
 
                 server?.onStatusChange = { [weak self] running in
                     Task { @MainActor in
+                        print("[GhostTools] Server status changed: \(running)")
                         self?.isServerRunning = running
                         self?.updateStatusIcon(connected: running)
                         self?.updateMenu()
                     }
                 }
 
-                print("GhostTools starting vsock server on port 80...")
+                print("[GhostTools] Starting vsock server...")
                 try await server?.start()
+                print("[GhostTools] Server started successfully")
             } catch {
-                print("Failed to start server: \(error)")
+                print("[GhostTools] Failed to start server: \(error)")
+                print("[GhostTools] Error details: \(String(describing: error))")
                 isServerRunning = false
                 updateStatusIcon(connected: false)
                 updateMenu()
