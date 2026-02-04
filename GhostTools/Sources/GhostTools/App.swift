@@ -3,7 +3,10 @@ import SwiftUI
 import UserNotifications
 
 /// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.2.0-url-forwarding"
+let kGhostToolsVersion = "1.3.0-auto-install"
+
+/// Target install location
+let kApplicationsPath = "/Applications/GhostTools.app"
 
 /// GhostTools - Menu bar daemon for guest VM integration
 /// Provides HTTP/1.1 server over vsock for host-guest communication
@@ -33,11 +36,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         print("[GhostTools] Application launched - version \(kGhostToolsVersion)")
+
+        // Auto-install to /Applications if not already there
+        if installToApplicationsIfNeeded() {
+            // Will relaunch from /Applications, exit this instance
+            return
+        }
+
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
         installLaunchAgentIfNeeded()
         startServer()
+    }
+
+    // MARK: - Auto-Install
+
+    /// Copies app to /Applications if not already running from there, then relaunches
+    /// - Returns: true if relaunching (caller should exit), false to continue
+    private func installToApplicationsIfNeeded() -> Bool {
+        guard let bundlePath = Bundle.main.bundlePath as String? else { return false }
+
+        // Already in /Applications?
+        if bundlePath == kApplicationsPath {
+            print("[GhostTools] Running from /Applications")
+            return false
+        }
+
+        // Check if we're running from a DMG or other location
+        print("[GhostTools] Running from: \(bundlePath)")
+        print("[GhostTools] Installing to /Applications...")
+
+        let fm = FileManager.default
+        let sourceURL = URL(fileURLWithPath: bundlePath)
+        let destURL = URL(fileURLWithPath: kApplicationsPath)
+
+        do {
+            // Remove existing installation if present
+            if fm.fileExists(atPath: kApplicationsPath) {
+                print("[GhostTools] Removing existing installation...")
+                try fm.removeItem(at: destURL)
+            }
+
+            // Copy to /Applications
+            try fm.copyItem(at: sourceURL, to: destURL)
+            print("[GhostTools] Installed to \(kApplicationsPath)")
+
+            // Register with Launch Services
+            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: lsregister)
+            process.arguments = ["-f", kApplicationsPath]
+            try process.run()
+            process.waitUntilExit()
+            print("[GhostTools] Registered with Launch Services")
+
+            // Relaunch from /Applications
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            task.arguments = ["-n", kApplicationsPath]
+            try task.run()
+
+            print("[GhostTools] Relaunching from /Applications...")
+
+            // Quit this instance
+            DispatchQueue.main.async {
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+
+        } catch {
+            print("[GhostTools] Failed to install: \(error)")
+            // Continue running from current location
+            return false
+        }
     }
 
     private func requestNotificationPermission() {
@@ -51,16 +123,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .appendingPathComponent("Library/LaunchAgents")
         let plistPath = launchAgentsDir.appendingPathComponent("com.ghostvm.ghosttools.plist")
 
-        // Check if already installed
-        if FileManager.default.fileExists(atPath: plistPath.path) {
-            print("[GhostTools] Launch agent already installed")
-            return
-        }
+        // Always use /Applications path for the launch agent
+        let executablePath = kApplicationsPath + "/Contents/MacOS/GhostTools"
 
-        // Get the path to the current executable
-        guard let executablePath = Bundle.main.executablePath else {
-            print("[GhostTools] Could not determine executable path")
-            return
+        // Check if already installed with correct path
+        if FileManager.default.fileExists(atPath: plistPath.path) {
+            // Verify it points to /Applications
+            if let existingPlist = NSDictionary(contentsOf: plistPath),
+               let args = existingPlist["ProgramArguments"] as? [String],
+               args.first == executablePath {
+                print("[GhostTools] Launch agent already installed")
+                return
+            }
+            // Remove outdated launch agent
+            try? FileManager.default.removeItem(at: plistPath)
+            print("[GhostTools] Updating launch agent to point to /Applications")
         }
 
         // Create LaunchAgents directory if needed
@@ -71,7 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Create the plist content
+        // Create the plist content - always point to /Applications
         let plistContent: [String: Any] = [
             "Label": "com.ghostvm.ghosttools",
             "ProgramArguments": [executablePath],
