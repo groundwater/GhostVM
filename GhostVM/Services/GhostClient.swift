@@ -194,11 +194,49 @@ public final class GhostClient {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
-        // TODO: VZVirtioSocketDevice.connect has strict threading requirements
-        // that conflict with Swift concurrency. Need to investigate proper approach.
-        // For now, disable vsock health check to prevent crashes.
-        // The indicator will show as "disconnected" until this is fixed.
-        return false
+        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            return false
+        }
+
+        // VZVirtioSocketDevice.connect must NOT be called from a dispatch queue
+        // Use completion handler API from a plain Thread
+        return await withCheckedContinuation { continuation in
+            let port = self.vsockPort
+            let thread = Thread {
+                let semaphore = DispatchSemaphore(value: 0)
+                var result = false
+
+                socketDevice.connect(toPort: port) { resultConnection in
+                    defer { semaphore.signal() }
+
+                    guard case .success(let connection) = resultConnection else {
+                        return
+                    }
+
+                    // Send HTTP health check
+                    let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    let fd = connection.fileDescriptor
+
+                    request.withCString { ptr in
+                        _ = Darwin.write(fd, ptr, strlen(ptr))
+                    }
+
+                    // Read response
+                    var buffer = [CChar](repeating: 0, count: 1024)
+                    let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
+                    Darwin.close(fd)
+
+                    if bytesRead > 0 {
+                        let response = String(cString: buffer)
+                        result = response.contains("200")
+                    }
+                }
+
+                _ = semaphore.wait(timeout: .now() + 2.0)
+                continuation.resume(returning: result)
+            }
+            thread.start()
+        }
     }
 
     // MARK: - TCP Implementation (Development)
