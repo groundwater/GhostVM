@@ -27,6 +27,7 @@ struct GhostToolsApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
+    private var tunnelServer: TunnelServer?
     private var isServerRunning = false
 
     /// Files queued for sending to host (accessor for FileService)
@@ -176,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
+        tunnelServer?.stop()
     }
 
     // MARK: - URL Handling
@@ -192,6 +194,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if scheme == "http" || scheme == "https" {
             print("[GhostTools] Received URL to forward: \(url.absoluteString)")
+
+            // Check for localhost URLs that need port forwarding
+            if let host = url.host?.lowercased(),
+               (host == "localhost" || host == "127.0.0.1"),
+               let port = url.port,
+               port > 0 && port <= UInt16.max {
+                let portNum = UInt16(port)
+                // Check if the port is actually listening before requesting forward
+                if PortScanner.shared.isPortListening(portNum) {
+                    print("[GhostTools] Requesting port forward for localhost:\(portNum)")
+                    PortForwardRequestService.shared.requestForward(portNum)
+                }
+            }
+
             URLService.shared.queueURL(url)
 
             // Show notification
@@ -349,6 +365,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 isServerRunning = false
                 updateStatusIcon(connected: false)
                 updateMenu()
+            }
+        }
+
+        // Start tunnel server for port forwarding
+        Task {
+            do {
+                print("[GhostTools] Creating TunnelServer on port 5001...")
+                tunnelServer = TunnelServer()
+                print("[GhostTools] Starting tunnel server...")
+                try await tunnelServer?.start()
+                print("[GhostTools] Tunnel server started successfully")
+            } catch {
+                print("[GhostTools] Failed to start tunnel server: \(error)")
             }
         }
     }

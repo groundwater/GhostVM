@@ -53,6 +53,22 @@ public struct URLListResponse: Codable {
     public let urls: [String]
 }
 
+/// Represents a listening port with process info
+public struct ListeningPortInfo: Codable {
+    public let port: UInt16
+    public let process: String
+}
+
+/// Response from GET /ports endpoint
+public struct PortListResponse: Codable {
+    public let ports: [ListeningPortInfo]
+}
+
+/// Response from GET /port-forwards endpoint
+public struct PortForwardListResponse: Codable {
+    public let ports: [UInt16]
+}
+
 /// Request body for POST /clipboard endpoint
 public struct ClipboardPostRequest: Codable {
     public let content: String
@@ -193,6 +209,30 @@ public final class GhostClient {
             return try await fetchURLsViaTCP(host: tcpHost, port: tcpPort)
         } else if let vm = virtualMachine {
             return try await fetchURLsViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - Port Forwarding
+
+    /// Get listening ports from the guest
+    public func getListeningPorts() async throws -> [ListeningPortInfo] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await getListeningPortsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await getListeningPortsViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    /// Get port forward requests from the guest (clears the queue)
+    public func getPortForwardRequests() async throws -> [UInt16] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await getPortForwardRequestsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await getPortForwardRequestsViaVsock(vm: vm)
         } else {
             throw GhostClientError.notConnected
         }
@@ -488,6 +528,58 @@ public final class GhostClient {
         return urlResponse.urls
     }
 
+    private func getListeningPortsViaTCP(host: String, port: Int) async throws -> [ListeningPortInfo] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/ports")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let portResponse = try decoder.decode(PortListResponse.self, from: data)
+        return portResponse.ports
+    }
+
+    private func getPortForwardRequestsViaTCP(host: String, port: Int) async throws -> [UInt16] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/port-forwards")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let forwardResponse = try decoder.decode(PortForwardListResponse.self, from: data)
+        return forwardResponse.ports
+    }
+
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -741,6 +833,52 @@ public final class GhostClient {
         let decoder = JSONDecoder()
         let urlResponse = try decoder.decode(URLListResponse.self, from: body)
         return urlResponse.urls
+    }
+
+    private func getListeningPortsViaVsock(vm: VZVirtualMachine) async throws -> [ListeningPortInfo] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/ports",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let portResponse = try decoder.decode(PortListResponse.self, from: body)
+        return portResponse.ports
+    }
+
+    private func getPortForwardRequestsViaVsock(vm: VZVirtualMachine) async throws -> [UInt16] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/port-forwards",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let forwardResponse = try decoder.decode(PortForwardListResponse.self, from: body)
+        return forwardResponse.ports
     }
 
     private func sendHTTPRequest(

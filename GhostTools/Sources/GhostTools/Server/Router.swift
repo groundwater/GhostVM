@@ -28,6 +28,10 @@ final class Router: @unchecked Sendable {
             return handleFileGet(request)
         } else if path == "/api/v1/urls" {
             return handleURLs(request)
+        } else if path == "/api/v1/ports" {
+            return handlePorts(request)
+        } else if path == "/api/v1/port-forwards" {
+            return handlePortForwards(request)
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
@@ -180,6 +184,43 @@ final class Router: @unchecked Sendable {
         } catch {
             return HTTPResponse.error(.notFound, message: "File not found")
         }
+    }
+
+    // MARK: - Ports
+
+    private func handlePorts(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        let ports = PortScanner.shared.getListeningPorts()
+        print("[Router] GET /ports - returning \(ports.count) listening port(s)")
+
+        let response = PortListResponse(ports: ports)
+        guard let data = try? JSONEncoder().encode(response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    // MARK: - Port Forwards
+
+    private func handlePortForwards(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        // Pop and clear the requested ports
+        let ports = PortForwardRequestService.shared.popRequests()
+        if !ports.isEmpty {
+            print("[Router] GET /port-forwards - returning \(ports.count) requested port(s)")
+        }
+
+        let response = PortForwardResponse(ports: ports)
+        guard let data = try? JSONEncoder().encode(response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
     }
 
     // MARK: - URLs
