@@ -48,6 +48,11 @@ public struct FileListResponse: Codable {
     public let files: [String]
 }
 
+/// Response from GET /urls endpoint
+public struct URLListResponse: Codable {
+    public let urls: [String]
+}
+
 /// Request body for POST /clipboard endpoint
 public struct ClipboardPostRequest: Codable {
     public let content: String
@@ -131,13 +136,15 @@ public final class GhostClient {
     /// Send a file to the guest VM (streaming - supports large files)
     /// - Parameters:
     ///   - fileURL: URL of the file to send
+    ///   - relativePath: Optional relative path to preserve folder structure (e.g., "folder/subfolder/file.txt")
     ///   - progressHandler: Optional callback for progress updates (0.0 to 1.0)
     /// - Returns: The path where the file was saved in the guest
-    public nonisolated func sendFile(fileURL: URL, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+    public nonisolated func sendFile(fileURL: URL, relativePath: String? = nil, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+        let pathToSend = relativePath ?? fileURL.lastPathComponent
         if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, progressHandler: progressHandler)
+            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
         } else if let vm = virtualMachine {
-            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, progressHandler: progressHandler)
+            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
         } else {
             throw GhostClientError.notConnected
         }
@@ -173,6 +180,19 @@ public final class GhostClient {
             try await clearFileQueueViaTCP(host: tcpHost, port: tcpPort)
         } else if let vm = virtualMachine {
             try await clearFileQueueViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - URL Forwarding
+
+    /// Fetch and clear pending URLs from guest (URLs to open on host)
+    public func fetchPendingURLs() async throws -> [String] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await fetchURLsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await fetchURLsViaVsock(vm: vm)
         } else {
             throw GhostClientError.notConnected
         }
@@ -325,18 +345,17 @@ public final class GhostClient {
         }
     }
 
-    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, progressHandler: ((Double) -> Void)?) async throws -> String {
+    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
         guard let session = urlSession else {
             throw GhostClientError.notConnected
         }
 
-        let filename = fileURL.lastPathComponent
         let data = try Data(contentsOf: fileURL) // TCP version still loads to memory for simplicity
 
         var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files/receive")!)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        urlRequest.setValue(filename, forHTTPHeaderField: "X-Filename")
+        urlRequest.setValue(relativePath, forHTTPHeaderField: "X-Filename")
         if let token = authToken {
             urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -443,6 +462,32 @@ public final class GhostClient {
         }
     }
 
+    private func fetchURLsViaTCP(host: String, port: Int) async throws -> [String] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/urls")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let urlResponse = try decoder.decode(URLListResponse.self, from: data)
+        return urlResponse.urls
+    }
+
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -497,9 +542,7 @@ public final class GhostClient {
         }
     }
 
-    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, progressHandler: ((Double) -> Void)?) async throws -> String {
-        let filename = fileURL.lastPathComponent
-
+    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
         // Get file size
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         guard let fileSize = attributes[.size] as? Int64 else {
@@ -538,12 +581,12 @@ public final class GhostClient {
 
         let fd = connection.fileDescriptor
 
-        // Build and send HTTP headers
+        // Build and send HTTP headers - use relativePath to preserve folder structure
         var httpHeaders = "POST /api/v1/files/receive HTTP/1.1\r\n"
         httpHeaders += "Host: localhost\r\n"
         httpHeaders += "Connection: close\r\n"
         httpHeaders += "Content-Type: application/octet-stream\r\n"
-        httpHeaders += "X-Filename: \(filename)\r\n"
+        httpHeaders += "X-Filename: \(relativePath)\r\n"
         httpHeaders += "Content-Length: \(fileSize)\r\n"
         httpHeaders += "\r\n"
 
@@ -675,6 +718,29 @@ public final class GhostClient {
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
         }
+    }
+
+    private func fetchURLsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/urls",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let urlResponse = try decoder.decode(URLListResponse.self, from: body)
+        return urlResponse.urls
     }
 
     private func sendHTTPRequest(

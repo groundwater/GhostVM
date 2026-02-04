@@ -2,6 +2,9 @@ import AppKit
 import SwiftUI
 import UserNotifications
 
+/// GhostTools version - update this when making changes to verify correct binary is running
+let kGhostToolsVersion = "1.2.0-url-forwarding"
+
 /// GhostTools - Menu bar daemon for guest VM integration
 /// Provides HTTP/1.1 server over vsock for host-guest communication
 @main
@@ -29,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        print("[GhostTools] Application launched")
+        print("[GhostTools] Application launched - version \(kGhostToolsVersion)")
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
@@ -96,6 +99,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
+    }
+
+    // MARK: - URL Handling
+
+    /// Handle URLs opened via this app (when set as default browser)
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            handleIncomingURL(url)
+        }
+    }
+
+    private func handleIncomingURL(_ url: URL) {
+        guard let scheme = url.scheme?.lowercased() else { return }
+
+        if scheme == "http" || scheme == "https" {
+            print("[GhostTools] Received URL to forward: \(url.absoluteString)")
+            URLService.shared.queueURL(url)
+
+            // Show notification
+            let content = UNMutableNotificationContent()
+            content.title = "Opening on Host"
+            content.body = url.host ?? url.absoluteString
+            content.sound = nil  // Silent - don't be annoying
+            let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+            UNUserNotificationCenter.current().add(request)
+        }
     }
 
     private func setupMenuBar() {

@@ -22,17 +22,27 @@ final class FileService {
     /// Receives a file from the host and saves it to the receive directory
     /// - Parameters:
     ///   - data: The file data
-    ///   - filename: The filename to save as
+    ///   - filename: The filename or relative path to save as (e.g., "folder/subfolder/file.txt")
     /// - Returns: The URL where the file was saved
     func receiveFile(data: Data, filename: String) throws -> URL {
-        // Sanitize filename to prevent path traversal
-        let sanitizedFilename = sanitizeFilename(filename)
-        let destinationURL = receiveDirectory.appendingPathComponent(sanitizedFilename)
+        // Sanitize path to prevent path traversal while preserving folder structure
+        let sanitizedPath = sanitizeRelativePath(filename)
+        print("[FileService] Receiving: '\(filename)' -> sanitized: '\(sanitizedPath)'")
+
+        let destinationURL = receiveDirectory.appendingPathComponent(sanitizedPath)
+        print("[FileService] Destination: \(destinationURL.path)")
+
+        // Create intermediate directories if needed
+        let parentDirectory = destinationURL.deletingLastPathComponent()
+        print("[FileService] Creating directory: \(parentDirectory.path)")
+        try FileManager.default.createDirectory(at: parentDirectory, withIntermediateDirectories: true)
 
         // Handle filename conflicts
         let finalURL = uniqueURL(for: destinationURL)
+        print("[FileService] Final URL: \(finalURL.path)")
 
         try data.write(to: finalURL)
+        print("[FileService] File written successfully")
         return finalURL
     }
 
@@ -94,6 +104,31 @@ final class FileService {
     }
 
     // MARK: - Private Helpers
+
+    /// Sanitize a relative path, preserving folder structure but preventing traversal attacks
+    private func sanitizeRelativePath(_ path: String) -> String {
+        // Split into components and filter out dangerous ones
+        let components = path.components(separatedBy: "/")
+            .filter { !$0.isEmpty && $0 != "." && $0 != ".." }
+            .map { sanitizePathComponent($0) }
+
+        // Ensure we have at least a filename
+        if components.isEmpty {
+            return "unnamed"
+        }
+
+        return components.joined(separator: "/")
+    }
+
+    /// Sanitize a single path component (filename or folder name)
+    private func sanitizePathComponent(_ component: String) -> String {
+        // Remove dangerous characters while preserving the component
+        let sanitized = component
+            .replacingOccurrences(of: "..", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+
+        return sanitized.isEmpty ? "unnamed" : sanitized
+    }
 
     private func sanitizeFilename(_ filename: String) -> String {
         // Remove path components and dangerous characters
