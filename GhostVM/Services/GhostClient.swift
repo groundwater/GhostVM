@@ -64,7 +64,7 @@ public struct ClipboardPostRequest: Codable {
 @MainActor
 public final class GhostClient {
     private let virtualMachine: VZVirtualMachine?
-    private let vsockPort: UInt32 = 80
+    private let vsockPort: UInt32 = 5000
     private let authToken: String?
 
     // For development/testing without vsock

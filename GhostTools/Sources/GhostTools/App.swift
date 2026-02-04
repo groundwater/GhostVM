@@ -205,8 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 print("[GhostTools] Creating router...")
                 let router = Router()
-                print("[GhostTools] Creating VsockServer on port 80...")
-                server = VsockServer(port: 80, router: router)
+                print("[GhostTools] Creating VsockServer on port 5000...")
+                server = VsockServer(port: 5000, router: router)
 
                 server?.onStatusChange = { [weak self] running in
                     Task { @MainActor in
@@ -250,7 +250,7 @@ struct PreferencesView: View {
 
             Section("Server") {
                 LabeledContent("Port") {
-                    Text("80 (vsock)")
+                    Text("5000 (vsock)")
                 }
                 LabeledContent("Token Path") {
                     Text("/Volumes/GhostVM/.ghost-token")
