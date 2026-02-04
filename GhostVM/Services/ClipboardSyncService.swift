@@ -136,7 +136,12 @@ public final class ClipboardSyncService: ObservableObject {
     }
 
     private func syncOnce() async {
-        guard let client = guestClient, syncMode != .disabled else {
+        guard let client = guestClient else {
+            print("[ClipboardSync] No client configured")
+            return
+        }
+        guard syncMode != .disabled else {
+            print("[ClipboardSync] Sync is disabled")
             return
         }
 
@@ -191,8 +196,13 @@ public final class ClipboardSyncService: ObservableObject {
             lastError = nil
 
             // Check if guest clipboard changed
-            guard let content = response.content,
-                  content != lastGuestContent else {
+            guard let content = response.content else {
+                print("[ClipboardSync] Guest returned no content")
+                return
+            }
+
+            guard content != lastGuestContent else {
+                // No change, skip
                 return
             }
 
@@ -207,6 +217,7 @@ public final class ClipboardSyncService: ObservableObject {
 
         } catch GhostClientError.noContent {
             // No clipboard content on guest - this is normal
+            print("[ClipboardSync] Guest clipboard empty (204)")
             isConnected = true
             lastError = nil
         } catch {

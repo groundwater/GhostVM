@@ -111,6 +111,9 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var statusText: String = ""
     @Published private(set) var virtualMachine: VZVirtualMachine?
 
+    /// The VM's dispatch queue, needed for vsock operations
+    var vmQueue: DispatchQueue? { windowlessSession?.vmQueue }
+
     // Clipboard sync
     @Published var clipboardSyncMode: ClipboardSyncMode = .disabled
     private var clipboardSyncService: ClipboardSyncService?
@@ -144,21 +147,25 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         let key = "clipboardSyncMode_\(bundleURL.path.hashValue)"
         UserDefaults.standard.set(mode.rawValue, forKey: key)
 
-        // Update running service if active
+        // Update running service if active, or start it if enabling
         if let service = clipboardSyncService {
             Task { @MainActor in
                 service.setSyncMode(mode)
             }
+        } else if mode != .disabled {
+            // Service doesn't exist yet but we're enabling - start it
+            startClipboardSync()
         }
     }
 
     /// Start clipboard sync service when VM is running
     private func startClipboardSync() {
         guard let vm = virtualMachine else { return }
+        guard let session = windowlessSession else { return }
         guard clipboardSyncMode != .disabled else { return }
 
         Task { @MainActor in
-            let client = GhostClient(virtualMachine: vm)
+            let client = GhostClient(virtualMachine: vm, vmQueue: session.vmQueue)
             self.ghostClient = client
 
             let service = ClipboardSyncService(bundlePath: bundleURL.path)

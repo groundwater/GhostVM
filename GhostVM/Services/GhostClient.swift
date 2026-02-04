@@ -64,6 +64,7 @@ public struct ClipboardPostRequest: Codable {
 @MainActor
 public final class GhostClient {
     private let virtualMachine: VZVirtualMachine?
+    private let vmQueue: DispatchQueue?
     private let vsockPort: UInt32 = 5000
     private let authToken: String?
 
@@ -74,8 +75,13 @@ public final class GhostClient {
     private var urlSession: URLSession?
 
     /// Initialize client for vsock communication with a running VM
-    public init(virtualMachine: VZVirtualMachine, authToken: String? = nil) {
+    /// - Parameters:
+    ///   - virtualMachine: The VZVirtualMachine instance
+    ///   - vmQueue: The dispatch queue used for VM operations (from WindowlessVMSession.vmQueue)
+    ///   - authToken: Optional authentication token
+    public init(virtualMachine: VZVirtualMachine, vmQueue: DispatchQueue, authToken: String? = nil) {
         self.virtualMachine = virtualMachine
+        self.vmQueue = vmQueue
         self.authToken = authToken
         self.tcpHost = nil
         self.tcpPort = nil
@@ -84,6 +90,7 @@ public final class GhostClient {
     /// Initialize client for TCP communication (development/testing)
     public init(host: String, port: Int, authToken: String? = nil) {
         self.virtualMachine = nil
+        self.vmQueue = nil
         self.authToken = authToken
         self.tcpHost = host
         self.tcpPort = port
@@ -194,8 +201,53 @@ public final class GhostClient {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
-        // TODO: VZVirtioSocketDevice has threading requirements that cause crashes
-        // Disable health check for now - clipboard sync will still work
+        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            return false
+        }
+
+        guard let queue = self.vmQueue else {
+            return false
+        }
+
+        let port = self.vsockPort
+
+        // Connect using VM's queue (required by Apple)
+        let connection: VZVirtioSocketConnection
+        do {
+            connection = try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    socketDevice.connect(toPort: port) { result in
+                        switch result {
+                        case .success(let conn):
+                            continuation.resume(returning: conn)
+                        case .failure(let error):
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+            }
+        } catch {
+            return false
+        }
+
+        // Send HTTP health check
+        let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        let fd = connection.fileDescriptor
+
+        request.withCString { ptr in
+            _ = Darwin.write(fd, ptr, strlen(ptr))
+        }
+        Darwin.shutdown(fd, SHUT_WR)
+
+        // Read response
+        var buffer = [CChar](repeating: 0, count: 1024)
+        let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
+        connection.close()
+
+        if bytesRead > 0 {
+            let response = String(cString: buffer)
+            return response.contains("200")
+        }
         return false
     }
 
@@ -522,12 +574,25 @@ public final class GhostClient {
             throw GhostClientError.connectionFailed("No socket device available")
         }
 
+        // Ensure we have the VM queue
+        guard let queue = self.vmQueue else {
+            throw GhostClientError.connectionFailed("VM queue not available")
+        }
+
         // Connect to the guest on the vsock port
-        let connection: VZVirtioSocketConnection
-        do {
-            connection = try await socketDevice.connect(toPort: vsockPort)
-        } catch {
-            throw GhostClientError.connectionFailed(error.localizedDescription)
+        // IMPORTANT: VZVirtioSocketDevice.connect MUST be called from the VM's queue
+        let port = self.vsockPort
+        let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                socketDevice.connect(toPort: port) { result in
+                    switch result {
+                    case .success(let conn):
+                        continuation.resume(returning: conn)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
         }
 
         // Build HTTP request

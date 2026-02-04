@@ -11,7 +11,7 @@ struct GhostToolsApp: App {
     var body: some Scene {
         // Menu bar app with no main window
         Settings {
-            PreferencesView()
+            EmptyView()
         }
     }
 }
@@ -54,16 +54,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateStatusIcon(connected: Bool) {
         guard let button = statusItem?.button else { return }
 
-        let symbolName = connected ? "circle.fill" : "circle"
         let color = connected ? NSColor.systemGreen : NSColor.systemGray
 
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "GhostTools Status") {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-            let configuredImage = image.withSymbolConfiguration(config)
+        if let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "GhostTools") {
+            let colorConfig = NSImage.SymbolConfiguration(paletteColors: [color])
+            let sizeConfig = NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
+            let configuredImage = image.withSymbolConfiguration(colorConfig.applying(sizeConfig))
             button.image = configuredImage
-            button.contentTintColor = color
         } else {
-            button.title = connected ? "G+" : "G"
+            button.title = "●"
+            button.contentTintColor = color
         }
     }
 
@@ -110,31 +110,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queuedItem.submenu = queuedMenu
             menu.addItem(queuedItem)
         }
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Clipboard sync submenu
-        let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: nil, keyEquivalent: "")
-        let clipboardMenu = NSMenu()
-
-        let modes = ["Bidirectional", "Host -> Guest", "Guest -> Host", "Disabled"]
-        for mode in modes {
-            let item = NSMenuItem(title: mode, action: #selector(clipboardModeSelected(_:)), keyEquivalent: "")
-            item.target = self
-            if mode == ClipboardService.shared.syncMode.displayName {
-                item.state = .on
-            }
-            clipboardMenu.addItem(item)
-        }
-        clipboardItem.submenu = clipboardMenu
-        menu.addItem(clipboardItem)
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Preferences
-        let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(showPreferences), keyEquivalent: ",")
-        prefsItem.target = self
-        menu.addItem(prefsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -188,17 +163,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateMenu()
     }
 
-    @objc private func clipboardModeSelected(_ sender: NSMenuItem) {
-        guard let mode = ClipboardSyncMode.from(displayName: sender.title) else { return }
-        ClipboardService.shared.syncMode = mode
-        updateMenu()
-    }
-
-    @objc private func showPreferences() {
-        NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
     private func startServer() {
         print("[GhostTools] startServer() called")
         Task {
@@ -231,34 +195,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Preferences view for settings window
-struct PreferencesView: View {
-    @State private var syncMode: ClipboardSyncMode = ClipboardService.shared.syncMode
-
-    var body: some View {
-        Form {
-            Section("Clipboard") {
-                Picker("Sync Mode", selection: $syncMode) {
-                    ForEach(ClipboardSyncMode.allCases, id: \.self) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .onChange(of: syncMode) { _, newValue in
-                    ClipboardService.shared.syncMode = newValue
-                }
-            }
-
-            Section("Server") {
-                LabeledContent("Port") {
-                    Text("5000 (vsock)")
-                }
-                LabeledContent("Token Path") {
-                    Text("/Volumes/GhostVM/.ghost-token")
-                        .font(.system(.body, design: .monospaced))
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .frame(width: 400, height: 200)
-    }
-}

@@ -1635,8 +1635,8 @@ struct VMWindowView: View {
         }
         .onChange(of: session.virtualMachine) { _, vm in
             // Configure services when VM becomes available
-            if let vm = vm {
-                let client = GhostClient(virtualMachine: vm)
+            if let vm = vm, let queue = session.vmQueue {
+                let client = GhostClient(virtualMachine: vm, vmQueue: queue)
                 fileTransferService.configure(client: client)
                 connectionMonitor.configure(client: client)
             } else {

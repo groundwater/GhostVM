@@ -1,26 +1,21 @@
 import Foundation
 
 /// Router that dispatches HTTP requests to handlers
+/// Note: No authentication required - vsock provides host-only access
 final class Router: @unchecked Sendable {
-    private let tokenAuth: TokenAuth
-
-    init(tokenAuth: TokenAuth = TokenAuth.shared) {
-        self.tokenAuth = tokenAuth
-    }
+    init() {}
 
     /// Handles an HTTP request and returns a response
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
         let path = request.path
 
-        // Health check - no auth required
+        // Health check
         if path == "/health" {
             return handleHealth(request)
         }
 
-        // All other routes require authentication
-        guard await tokenAuth.validateToken(request.header("Authorization")) else {
-            return HTTPResponse.error(.unauthorized, message: "Unauthorized")
-        }
+        // Note: Authentication disabled - vsock provides host-only access
+        // The host VM is the only entity that can connect via vsock
 
         // Route to appropriate handler
         if path == "/api/v1/clipboard" {
@@ -88,8 +83,8 @@ final class Router: @unchecked Sendable {
 
         print("[Router] Setting clipboard: \(clipboardRequest.content.prefix(50))...")
         guard ClipboardService.shared.setClipboardContents(clipboardRequest.content) else {
-            print("[Router] Clipboard sync disabled for this direction")
-            return HTTPResponse.error(.forbidden, message: "Clipboard sync disabled for this direction")
+            print("[Router] Failed to set clipboard")
+            return HTTPResponse.error(.internalServerError, message: "Failed to set clipboard")
         }
 
         print("[Router] Clipboard set successfully")

@@ -27,7 +27,9 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
 
     private let layout: VMFileLayout
     private let _virtualMachine: VZVirtualMachine
-    private let vmQueue: DispatchQueue
+
+    /// The dispatch queue used for VM operations. Pass this to vsock clients.
+    public let vmQueue: DispatchQueue
     private var state: State = .initialized {
         didSet {
             if state != oldValue {
