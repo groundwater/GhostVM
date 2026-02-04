@@ -60,10 +60,13 @@ final class Router: @unchecked Sendable {
     }
 
     private func getClipboard() -> HTTPResponse {
+        print("[Router] GET /clipboard")
         guard let content = ClipboardService.shared.getClipboardContents() else {
+            print("[Router] No clipboard content")
             return HTTPResponse(status: .noContent)
         }
 
+        print("[Router] Returning clipboard: \(content.prefix(50))...")
         let response = ClipboardResponse(content: content)
         guard let data = try? JSONEncoder().encode(response) else {
             return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
@@ -72,18 +75,24 @@ final class Router: @unchecked Sendable {
     }
 
     private func setClipboard(_ request: HTTPRequest) -> HTTPResponse {
+        print("[Router] POST /clipboard")
         guard let body = request.body else {
+            print("[Router] No request body")
             return HTTPResponse.error(.badRequest, message: "Request body required")
         }
 
         guard let clipboardRequest = try? JSONDecoder().decode(ClipboardRequest.self, from: body) else {
+            print("[Router] Invalid JSON in request body")
             return HTTPResponse.error(.badRequest, message: "Invalid JSON")
         }
 
+        print("[Router] Setting clipboard: \(clipboardRequest.content.prefix(50))...")
         guard ClipboardService.shared.setClipboardContents(clipboardRequest.content) else {
+            print("[Router] Clipboard sync disabled for this direction")
             return HTTPResponse.error(.forbidden, message: "Clipboard sync disabled for this direction")
         }
 
+        print("[Router] Clipboard set successfully")
         return HTTPResponse(status: .ok)
     }
 

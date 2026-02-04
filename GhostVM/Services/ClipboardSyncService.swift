@@ -157,22 +157,28 @@ public final class ClipboardSyncService: ObservableObject {
             return
         }
 
+        print("[ClipboardSync] Host clipboard changed (count: \(currentCount))")
         lastHostChangeCount = currentCount
 
         guard let content = hostPasteboard.string(forType: .string) else {
+            print("[ClipboardSync] No string content on host clipboard")
             return
         }
 
         // Avoid echo: don't send if this is what we just received from guest
         if content == lastGuestContent {
+            print("[ClipboardSync] Skipping send - content matches last guest content (echo prevention)")
             return
         }
 
+        print("[ClipboardSync] Sending to guest: \(content.prefix(50))...")
         do {
             try await client.setClipboard(content: content)
+            print("[ClipboardSync] Successfully sent to guest")
             isConnected = true
             lastError = nil
         } catch {
+            print("[ClipboardSync] Failed to send to guest: \(error)")
             lastError = "Failed to send to guest: \(error.localizedDescription)"
             isConnected = false
         }
@@ -190,18 +196,21 @@ public final class ClipboardSyncService: ObservableObject {
                 return
             }
 
+            print("[ClipboardSync] Guest clipboard changed: \(content.prefix(50))...")
             lastGuestContent = content
 
             // Update host clipboard
             hostPasteboard.clearContents()
             hostPasteboard.setString(content, forType: .string)
             lastHostChangeCount = hostPasteboard.changeCount
+            print("[ClipboardSync] Updated host clipboard")
 
         } catch GhostClientError.noContent {
             // No clipboard content on guest - this is normal
             isConnected = true
             lastError = nil
         } catch {
+            print("[ClipboardSync] Failed to get from guest: \(error)")
             lastError = "Failed to get from guest: \(error.localizedDescription)"
             isConnected = false
         }
