@@ -36,8 +36,8 @@ cli: $(XCODE_PROJECT)
 		build
 	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl"
 
-# Build the SwiftUI app via xcodebuild
-app: $(XCODE_PROJECT)
+# Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
+app: $(XCODE_PROJECT) dmg
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
@@ -48,6 +48,8 @@ app: $(XCODE_PROJECT)
 	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
 	@cp macOS/GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
+	@# Copy GhostTools.dmg into app bundle Resources
+	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
 	@# Re-sign after adding resources
 	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
@@ -75,22 +77,26 @@ tools:
 	cd $(GHOSTTOOLS_DIR) && swift build -c release
 	@echo "GhostTools built at: $(GHOSTTOOLS_DIR)/.build/release/GhostTools"
 
-# Create GhostTools.dmg with the built executable and README
+# Create GhostTools.app bundle and package into DMG
 dmg: tools
-	@echo "Creating GhostTools.dmg..."
-	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)"
-	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@# Copy the built executable
-	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Copy the README
+	@echo "Creating GhostTools.app bundle..."
+	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS"
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources"
+	@# Copy executable
+	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/"
+	@# Copy Info.plist
+	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/"
+	@# Copy README to DMG root
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Create the DMG using hdiutil makehybrid (avoids mounting issues)
+	@# Ad-hoc sign the app
+	codesign --force --deep -s "-" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
+	@# Create the DMG
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
 		-hfs \
 		-hfs-volume-name "GhostTools" \
 		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@echo "GhostTools.dmg created at: $(GHOSTTOOLS_DMG)"
 
 # Distribution settings

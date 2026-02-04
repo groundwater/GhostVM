@@ -48,6 +48,27 @@ public struct FileListResponse: Codable {
     public let files: [String]
 }
 
+/// Response from GET /urls endpoint
+public struct URLListResponse: Codable {
+    public let urls: [String]
+}
+
+/// Represents a listening port with process info
+public struct ListeningPortInfo: Codable {
+    public let port: UInt16
+    public let process: String
+}
+
+/// Response from GET /ports endpoint
+public struct PortListResponse: Codable {
+    public let ports: [ListeningPortInfo]
+}
+
+/// Response from GET /port-forwards endpoint
+public struct PortForwardListResponse: Codable {
+    public let ports: [UInt16]
+}
+
 /// Request body for POST /clipboard endpoint
 public struct ClipboardPostRequest: Codable {
     public let content: String
@@ -63,19 +84,25 @@ public struct ClipboardPostRequest: Codable {
 /// Supports both vsock (production) and TCP (development) connections
 @MainActor
 public final class GhostClient {
-    private let virtualMachine: VZVirtualMachine?
-    private let vsockPort: UInt32 = 80
-    private let authToken: String?
+    private nonisolated(unsafe) let virtualMachine: VZVirtualMachine?
+    private nonisolated(unsafe) let vmQueue: DispatchQueue?
+    private let vsockPort: UInt32 = 5000
+    private nonisolated(unsafe) let authToken: String?
 
     // For development/testing without vsock
-    private let tcpHost: String?
-    private let tcpPort: Int?
+    private nonisolated(unsafe) let tcpHost: String?
+    private nonisolated(unsafe) let tcpPort: Int?
 
-    private var urlSession: URLSession?
+    private nonisolated(unsafe) var urlSession: URLSession?
 
     /// Initialize client for vsock communication with a running VM
-    public init(virtualMachine: VZVirtualMachine, authToken: String? = nil) {
+    /// - Parameters:
+    ///   - virtualMachine: The VZVirtualMachine instance
+    ///   - vmQueue: The dispatch queue used for VM operations (from WindowlessVMSession.vmQueue)
+    ///   - authToken: Optional authentication token
+    public init(virtualMachine: VZVirtualMachine, vmQueue: DispatchQueue, authToken: String? = nil) {
         self.virtualMachine = virtualMachine
+        self.vmQueue = vmQueue
         self.authToken = authToken
         self.tcpHost = nil
         self.tcpPort = nil
@@ -84,6 +111,7 @@ public final class GhostClient {
     /// Initialize client for TCP communication (development/testing)
     public init(host: String, port: Int, authToken: String? = nil) {
         self.virtualMachine = nil
+        self.vmQueue = nil
         self.authToken = authToken
         self.tcpHost = host
         self.tcpPort = port
@@ -121,17 +149,18 @@ public final class GhostClient {
 
     // MARK: - File Transfer
 
-    /// Send a file to the guest VM
+    /// Send a file to the guest VM (streaming - supports large files)
     /// - Parameters:
-    ///   - data: The file data to send
-    ///   - filename: The filename for the file in the guest
+    ///   - fileURL: URL of the file to send
+    ///   - relativePath: Optional relative path to preserve folder structure (e.g., "folder/subfolder/file.txt")
     ///   - progressHandler: Optional callback for progress updates (0.0 to 1.0)
     /// - Returns: The path where the file was saved in the guest
-    public func sendFile(data: Data, filename: String, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+    public nonisolated func sendFile(fileURL: URL, relativePath: String? = nil, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+        let pathToSend = relativePath ?? fileURL.lastPathComponent
         if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, data: data, filename: filename, progressHandler: progressHandler)
+            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
         } else if let vm = virtualMachine {
-            return try await sendFileViaVsock(vm: vm, data: data, filename: filename, progressHandler: progressHandler)
+            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
         } else {
             throw GhostClientError.notConnected
         }
@@ -159,6 +188,137 @@ public final class GhostClient {
         } else {
             throw GhostClientError.notConnected
         }
+    }
+
+    /// Clear the file queue on the guest
+    public func clearFileQueue() async throws {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            try await clearFileQueueViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            try await clearFileQueueViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - URL Forwarding
+
+    /// Fetch and clear pending URLs from guest (URLs to open on host)
+    public func fetchPendingURLs() async throws -> [String] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await fetchURLsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await fetchURLsViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - Port Forwarding
+
+    /// Get listening ports from the guest
+    public func getListeningPorts() async throws -> [ListeningPortInfo] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await getListeningPortsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await getListeningPortsViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    /// Get port forward requests from the guest (clears the queue)
+    public func getPortForwardRequests() async throws -> [UInt16] {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return try await getPortForwardRequestsViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return try await getPortForwardRequestsViaVsock(vm: vm)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - Health Check
+
+    /// Check if GhostTools is running and reachable in the guest
+    /// - Returns: true if the guest tools are responding, false otherwise
+    public func checkHealth() async -> Bool {
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            return await checkHealthViaTCP(host: tcpHost, port: tcpPort)
+        } else if let vm = virtualMachine {
+            return await checkHealthViaVsock(vm: vm)
+        } else {
+            return false
+        }
+    }
+
+    private func checkHealthViaTCP(host: String, port: Int) async -> Bool {
+        guard let session = urlSession else { return false }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/health")!)
+        urlRequest.httpMethod = "GET"
+        urlRequest.timeoutInterval = 2
+
+        do {
+            let (_, response) = try await session.data(for: urlRequest)
+            if let httpResponse = response as? HTTPURLResponse {
+                return httpResponse.statusCode == 200
+            }
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
+        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            return false
+        }
+
+        guard let queue = self.vmQueue else {
+            return false
+        }
+
+        let port = self.vsockPort
+
+        // Connect using VM's queue (required by Apple)
+        let connection: VZVirtioSocketConnection
+        do {
+            connection = try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    socketDevice.connect(toPort: port) { result in
+                        switch result {
+                        case .success(let conn):
+                            continuation.resume(returning: conn)
+                        case .failure(let error):
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+            }
+        } catch {
+            return false
+        }
+
+        // Send HTTP health check
+        let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        let fd = connection.fileDescriptor
+
+        request.withCString { ptr in
+            _ = Darwin.write(fd, ptr, strlen(ptr))
+        }
+        Darwin.shutdown(fd, SHUT_WR)
+
+        // Read response
+        var buffer = [CChar](repeating: 0, count: 1024)
+        let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
+        connection.close()
+
+        if bytesRead > 0 {
+            let response = String(cString: buffer)
+            return response.contains("200")
+        }
+        return false
     }
 
     // MARK: - TCP Implementation (Development)
@@ -225,31 +385,22 @@ public final class GhostClient {
         }
     }
 
-    private func sendFileViaTCP(host: String, port: Int, data: Data, filename: String, progressHandler: ((Double) -> Void)?) async throws -> String {
+    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
         guard let session = urlSession else {
             throw GhostClientError.notConnected
         }
 
+        let data = try Data(contentsOf: fileURL) // TCP version still loads to memory for simplicity
+
         var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files/receive")!)
         urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue(relativePath, forHTTPHeaderField: "X-Filename")
         if let token = authToken {
             urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
+        urlRequest.httpBody = data
 
-        // Encode file as base64 JSON (matching existing GhostTools endpoint)
-        let requestBody: [String: String] = [
-            "filename": filename,
-            "content": data.base64EncodedString()
-        ]
-
-        let encoder = JSONEncoder()
-        guard let body = try? encoder.encode(requestBody) else {
-            throw GhostClientError.encodingError
-        }
-        urlRequest.httpBody = body
-
-        // For TCP we don't have streaming progress, so report 0.5 when starting
         progressHandler?(0.5)
 
         let (responseData, response) = try await session.data(for: urlRequest)
@@ -329,6 +480,106 @@ public final class GhostClient {
         return fileResponse.files
     }
 
+    private func clearFileQueueViaTCP(host: String, port: Int) async throws {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/files")!)
+        urlRequest.httpMethod = "DELETE"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (_, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+    }
+
+    private func fetchURLsViaTCP(host: String, port: Int) async throws -> [String] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/urls")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let urlResponse = try decoder.decode(URLListResponse.self, from: data)
+        return urlResponse.urls
+    }
+
+    private func getListeningPortsViaTCP(host: String, port: Int) async throws -> [ListeningPortInfo] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/ports")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let portResponse = try decoder.decode(PortListResponse.self, from: data)
+        return portResponse.ports
+    }
+
+    private func getPortForwardRequestsViaTCP(host: String, port: Int) async throws -> [UInt16] {
+        guard let session = urlSession else {
+            throw GhostClientError.notConnected
+        }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/port-forwards")!)
+        urlRequest.httpMethod = "GET"
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await session.data(for: urlRequest)
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw GhostClientError.invalidResponse(0)
+        }
+
+        guard httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse(httpResponse.statusCode)
+        }
+
+        let decoder = JSONDecoder()
+        let forwardResponse = try decoder.decode(PortForwardListResponse.self, from: data)
+        return forwardResponse.ports
+    }
+
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -383,29 +634,103 @@ public final class GhostClient {
         }
     }
 
-    private func sendFileViaVsock(vm: VZVirtualMachine, data: Data, filename: String, progressHandler: ((Double) -> Void)?) async throws -> String {
-        // Encode file as base64 JSON (matching GhostTools endpoint)
-        let requestBody: [String: String] = [
-            "filename": filename,
-            "content": data.base64EncodedString()
-        ]
-
-        let encoder = JSONEncoder()
-        guard let body = try? encoder.encode(requestBody) else {
+    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
+        // Get file size
+        let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        guard let fileSize = attributes[.size] as? Int64 else {
             throw GhostClientError.encodingError
         }
 
-        progressHandler?(0.3)
+        // Open file for reading
+        guard let fileHandle = FileHandle(forReadingAtPath: fileURL.path) else {
+            throw GhostClientError.connectionFailed("Cannot open file")
+        }
+        defer { try? fileHandle.close() }
 
-        let responseData = try await sendHTTPRequest(
-            vm: vm,
-            method: "POST",
-            path: "/api/v1/files/receive",
-            body: body,
-            contentType: "application/json"
-        )
+        // Get socket device
+        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+            throw GhostClientError.connectionFailed("No socket device available")
+        }
 
-        progressHandler?(0.9)
+        guard let queue = self.vmQueue else {
+            throw GhostClientError.connectionFailed("VM queue not available")
+        }
+
+        // Connect
+        let port = self.vsockPort
+        let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                socketDevice.connect(toPort: port) { result in
+                    switch result {
+                    case .success(let conn):
+                        continuation.resume(returning: conn)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+
+        let fd = connection.fileDescriptor
+
+        // Build and send HTTP headers - use relativePath to preserve folder structure
+        var httpHeaders = "POST /api/v1/files/receive HTTP/1.1\r\n"
+        httpHeaders += "Host: localhost\r\n"
+        httpHeaders += "Connection: close\r\n"
+        httpHeaders += "Content-Type: application/octet-stream\r\n"
+        httpHeaders += "X-Filename: \(relativePath)\r\n"
+        httpHeaders += "Content-Length: \(fileSize)\r\n"
+        httpHeaders += "\r\n"
+
+        let headerData = Data(httpHeaders.utf8)
+        let headerWritten = headerData.withUnsafeBytes { ptr in
+            Darwin.write(fd, ptr.baseAddress!, headerData.count)
+        }
+        if headerWritten < 0 {
+            connection.close()
+            throw GhostClientError.connectionFailed("Failed to write headers")
+        }
+
+        // Stream file in chunks
+        let chunkSize = 65536
+        var bytesSent: Int64 = 0
+
+        progressHandler?(0.0)
+
+        while bytesSent < fileSize {
+            let chunk = fileHandle.readData(ofLength: chunkSize)
+            if chunk.isEmpty { break }
+
+            var offset = 0
+            while offset < chunk.count {
+                let written = chunk.withUnsafeBytes { ptr in
+                    Darwin.write(fd, ptr.baseAddress! + offset, chunk.count - offset)
+                }
+                if written < 0 {
+                    connection.close()
+                    throw GhostClientError.connectionFailed("Write failed: errno \(errno)")
+                }
+                offset += written
+            }
+
+            bytesSent += Int64(chunk.count)
+            let progress = Double(bytesSent) / Double(fileSize)
+            progressHandler?(progress * 0.95) // Reserve 5% for response
+        }
+
+        // Signal end of request
+        Darwin.shutdown(fd, SHUT_WR)
+
+        // Read response
+        var responseData = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let bytesRead = Darwin.read(fd, &buffer, buffer.count)
+            if bytesRead <= 0 { break }
+            responseData.append(contentsOf: buffer[0..<bytesRead])
+        }
+
+        connection.close()
 
         let (statusCode, responseBody) = try parseHTTPResponse(responseData)
 
@@ -472,24 +797,122 @@ public final class GhostClient {
         return fileResponse.files
     }
 
+    private func clearFileQueueViaVsock(vm: VZVirtualMachine) async throws {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "DELETE",
+            path: "/api/v1/files",
+            body: nil
+        )
+
+        let (statusCode, _) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+    }
+
+    private func fetchURLsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/urls",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let urlResponse = try decoder.decode(URLListResponse.self, from: body)
+        return urlResponse.urls
+    }
+
+    private func getListeningPortsViaVsock(vm: VZVirtualMachine) async throws -> [ListeningPortInfo] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/ports",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let portResponse = try decoder.decode(PortListResponse.self, from: body)
+        return portResponse.ports
+    }
+
+    private func getPortForwardRequestsViaVsock(vm: VZVirtualMachine) async throws -> [UInt16] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/port-forwards",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let forwardResponse = try decoder.decode(PortForwardListResponse.self, from: body)
+        return forwardResponse.ports
+    }
+
     private func sendHTTPRequest(
         vm: VZVirtualMachine,
         method: String,
         path: String,
         body: Data?,
-        contentType: String? = nil
+        contentType: String? = nil,
+        extraHeaders: [String: String]? = nil
     ) async throws -> Data {
         // Get the socket device from the VM
         guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
             throw GhostClientError.connectionFailed("No socket device available")
         }
 
+        // Ensure we have the VM queue
+        guard let queue = self.vmQueue else {
+            throw GhostClientError.connectionFailed("VM queue not available")
+        }
+
         // Connect to the guest on the vsock port
-        let connection: VZVirtioSocketConnection
-        do {
-            connection = try await socketDevice.connect(toPort: vsockPort)
-        } catch {
-            throw GhostClientError.connectionFailed(error.localizedDescription)
+        // IMPORTANT: VZVirtioSocketDevice.connect MUST be called from the VM's queue
+        let port = self.vsockPort
+        let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                socketDevice.connect(toPort: port) { result in
+                    switch result {
+                    case .success(let conn):
+                        continuation.resume(returning: conn)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
         }
 
         // Build HTTP request
@@ -505,6 +928,12 @@ public final class GhostClient {
             httpRequest += "Content-Type: \(contentType)\r\n"
         }
 
+        if let headers = extraHeaders {
+            for (key, value) in headers {
+                httpRequest += "\(key): \(value)\r\n"
+            }
+        }
+
         if let body = body {
             httpRequest += "Content-Length: \(body.count)\r\n"
         }
@@ -517,16 +946,24 @@ public final class GhostClient {
             requestData.append(body)
         }
 
-        // Get file descriptor and create FileHandle for reading/writing
+        // Get file descriptor
         let fd = connection.fileDescriptor
         let fileHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
 
-        // Send request
-        do {
-            try fileHandle.write(contentsOf: requestData)
-        } catch {
-            connection.close()
-            throw GhostClientError.connectionFailed("Failed to send request: \(error.localizedDescription)")
+        // Send request in chunks to handle large files
+        let chunkSize = 65536 // 64KB chunks
+        var offset = 0
+        while offset < requestData.count {
+            let end = min(offset + chunkSize, requestData.count)
+            let chunk = requestData[offset..<end]
+            let bytesWritten = chunk.withUnsafeBytes { ptr in
+                Darwin.write(fd, ptr.baseAddress!, chunk.count)
+            }
+            if bytesWritten < 0 {
+                connection.close()
+                throw GhostClientError.connectionFailed("Write failed: errno \(errno)")
+            }
+            offset += bytesWritten
         }
 
         // Shutdown write side to signal end of request
@@ -535,7 +972,7 @@ public final class GhostClient {
         // Read response with timeout
         let responseData: Data
         do {
-            responseData = try await withTimeout(seconds: 5) {
+            responseData = try await withTimeout(seconds: 10) {
                 self.readAllData(from: fileHandle)
             }
         } catch {
@@ -559,7 +996,7 @@ public final class GhostClient {
         return result
     }
 
-    private func parseHTTPResponse(_ data: Data) throws -> (statusCode: Int, body: Data?) {
+    private nonisolated func parseHTTPResponse(_ data: Data) throws -> (statusCode: Int, body: Data?) {
         guard let responseString = String(data: data, encoding: .utf8) else {
             throw GhostClientError.decodingError
         }

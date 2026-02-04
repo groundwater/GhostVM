@@ -111,10 +111,18 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var statusText: String = ""
     @Published private(set) var virtualMachine: VZVirtualMachine?
 
+    /// The VM's dispatch queue, needed for vsock operations
+    var vmQueue: DispatchQueue? { windowlessSession?.vmQueue }
+
     // Clipboard sync
     @Published var clipboardSyncMode: ClipboardSyncMode = .disabled
     private var clipboardSyncService: ClipboardSyncService?
     private var ghostClient: GhostClient?
+
+    // Port forwarding
+    @Published var portForwardingEnabled: Bool = true
+    private var tunnelProxyService: TunnelProxyService?
+    private var portLifecycleManager: PortLifecycleManager?
 
     let bundleURL: URL
 
@@ -134,6 +142,28 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
            let mode = ClipboardSyncMode(rawValue: storedMode) {
             self.clipboardSyncMode = mode
         }
+
+        // Load persisted port forwarding setting for this VM
+        let portForwardKey = "portForwardingEnabled_\(self.bundleURL.path.hashValue)"
+        if UserDefaults.standard.object(forKey: portForwardKey) != nil {
+            self.portForwardingEnabled = UserDefaults.standard.bool(forKey: portForwardKey)
+        }
+    }
+
+    /// Update port forwarding enabled state and persist the setting
+    func setPortForwardingEnabled(_ enabled: Bool) {
+        portForwardingEnabled = enabled
+
+        // Persist the setting per-VM
+        let key = "portForwardingEnabled_\(bundleURL.path.hashValue)"
+        UserDefaults.standard.set(enabled, forKey: key)
+
+        // Update running service
+        if enabled {
+            startPortForwarding()
+        } else {
+            stopPortForwarding()
+        }
     }
 
     /// Update clipboard sync mode and persist the setting
@@ -144,21 +174,26 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         let key = "clipboardSyncMode_\(bundleURL.path.hashValue)"
         UserDefaults.standard.set(mode.rawValue, forKey: key)
 
-        // Update running service if active
+        // Update running service if active, or start it if enabling
         if let service = clipboardSyncService {
             Task { @MainActor in
                 service.setSyncMode(mode)
             }
+        } else if mode != .disabled {
+            // Service doesn't exist yet but we're enabling - start it
+            startClipboardSync()
         }
     }
 
     /// Start clipboard sync service when VM is running
     private func startClipboardSync() {
+        guard clipboardSyncService == nil else { return }  // Already started
         guard let vm = virtualMachine else { return }
+        guard let session = windowlessSession else { return }
         guard clipboardSyncMode != .disabled else { return }
 
         Task { @MainActor in
-            let client = GhostClient(virtualMachine: vm)
+            let client = GhostClient(virtualMachine: vm, vmQueue: session.vmQueue)
             self.ghostClient = client
 
             let service = ClipboardSyncService(bundlePath: bundleURL.path)
@@ -175,6 +210,58 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             clipboardSyncService?.stop()
             clipboardSyncService = nil
             ghostClient = nil
+        }
+    }
+
+    /// Start port forwarding services when VM is running
+    private func startPortForwarding() {
+        guard tunnelProxyService == nil else { return }  // Already started
+        guard let vm = virtualMachine else { return }
+        guard let session = windowlessSession else { return }
+        guard portForwardingEnabled else { return }
+
+        Task { @MainActor in
+            // Start tunnel proxy service
+            let proxyService = TunnelProxyService(
+                vm: vm,
+                queue: session.vmQueue,
+                bundlePath: bundleURL.path
+            )
+            self.tunnelProxyService = proxyService
+
+            do {
+                try await proxyService.start()
+                print("[App2VMRunSession] Tunnel proxy started")
+            } catch {
+                print("[App2VMRunSession] Failed to start tunnel proxy: \(error)")
+            }
+
+            // Create GhostClient if not already created
+            if self.ghostClient == nil {
+                self.ghostClient = GhostClient(virtualMachine: vm, vmQueue: session.vmQueue)
+            }
+
+            // Start port lifecycle manager
+            if let client = self.ghostClient {
+                let lifecycleManager = PortLifecycleManager(
+                    bundlePath: bundleURL.path,
+                    client: client
+                )
+                lifecycleManager.autoForwardEnabled = portForwardingEnabled
+                self.portLifecycleManager = lifecycleManager
+                lifecycleManager.start()
+                print("[App2VMRunSession] Port lifecycle manager started")
+            }
+        }
+    }
+
+    /// Stop port forwarding services
+    private func stopPortForwarding() {
+        Task { @MainActor in
+            portLifecycleManager?.stop()
+            portLifecycleManager = nil
+            tunnelProxyService?.stop()
+            tunnelProxyService = nil
         }
     }
 
@@ -394,8 +481,10 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         switch newState {
         case .running:
             startClipboardSync()
+            startPortForwarding()
         case .stopped, .failed, .stopping, .suspending:
             stopClipboardSync()
+            stopPortForwarding()
         default:
             break
         }

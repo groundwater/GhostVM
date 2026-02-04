@@ -58,33 +58,107 @@ public final class FileTransferService: ObservableObject {
     /// Last error message
     @Published public private(set) var lastError: String?
 
+    /// Number of files queued in guest waiting to be fetched
+    @Published public private(set) var queuedGuestFileCount: Int = 0
+
     private var ghostClient: GhostClient?
     private let maxConcurrentTransfers = 3
     private var activeTransferCount = 0
+    private var pollTimer: Timer?
 
     public init() {}
 
     /// Configure the service with a GhostClient
     public func configure(client: GhostClient) {
         self.ghostClient = client
+        startPollingGuestQueue()
     }
 
+    /// Start polling guest for queued files
+    private func startPollingGuestQueue() {
+        pollTimer?.invalidate()
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.checkGuestQueue()
+            }
+        }
+    }
+
+    /// Check how many files are queued in the guest and fetch pending URLs
+    private func checkGuestQueue() async {
+        guard let client = ghostClient else { return }
+
+        // Check for queued files
+        do {
+            let files = try await client.listFiles()
+            queuedGuestFileCount = files.count
+        } catch {
+            // Silently fail - guest might not be connected
+        }
+
+        // Check for URLs to open on host
+        do {
+            let urls = try await client.fetchPendingURLs()
+            for urlString in urls {
+                if let url = URL(string: urlString) {
+                    print("[FileTransfer] Opening URL from guest: \(urlString)")
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        } catch {
+            // Silently fail - guest might not be connected
+        }
+    }
+
+    /// Queue of files pending transfer (with relative paths for folder structure)
+    private var pendingFiles: [FileWithRelativePath] = []
+    private var isProcessingQueue = false
+
     /// Send files to the guest VM
-    /// - Parameter urls: File URLs to send
-    public func sendFiles(_ urls: [URL]) {
-        guard let client = ghostClient else {
+    /// - Parameter files: Files with their relative paths to send
+    public func sendFiles(_ files: [FileWithRelativePath]) {
+        print("[FileTransfer] sendFiles called with \(files.count) file(s)")
+        guard ghostClient != nil else {
+            print("[FileTransfer] ERROR: ghostClient is nil!")
             lastError = "Not connected to guest"
             return
         }
 
-        for url in urls {
-            sendFile(url, client: client)
+        // Add to queue
+        pendingFiles.append(contentsOf: files)
+        print("[FileTransfer] Queued \(files.count) file(s), total pending: \(pendingFiles.count)")
+
+        // Start processing if not already
+        processNextFile()
+    }
+
+    /// Process files one at a time
+    private func processNextFile() {
+        guard !isProcessingQueue else { return }
+        guard let client = ghostClient else { return }
+        guard !pendingFiles.isEmpty else { return }
+
+        isProcessingQueue = true
+        let file = pendingFiles.removeFirst()
+
+        print("[FileTransfer] Processing: \(file.relativePath) (\(pendingFiles.count) remaining)")
+        sendFile(file.url, relativePath: file.relativePath, client: client) { [weak self] in
+            // Completion callback - process next file
+            Task { @MainActor in
+                self?.isProcessingQueue = false
+                self?.processNextFile()
+            }
         }
     }
 
-    /// Send a single file to the guest VM
-    private func sendFile(_ url: URL, client: GhostClient) {
-        let filename = url.lastPathComponent
+    /// Send a single file to the guest VM (streaming)
+    /// - Parameters:
+    ///   - url: The local file URL
+    ///   - relativePath: The relative path to preserve folder structure (e.g., "folder/file.txt")
+    ///   - client: The GhostClient to use for transfer
+    ///   - completion: Callback when transfer completes
+    private func sendFile(_ url: URL, relativePath: String, client: GhostClient, completion: (() -> Void)? = nil) {
+        let displayName = relativePath
 
         // Get file size
         let fileSize: Int64
@@ -93,38 +167,49 @@ public final class FileTransferService: ObservableObject {
             fileSize = (attributes[.size] as? Int64) ?? 0
         } catch {
             lastError = "Cannot read file: \(error.localizedDescription)"
+            completion?()
             return
         }
 
-        var transfer = FileTransfer(filename: filename, size: fileSize, direction: .hostToGuest)
+        var transfer = FileTransfer(filename: displayName, size: fileSize, direction: .hostToGuest)
         transfer.state = .preparing
         transfers.append(transfer)
         isTransferring = true
 
         let transferId = transfer.id
 
-        Task {
+        // Run transfer on background thread to keep UI responsive
+        Task.detached(priority: .userInitiated) { [weak self] in
             do {
-                // Read file data
-                let data = try Data(contentsOf: url)
+                print("[FileTransfer] Streaming file: \(relativePath) (\(fileSize) bytes)")
 
-                updateTransferState(id: transferId, state: .transferring(progress: 0))
+                await MainActor.run {
+                    self?.updateTransferState(id: transferId, state: .transferring(progress: 0))
+                }
 
-                // Send to guest
-                let savedPath = try await client.sendFile(data: data, filename: filename) { [weak self] progress in
+                // Stream to guest (no memory loading) - pass relative path for folder structure
+                let savedPath = try await client.sendFile(fileURL: url, relativePath: relativePath) { progress in
                     Task { @MainActor in
                         self?.updateTransferState(id: transferId, state: .transferring(progress: progress))
                     }
                 }
 
-                updateTransferState(id: transferId, state: .completed(path: savedPath))
+                print("[FileTransfer] Success! Saved at: \(savedPath)")
+                await MainActor.run {
+                    self?.updateTransferState(id: transferId, state: .completed(path: savedPath))
+                    self?.updateIsTransferring()
+                    completion?()
+                }
 
             } catch {
-                updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
-                lastError = "Transfer failed: \(error.localizedDescription)"
+                print("[FileTransfer] FAILED: \(error)")
+                await MainActor.run {
+                    self?.updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
+                    self?.lastError = "Transfer failed: \(error.localizedDescription)"
+                    self?.updateIsTransferring()
+                    completion?()
+                }
             }
-
-            updateIsTransferring()
         }
     }
 
@@ -171,6 +256,9 @@ public final class FileTransferService: ObservableObject {
 
                 updateTransferState(id: transferId, state: .completed(path: saveURL.path))
 
+                // Reveal in Finder
+                NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+
             } catch {
                 updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
                 lastError = "Fetch failed: \(error.localizedDescription)"
@@ -186,6 +274,34 @@ public final class FileTransferService: ObservableObject {
             throw GhostClientError.notConnected
         }
         return try await client.listFiles()
+    }
+
+    /// Fetch all queued files from the guest and save to Downloads
+    public func fetchAllGuestFiles() {
+        guard let client = ghostClient else {
+            lastError = "Not connected to guest"
+            return
+        }
+
+        Task {
+            do {
+                let files = try await listGuestFiles()
+                print("[FileTransfer] Found \(files.count) file(s) queued on guest")
+
+                for guestPath in files {
+                    fetchFile(at: guestPath, showSavePanel: false)
+                }
+
+                // Clear the queue on the guest
+                if !files.isEmpty {
+                    try await client.clearFileQueue()
+                    queuedGuestFileCount = 0
+                    print("[FileTransfer] Cleared guest file queue")
+                }
+            } catch {
+                lastError = "Failed to list guest files: \(error.localizedDescription)"
+            }
+        }
     }
 
     /// Clear completed and failed transfers from the list
@@ -216,11 +332,16 @@ public final class FileTransferService: ObservableObject {
     private func updateTransferState(id: UUID, state: FileTransferState) {
         if let index = transfers.firstIndex(where: { $0.id == id }) {
             transfers[index].state = state
+            print("[FileTransfer] State updated: \(state)")
         }
     }
 
     private func updateIsTransferring() {
+        let wasTransferring = isTransferring
         isTransferring = transfers.contains { $0.state.isActive }
+        if wasTransferring != isTransferring {
+            print("[FileTransfer] isTransferring changed: \(isTransferring)")
+        }
     }
 
     private func showSavePanelAsync(suggestedFilename: String) async -> URL? {

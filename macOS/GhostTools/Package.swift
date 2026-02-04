@@ -9,14 +9,14 @@ let package = Package(
     products: [
         .executable(name: "GhostTools", targets: ["GhostTools"])
     ],
-    dependencies: [
-        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
-    ],
+    dependencies: [],
     targets: [
         .executableTarget(
             name: "GhostTools",
-            dependencies: [
-                .product(name: "Hummingbird", package: "hummingbird"),
+            dependencies: [],
+            exclude: ["Resources/Info.plist"],
+            linkerSettings: [
+                .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Sources/GhostTools/Resources/Info.plist"], .when(configuration: .release))
             ]
         ),
         .testTarget(

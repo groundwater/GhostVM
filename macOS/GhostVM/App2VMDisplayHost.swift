@@ -4,6 +4,12 @@ import Virtualization
 import Combine
 import UniformTypeIdentifiers
 
+/// Represents a file with its path relative to a dropped folder
+public struct FileWithRelativePath {
+    public let url: URL
+    public let relativePath: String  // e.g., "folder/subfolder/file.txt" or just "file.txt"
+}
+
 // SwiftUI wrapper around VZVirtualMachineView so AppKit stays isolated here.
 struct App2VMDisplayHost: NSViewRepresentable {
     let virtualMachine: VZVirtualMachine?
@@ -139,28 +145,27 @@ class FocusableVMView: VZVirtualMachineView {
 
     // MARK: - NSDraggingDestination
 
+    private var isDragging = false
+
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        print("[DragDrop] draggingEntered")
         guard hasFileURLs(in: sender) else {
+            print("[DragDrop] No file URLs found")
             return []
         }
 
-        // Show drop zone overlay
-        dropZoneOverlay.isHidden = false
-        dropZoneOverlay.alphaValue = 0
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            dropZoneOverlay.animator().alphaValue = 1
-        }
-
-        // Update service state
-        Task { @MainActor in
-            coordinator?.fileTransferService?.isDropTargetActive = true
-        }
+        isDragging = true
+        showDropZone()
 
         return .copy
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        // Keep overlay visible during drag
+        if isDragging && dropZoneOverlay.isHidden {
+            showDropZone()
+        }
+
         guard hasFileURLs(in: sender) else {
             return []
         }
@@ -168,30 +173,48 @@ class FocusableVMView: VZVirtualMachineView {
     }
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
+        print("[DragDrop] draggingExited")
+        isDragging = false
         hideDropZone()
     }
 
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        print("[DragDrop] prepareForDragOperation")
         return hasFileURLs(in: sender)
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        print("[DragDrop] performDragOperation")
+        isDragging = false
         hideDropZone()
 
-        guard let urls = extractFileURLs(from: sender), !urls.isEmpty else {
+        guard let files = extractFilesWithPaths(from: sender), !files.isEmpty else {
+            print("[DragDrop] No valid file URLs extracted")
             return false
         }
 
+        print("[DragDrop] Sending \(files.count) file(s): \(files.map { $0.relativePath })")
+
         // Send files to guest
-        Task { @MainActor in
-            coordinator?.fileTransferService?.sendFiles(urls)
+        if let service = coordinator?.fileTransferService {
+            service.sendFiles(files)
+        } else {
+            print("[DragDrop] ERROR: fileTransferService is nil!")
         }
 
         return true
     }
 
     override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        print("[DragDrop] concludeDragOperation")
+        isDragging = false
         hideDropZone()
+    }
+
+    private func showDropZone() {
+        dropZoneOverlay.isHidden = false
+        dropZoneOverlay.alphaValue = 1
+        coordinator?.fileTransferService?.isDropTargetActive = true
     }
 
     // MARK: - Private Helpers
@@ -201,29 +224,48 @@ class FocusableVMView: VZVirtualMachineView {
         return pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
     }
 
-    private func extractFileURLs(from draggingInfo: NSDraggingInfo) -> [URL]? {
+    private func extractFilesWithPaths(from draggingInfo: NSDraggingInfo) -> [FileWithRelativePath]? {
         let pasteboard = draggingInfo.draggingPasteboard
         guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
             return nil
         }
-        // Filter to only include files (not directories)
-        return urls.filter { url in
+
+        var result: [FileWithRelativePath] = []
+        let fm = FileManager.default
+
+        for url in urls {
             var isDirectory: ObjCBool = false
-            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
+
+            if isDirectory.boolValue {
+                // For directories, preserve the folder name as the base of relative paths
+                let baseFolderName = url.lastPathComponent
+                let baseURL = url
+
+                // Enumerate all files in directory recursively
+                if let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                    for case let fileURL as URL in enumerator {
+                        var isFile: ObjCBool = false
+                        if fm.fileExists(atPath: fileURL.path, isDirectory: &isFile) && !isFile.boolValue {
+                            // Compute relative path: folder/subfolder/file.txt
+                            let relativePath = baseFolderName + "/" + fileURL.path.dropFirst(baseURL.path.count + 1)
+                            result.append(FileWithRelativePath(url: fileURL, relativePath: String(relativePath)))
+                        }
+                    }
+                }
+            } else {
+                // Single file - relative path is just the filename
+                result.append(FileWithRelativePath(url: url, relativePath: url.lastPathComponent))
+            }
         }
+
+        return result.isEmpty ? nil : result
     }
 
     private func hideDropZone() {
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.2
-            dropZoneOverlay.animator().alphaValue = 0
-        } completionHandler: { [weak self] in
-            self?.dropZoneOverlay.isHidden = true
-        }
-
-        Task { @MainActor in
-            coordinator?.fileTransferService?.isDropTargetActive = false
-        }
+        dropZoneOverlay.isHidden = true
+        dropZoneOverlay.alphaValue = 0
+        coordinator?.fileTransferService?.isDropTargetActive = false
     }
 }
 
