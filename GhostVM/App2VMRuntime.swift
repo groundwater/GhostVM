@@ -127,7 +127,30 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var logPollingService: LogPollingService?
     private var logPollingStarting = false
 
+    // Helper app for separate Dock icon
+    private var helperBundleManager = VMHelperBundleManager()
+    private var helperProcess: NSRunningApplication?
+    private var helperNotificationObserver: NSObjectProtocol?
+    private var helperReadyObserver: NSObjectProtocol?
+
     let bundleURL: URL
+
+    /// VM name derived from bundle filename
+    private var vmName: String {
+        let candidate = bundleURL.deletingPathExtension().lastPathComponent
+        return candidate.isEmpty ? bundleURL.lastPathComponent : candidate
+    }
+
+    /// Stable UUID derived from bundle path (used for helper bundle ID)
+    private var vmUUID: String {
+        // Create a stable hash from the bundle path
+        let data = Data(bundleURL.path.utf8)
+        var hash: UInt64 = 0
+        for byte in data {
+            hash = hash &* 31 &+ UInt64(byte)
+        }
+        return String(format: "%016llx", hash)
+    }
 
     // Callbacks so the SwiftUI layer can reflect status into the list.
     var onStateChange: ((State) -> Void)?
@@ -326,6 +349,118 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         logPollingService = nil
     }
 
+    // MARK: - Helper App (Separate Dock Icon)
+
+    /// Start the helper app for this VM's separate Dock icon
+    private func startHelperApp() {
+        guard helperProcess == nil else { return }  // Already started
+
+        // Find the GhostVMHelper executable in the main app bundle
+        guard let mainBundleURL = Bundle.main.bundleURL as URL?,
+              let helperExecutableURL = Bundle.main.url(forAuxiliaryExecutable: "GhostVMHelper") else {
+            print("[App2VMRunSession] GhostVMHelper not found in app bundle")
+            return
+        }
+
+        do {
+            // Create helper bundle in VM bundle
+            let helperAppURL = try helperBundleManager.createHelperBundle(
+                vmBundleURL: bundleURL,
+                vmName: vmName,
+                vmUUID: vmUUID,
+                sourceHelperURL: helperExecutableURL,
+                customIconURL: VMFileLayout(bundleURL: bundleURL).customIconURL
+            )
+
+            // Register for activation notification from helper
+            let notificationName = "com.ghostvm.helper.activated.\(vmUUID)"
+            helperNotificationObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name(notificationName),
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.handleHelperActivation()
+            }
+
+            // Register for ready notification
+            let readyNotificationName = "com.ghostvm.helper.ready.\(vmUUID)"
+            helperReadyObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name(readyNotificationName),
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                if let pid = notification.userInfo?["pid"] as? pid_t {
+                    print("[App2VMRunSession] Helper app ready with PID \(pid)")
+                }
+            }
+
+            // Launch the helper app
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.arguments = ["--vm-uuid", vmUUID, "--vm-name", vmName]
+            configuration.activates = false  // Don't steal focus from main app
+
+            NSWorkspace.shared.openApplication(
+                at: helperAppURL,
+                configuration: configuration
+            ) { [weak self] app, error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        print("[App2VMRunSession] Failed to launch helper app: \(error)")
+                    } else if let app = app {
+                        self?.helperProcess = app
+                        print("[App2VMRunSession] Helper app launched for '\(self?.vmName ?? "unknown")'")
+                    }
+                }
+            }
+
+        } catch {
+            print("[App2VMRunSession] Failed to create helper bundle: \(error)")
+        }
+    }
+
+    /// Stop the helper app
+    private func stopHelperApp() {
+        // Send quit notification to helper
+        let quitNotificationName = "com.ghostvm.helper.quit.\(vmUUID)"
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name(quitNotificationName),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+
+        // Remove notification observers
+        if let observer = helperNotificationObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+            helperNotificationObserver = nil
+        }
+        if let observer = helperReadyObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+            helperReadyObserver = nil
+        }
+
+        // Give helper time to quit gracefully, then force terminate if needed
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            if let process = self?.helperProcess, !process.isTerminated {
+                process.terminate()
+            }
+            self?.helperProcess = nil
+        }
+    }
+
+    /// Handle Dock icon click from helper app
+    private func handleHelperActivation() {
+        print("[App2VMRunSession] Helper activation received - bringing VM window to focus")
+
+        // Post notification that can be observed by the window coordinator
+        NotificationCenter.default.post(
+            name: NSNotification.Name("com.ghostvm.focusVM"),
+            object: bundleURL.path
+        )
+
+        // Activate the main app
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     func startIfNeeded() {
         switch state {
@@ -545,10 +680,17 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             startClipboardSync()
             startPortForwarding()
             startLogPolling()
-        case .stopped, .failed, .stopping, .suspending:
+            startHelperApp()
+        case .stopped, .failed:
             stopClipboardSync()
             stopPortForwarding()
             stopLogPolling()
+            stopHelperApp()
+        case .stopping, .suspending:
+            stopClipboardSync()
+            stopPortForwarding()
+            stopLogPolling()
+            // Keep helper app running during suspend - it will be stopped when state becomes stopped/failed
         default:
             break
         }

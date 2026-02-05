@@ -62,6 +62,21 @@ targets:
           - "@executable_path/../Frameworks"
           - "@executable_path"
 
+  GhostVMHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - path: GhostVMHelper
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMHelper
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: GhostVMHelper/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+
   GhostVM:
     type: application
     platform: macOS
@@ -78,6 +93,11 @@ targets:
       - target: GhostVMKit
         embed: true
       - target: vmctl
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - target: GhostVMHelper
         embed: true
         codeSign: true
         copy:
