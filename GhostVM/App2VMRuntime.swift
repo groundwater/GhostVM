@@ -40,7 +40,11 @@ final class App2VMSessionRegistry {
 
     /// Starts a VM by launching its helper app. Creates a session if needed.
     /// This is used when no window is needed in the main app (helper provides the window).
-    func startVM(bundleURL: URL) {
+    /// - Parameters:
+    ///   - bundleURL: The VM bundle URL
+    ///   - store: The VM store to update status in
+    ///   - vmID: The VM's ID in the store for status updates
+    func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID) {
         let path = bundleURL.standardizedFileURL.path
         lock.lock()
         var session = sessions[path]
@@ -51,6 +55,27 @@ final class App2VMSessionRegistry {
             lock.lock()
             sessions[path] = session
             lock.unlock()
+        }
+
+        // Wire up status updates to the store
+        session?.onStateChange = { [weak store, vmID, bundleURL] state in
+            guard let store = store else { return }
+            DispatchQueue.main.async {
+                switch state {
+                case .running:
+                    store.updateStatus(for: vmID, status: "Running")
+                case .starting:
+                    store.updateStatus(for: vmID, status: "Starting…")
+                case .suspending:
+                    store.updateStatus(for: vmID, status: "Suspending…")
+                case .stopping:
+                    store.updateStatus(for: vmID, status: "Stopping…")
+                case .stopped, .idle:
+                    store.reloadVM(at: bundleURL)
+                case .failed:
+                    store.updateStatus(for: vmID, status: "Error")
+                }
+            }
         }
 
         session?.startIfNeeded()
@@ -168,7 +193,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         super.init()
 
         // Load persisted clipboard sync mode for this VM
-        let key = "clipboardSyncMode_\(self.bundleURL.path.hashValue)"
+        let key = "clipboardSyncMode_\(self.bundleURL.path.stableHash)"
         if let storedMode = UserDefaults.standard.string(forKey: key),
            let mode = ClipboardSyncMode(rawValue: storedMode) {
             self.clipboardSyncMode = mode
@@ -181,7 +206,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         clipboardSyncMode = mode
 
         // Persist the setting per-VM
-        let key = "clipboardSyncMode_\(bundleURL.path.hashValue)"
+        let key = "clipboardSyncMode_\(bundleURL.path.stableHash)"
         UserDefaults.standard.set(mode.rawValue, forKey: key)
 
         // Update running service if active, or start it if enabling
@@ -377,7 +402,11 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             )
 
             // Register for state change notifications from helper
-            let bundlePathHash = bundleURL.path.hashValue
+            // IMPORTANT: Use standardized path to match helper's path normalization
+            let standardizedPath = bundleURL.standardizedFileURL.path
+            let bundlePathHash = standardizedPath.stableHash
+            print("[App2VMRunSession] Registering for helper notifications: com.ghostvm.helper.state.\(bundlePathHash)")
+            print("[App2VMRunSession] Bundle path (standardized): \(standardizedPath)")
             helperStateObserver = DistributedNotificationCenter.default().addObserver(
                 forName: NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
                 object: nil,
@@ -386,9 +415,9 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 self?.handleHelperStateChange(notification)
             }
 
-            // Launch the helper app with VM bundle path
+            // Launch the helper app with VM bundle path (use standardized path)
             let configuration = NSWorkspace.OpenConfiguration()
-            configuration.arguments = ["--vm-bundle", bundleURL.path]
+            configuration.arguments = ["--vm-bundle", standardizedPath]
             configuration.activates = true
 
             NSWorkspace.shared.openApplication(
@@ -414,9 +443,12 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Handle state change notification from helper
     private func handleHelperStateChange(_ notification: Notification) {
-        guard let stateString = notification.userInfo?["state"] as? String else { return }
+        guard let stateString = notification.userInfo?["state"] as? String else {
+            print("[App2VMRunSession] Received notification but no state in userInfo")
+            return
+        }
 
-        print("[App2VMRunSession] Helper state changed: \(stateString)")
+        print("[App2VMRunSession] Helper state changed to: \(stateString) for '\(vmName)'")
 
         switch stateString {
         case "starting":
@@ -441,7 +473,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Send stop command to helper
     private func sendStopToHelper() {
-        let bundlePathHash = bundleURL.path.hashValue
+        let bundlePathHash = bundleURL.standardizedFileURL.path.stableHash
         DistributedNotificationCenter.default().postNotificationName(
             NSNotification.Name("com.ghostvm.helper.stop.\(bundlePathHash)"),
             object: nil,
@@ -452,7 +484,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Send suspend command to helper
     private func sendSuspendToHelper() {
-        let bundlePathHash = bundleURL.path.hashValue
+        let bundlePathHash = bundleURL.standardizedFileURL.path.stableHash
         DistributedNotificationCenter.default().postNotificationName(
             NSNotification.Name("com.ghostvm.helper.suspend.\(bundlePathHash)"),
             object: nil,
@@ -463,7 +495,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Send terminate (force stop) command to helper
     private func sendTerminateToHelper() {
-        let bundlePathHash = bundleURL.path.hashValue
+        let bundlePathHash = bundleURL.standardizedFileURL.path.stableHash
         DistributedNotificationCenter.default().postNotificationName(
             NSNotification.Name("com.ghostvm.helper.terminate.\(bundlePathHash)"),
             object: nil,

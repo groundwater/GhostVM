@@ -257,7 +257,7 @@ struct VMListDemoView: View {
                         isSelected: selectedVMID == vm.id,
                         play: {
                             // Launch helper app (no window in main app - helper provides window)
-                            App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL)
+                            App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
                         },
                         requestDelete: {
                             vmPendingDelete = vm
@@ -287,7 +287,7 @@ struct VMListDemoView: View {
                             vm: vm,
                             play: {
                                 // Launch helper app (no window in main app - helper provides window)
-                                App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL)
+                                App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
                             },
                             requestDelete: {
                                 vmPendingDelete = vm
@@ -848,8 +848,30 @@ struct VMRowView: View {
     let requestTerminate: () -> Void
     let requestInstall: () -> Void
 
+    private var vmIcon: NSImage? {
+        let iconURL = vm.bundleURL.appendingPathComponent("icon.png")
+        if FileManager.default.fileExists(atPath: iconURL.path) {
+            return NSImage(contentsOf: iconURL)
+        }
+        return nil
+    }
+
     var body: some View {
         HStack(spacing: 12) {
+            Group {
+                if let icon = vmIcon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 32, height: 32)
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(vm.name)
                     .font(.headline)
@@ -1008,6 +1030,9 @@ struct EditVMView: View {
     @State private var memoryGiB: String = "8"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
+    @State private var customIcon: NSImage?
+    @State private var customIconChanged: Bool = false
+    @State private var iconRemoved: Bool = false
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -1024,6 +1049,54 @@ struct EditVMView: View {
                 ProgressView("Loading settings…")
                     .padding(.vertical, 8)
             } else {
+                labeledRow("Icon") {
+                    HStack(spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.secondary.opacity(0.1))
+                                .frame(width: 64, height: 64)
+
+                            if let icon = customIcon {
+                                Image(nsImage: icon)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: 56, height: 56)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            } else {
+                                Image(systemName: "desktopcomputer")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(width: 64, height: 64)
+                        .onTapGesture {
+                            selectIconFile()
+                        }
+                        .onDrop(of: [UTType.image], isTargeted: nil) { providers in
+                            handleIconDrop(providers)
+                        }
+                        .help("Click to choose an icon, or drag and drop an image")
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Button("Choose Image…") {
+                                selectIconFile()
+                            }
+                            .buttonStyle(.borderless)
+
+                            if customIcon != nil {
+                                Button(role: .destructive) {
+                                    customIcon = nil
+                                    customIconChanged = true
+                                    iconRemoved = true
+                                } label: {
+                                    Label("Remove", systemImage: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                            }
+                        }
+                    }
+                }
+
                 labeledRow("CPUs") {
                     HStack(spacing: 8) {
                         TextField("Number of vCPUs", text: $cpuCount)
@@ -1149,6 +1222,12 @@ struct EditVMView: View {
                     // Load port forwards
                     self.portForwards = config.portForwards
 
+                    // Load custom icon
+                    let layout = VMFileLayout(bundleURL: vm.bundleURL)
+                    if FileManager.default.fileExists(atPath: layout.customIconURL.path) {
+                        self.customIcon = NSImage(contentsOf: layout.customIconURL)
+                    }
+
                     self.isLoading = false
                 }
             } catch {
@@ -1184,6 +1263,19 @@ struct EditVMView: View {
                     portForwards: validForwards
                 )
 
+                // Save or remove custom icon
+                let layout = VMFileLayout(bundleURL: vm.bundleURL)
+                if customIconChanged {
+                    if iconRemoved {
+                        try? FileManager.default.removeItem(at: layout.customIconURL)
+                    } else if let icon = customIcon,
+                              let tiff = icon.tiffRepresentation,
+                              let bitmap = NSBitmapImageRep(data: tiff),
+                              let pngData = bitmap.representation(using: .png, properties: [:]) {
+                        try pngData.write(to: layout.customIconURL)
+                    }
+                }
+
                 DispatchQueue.main.async {
                     self.isSaving = false
                     self.isPresented = false
@@ -1196,6 +1288,44 @@ struct EditVMView: View {
                 }
             }
         }
+    }
+
+    private func selectIconFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType.png, UTType.jpeg, UTType.tiff, UTType.heic]
+        panel.message = "Choose an icon image for this VM"
+
+        if panel.runModal() == .OK, let url = panel.url,
+           let image = NSImage(contentsOf: url) {
+            customIcon = image
+            customIconChanged = true
+            iconRemoved = false
+        }
+    }
+
+    private func handleIconDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+
+        if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            provider.loadItem(forTypeIdentifier: UTType.image.identifier, options: nil) { item, _ in
+                DispatchQueue.main.async {
+                    if let url = item as? URL, let image = NSImage(contentsOf: url) {
+                        self.customIcon = image
+                        self.customIconChanged = true
+                        self.iconRemoved = false
+                    } else if let data = item as? Data, let image = NSImage(data: data) {
+                        self.customIcon = image
+                        self.customIconChanged = true
+                        self.iconRemoved = false
+                    }
+                }
+            }
+            return true
+        }
+        return false
     }
 }
 

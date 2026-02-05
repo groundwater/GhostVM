@@ -15,6 +15,7 @@ Use the `.claude/skills/` folder for detailed guidance on specific topics:
 | **Testing** | XCTest, mocking, async testing |
 | **Xcode** | XcodeGen, project.yml, build settings |
 | **gh** | GitHub CLI for issues, PRs, releases |
+| **research** | `/research <topic> [--folder <subfolder>]` - Deep research with web search |
 
 ## Build Commands
 

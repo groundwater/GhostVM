@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import Virtualization
 import GhostVMKit
@@ -14,7 +15,8 @@ import GhostVMKit
 ///   - Posts "com.ghostvm.helper.state.<bundlePath>" when state changes
 ///
 
-final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate {
+@MainActor
+final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, VZVirtualMachineDelegate, NSMenuItemValidation, HelperToolbarDelegate, FileTransferDelegate {
 
     enum State: String {
         case starting
@@ -30,7 +32,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var state: State = .stopped
 
     private var window: NSWindow?
-    private var vmView: VZVirtualMachineView?
+    private var vmView: FocusableVMView?
     private var virtualMachine: VZVirtualMachine?
     private var vmQueue: DispatchQueue?
     private var layout: VMFileLayout?
@@ -40,6 +42,17 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private let fileManager = FileManager.default
 
     private var ownsLock = false
+    private var helperToolbar: HelperToolbar?
+    private var statusOverlay: StatusOverlay?
+
+    // Services
+    private var ghostClient: GhostClient?
+    private var clipboardSyncService: ClipboardSyncService?
+    private var portForwardService: PortForwardService?
+    private var fileTransferService: FileTransferService?
+    private var logPollingService: LogPollingService?
+    private var healthCheckTimer: Timer?
+    private var fileTransferCancellable: AnyCancellable?
 
     // MARK: - App Lifecycle
 
@@ -55,11 +68,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let bundlePath = args[bundleIndex + 1]
         vmBundleURL = URL(fileURLWithPath: bundlePath).standardizedFileURL
         vmName = vmBundleURL.deletingPathExtension().lastPathComponent
+        ProcessInfo.processInfo.processName = vmName
 
         NSLog("GhostVMHelper: Starting VM '\(vmName)' from \(vmBundleURL.path)")
 
         // Set activation policy to show in Dock
         NSApp.setActivationPolicy(.regular)
+
+        // Setup menu bar
+        setupMenuBar()
 
         // Load and set custom icon
         loadCustomIcon()
@@ -108,10 +125,227 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
+    // MARK: - Menu Bar
+
+    private func setupMenuBar() {
+        let mainMenu = NSMenu()
+
+        // Application menu
+        let appMenuItem = NSMenuItem()
+        mainMenu.addItem(appMenuItem)
+        let appMenu = NSMenu()
+        appMenuItem.submenu = appMenu
+
+        let aboutItem = NSMenuItem(title: "About GhostVM Helper", action: #selector(showAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
+        appMenu.addItem(aboutItem)
+
+        appMenu.addItem(NSMenuItem.separator())
+
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenu.addItem(quitItem)
+
+        // VM menu
+        let vmMenuItem = NSMenuItem()
+        vmMenuItem.title = "VM"
+        mainMenu.addItem(vmMenuItem)
+        let vmMenu = NSMenu(title: "VM")
+        vmMenuItem.submenu = vmMenu
+
+        let startItem = NSMenuItem(title: "Start", action: #selector(startVMAction), keyEquivalent: "r")
+        startItem.target = self
+        vmMenu.addItem(startItem)
+
+        vmMenu.addItem(NSMenuItem.separator())
+
+        // Clipboard Sync submenu
+        let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: nil, keyEquivalent: "")
+        let clipboardSubmenu = NSMenu(title: "Clipboard Sync")
+        clipboardItem.submenu = clipboardSubmenu
+        vmMenu.addItem(clipboardItem)
+
+        let syncModes = [
+            ("Bidirectional", "bidirectional"),
+            ("Host → Guest", "hostToGuest"),
+            ("Guest → Host", "guestToHost"),
+            ("Disabled", "disabled")
+        ]
+        for (title, mode) in syncModes {
+            let item = NSMenuItem(title: title, action: #selector(setClipboardSyncMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode
+            clipboardSubmenu.addItem(item)
+        }
+
+        vmMenu.addItem(NSMenuItem.separator())
+
+        let reinstallToolsItem = NSMenuItem(title: "Reinstall Guest Tools…", action: #selector(reinstallGuestTools), keyEquivalent: "")
+        reinstallToolsItem.target = self
+        vmMenu.addItem(reinstallToolsItem)
+
+        vmMenu.addItem(NSMenuItem.separator())
+
+        let suspendItem = NSMenuItem(title: "Suspend", action: #selector(suspendVMAction), keyEquivalent: "s")
+        suspendItem.keyEquivalentModifierMask = [.command, .option]
+        suspendItem.target = self
+        vmMenu.addItem(suspendItem)
+
+        let shutdownItem = NSMenuItem(title: "Shut Down", action: #selector(shutdownVMAction), keyEquivalent: "q")
+        shutdownItem.keyEquivalentModifierMask = [.command, .option]
+        shutdownItem.target = self
+        vmMenu.addItem(shutdownItem)
+
+        let terminateItem = NSMenuItem(title: "Terminate", action: nil, keyEquivalent: "")
+        terminateItem.action = #selector(terminateVMAction)
+        terminateItem.target = self
+        vmMenu.addItem(terminateItem)
+
+        // Window menu
+        let windowMenuItem = NSMenuItem()
+        windowMenuItem.title = "Window"
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenuItem.submenu = windowMenu
+
+        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
+        windowMenu.addItem(NSMenuItem.separator())
+        let fullscreenItem = NSMenuItem(title: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
+        fullscreenItem.keyEquivalentModifierMask = [.command, .control]
+        windowMenu.addItem(fullscreenItem)
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    // MARK: - Menu Actions
+
+    @objc private func showAboutPanel() {
+        let alert = NSAlert()
+        alert.messageText = "GhostVM Helper"
+        alert.informativeText = "Running VM: \(vmName)\n\nThis helper app hosts a single virtual machine with its own Dock icon."
+        alert.alertStyle = .informational
+        alert.runModal()
+    }
+
+    @objc private func startVMAction() {
+        // Start is only valid if not already running
+        guard state == .stopped || state == .failed else { return }
+        startVM()
+    }
+
+    @objc private func suspendVMAction() {
+        suspendVM()
+    }
+
+    @objc private func shutdownVMAction() {
+        stopVM()
+    }
+
+    @objc private func terminateVMAction() {
+        terminateVM()
+    }
+
+    @objc private func setClipboardSyncMode(_ sender: NSMenuItem) {
+        guard let mode = sender.representedObject as? String else { return }
+        toolbar(helperToolbar!, didSelectClipboardSyncMode: mode)
+    }
+
+    @objc private func reinstallGuestTools() {
+        // TODO: Connect to GuestToolsInstaller when integrated
+        NSLog("GhostVMHelper: Reinstall guest tools requested")
+    }
+
+    // Menu validation
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        switch menuItem.action {
+        case #selector(startVMAction):
+            return state == .stopped || state == .failed
+        case #selector(suspendVMAction):
+            return state == .running
+        case #selector(shutdownVMAction):
+            return state == .running
+        case #selector(terminateVMAction):
+            return state == .running || state == .stopping || state == .suspending
+        case #selector(setClipboardSyncMode(_:)):
+            if let modeString = menuItem.representedObject as? String,
+               let currentMode = clipboardSyncService?.syncMode {
+                menuItem.state = (modeString == currentMode.rawValue) ? .on : .off
+            }
+            return state == .running
+        case #selector(reinstallGuestTools):
+            return state == .running
+        default:
+            return true
+        }
+    }
+
+    // MARK: - HelperToolbarDelegate
+
+    func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String) {
+        guard let syncMode = ClipboardSyncMode(rawValue: mode) else { return }
+        clipboardSyncService?.setSyncMode(syncMode)
+        helperToolbar?.setClipboardSyncMode(mode)
+
+        // Start service if switching from disabled to an active mode
+        if syncMode != .disabled,
+           let cbService = clipboardSyncService, !cbService.isActive,
+           let client = ghostClient {
+            cbService.start(client: client)
+        }
+
+        // Persist per-VM
+        let key = "clipboardSyncMode_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(mode, forKey: key)
+        NSLog("GhostVMHelper: Clipboard sync mode changed to \(mode)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) {
+        let config = PortForwardConfig(hostPort: hostPort, guestPort: guestPort, enabled: true)
+        do {
+            try portForwardService?.addForward(config)
+            updateToolbarPortForwards()
+            persistPortForwards()
+            NSLog("GhostVMHelper: Added port forward \(hostPort) -> \(guestPort)")
+        } catch {
+            NSLog("GhostVMHelper: Failed to add port forward: \(error)")
+        }
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didRemovePortForwardWithHostPort hostPort: UInt16) {
+        portForwardService?.removeForward(hostPort: hostPort)
+        updateToolbarPortForwards()
+        persistPortForwards()
+        NSLog("GhostVMHelper: Removed port forward with host port \(hostPort)")
+    }
+
+    func toolbarDidRequestPortForwardEditor(_ toolbar: HelperToolbar) {
+        NSLog("GhostVMHelper: Port forward editor requested")
+    }
+
+    func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar) {
+        fileTransferService?.fetchAllGuestFiles()
+    }
+
+    func toolbarDidRequestShutDown(_ toolbar: HelperToolbar) {
+        stopVM()
+    }
+
+    func toolbarDidRequestTerminate(_ toolbar: HelperToolbar) {
+        terminateVM()
+    }
+
+    // MARK: - FileTransferDelegate
+
+    func fileTransfer(didReceiveFiles files: [FileWithRelativePath]) {
+        NSLog("GhostVMHelper: Sending \(files.count) file(s) to guest")
+        fileTransferService?.sendFiles(files)
+    }
+
     // MARK: - Notifications
 
     private func registerNotifications() {
-        let bundlePathHash = vmBundleURL.path.hashValue
+        let bundlePathHash = vmBundleURL.path.stableHash
 
         // Listen for stop command
         center.addObserver(
@@ -142,7 +376,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func postStateChange() {
-        let bundlePathHash = vmBundleURL.path.hashValue
+        let bundlePathHash = vmBundleURL.path.stableHash
+        NSLog("GhostVMHelper: Posting state '\(state.rawValue)' for hash \(bundlePathHash)")
+        NSLog("GhostVMHelper: Bundle path: \(vmBundleURL.path)")
         center.postNotificationName(
             NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
             object: nil,
@@ -165,6 +401,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         state = .starting
         postStateChange()
+        // Overlay will be shown after window is created
 
         do {
             // Load VM configuration
@@ -200,13 +437,19 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             // Create window and view
             createWindow()
 
+            // Show starting overlay (distinguish between resuming and cold start)
+            let wasSuspended = config.isSuspended && fileManager.fileExists(atPath: layout!.suspendStateURL.path)
+            if wasSuspended {
+                statusOverlay?.setState(.info(message: "Resuming..."))
+            } else {
+                statusOverlay?.setState(.starting)
+            }
+
             // Write lock file
             try writeVMLockOwner(.embedded(ProcessInfo.processInfo.processIdentifier), to: layout!.pidFileURL)
             ownsLock = true
 
             // Start or resume VM
-            let wasSuspended = config.isSuspended && fileManager.fileExists(atPath: layout!.suspendStateURL.path)
-
             if wasSuspended {
                 resumeVM()
             } else {
@@ -264,6 +507,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         case .success:
             state = .running
             postStateChange()
+            updateWindowTitle()
+            helperToolbar?.setVMRunning(true)
+
+            // Hide starting overlay
+            statusOverlay?.setState(.hidden)
+
+            // Start services
+            startServices()
 
             // Show window
             window?.center()
@@ -274,6 +525,30 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         case .failure(let error):
             handleStartFailure(error)
+        }
+    }
+
+    private func updateWindowTitle() {
+        let stateLabel: String
+        switch state {
+        case .starting:
+            stateLabel = "Starting..."
+        case .running:
+            stateLabel = ""
+        case .stopping:
+            stateLabel = "Shutting Down..."
+        case .suspending:
+            stateLabel = "Suspending..."
+        case .stopped:
+            stateLabel = "Stopped"
+        case .failed:
+            stateLabel = "Error"
+        }
+
+        if stateLabel.isEmpty {
+            window?.title = vmName
+        } else {
+            window?.title = "\(vmName) - \(stateLabel)"
         }
     }
 
@@ -288,6 +563,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         state = .stopping
         postStateChange()
+        updateWindowTitle()
+        helperToolbar?.setVMRunning(false)
+        stopServices()
 
         vmQueue?.async {
             do {
@@ -305,6 +583,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         state = .suspending
         postStateChange()
+        updateWindowTitle()
+        helperToolbar?.setVMRunning(false)
+        stopServices()
+
+        // Show suspending overlay
+        statusOverlay?.setState(.suspending)
 
         // Remove existing suspend file
         try? fileManager.removeItem(at: layout.suspendStateURL)
@@ -378,11 +662,138 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func cleanup() {
+        stopServices()
         if ownsLock, let layout = layout {
             removeVMLock(at: layout.pidFileURL)
             ownsLock = false
         }
         vmView?.virtualMachine = nil
+    }
+
+    // MARK: - Services
+
+    private func startServices() {
+        guard let vm = virtualMachine, let queue = vmQueue else { return }
+
+        // 1. Create GhostClient
+        let client = GhostClient(virtualMachine: vm, vmQueue: queue)
+        self.ghostClient = client
+
+        // 2. Health check timer (3s interval)
+        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            Task { @MainActor in
+                let connected = await client.checkHealth()
+                self.helperToolbar?.setGuestToolsConnected(connected)
+            }
+        }
+
+        // 3. Port forwarding
+        let pfService = PortForwardService(vm: vm, queue: queue)
+        self.portForwardService = pfService
+        let forwards = loadPortForwards()
+        if !forwards.isEmpty {
+            pfService.start(forwards: forwards)
+        }
+        updateToolbarPortForwards()
+
+        // 4. Clipboard sync
+        let cbService = ClipboardSyncService(bundlePath: vmBundleURL.path)
+        self.clipboardSyncService = cbService
+
+        // Load persisted mode
+        let key = "clipboardSyncMode_\(vmBundleURL.path.stableHash)"
+        if let storedMode = UserDefaults.standard.string(forKey: key),
+           let mode = ClipboardSyncMode(rawValue: storedMode) {
+            cbService.setSyncMode(mode)
+            helperToolbar?.setClipboardSyncMode(storedMode)
+        }
+
+        if cbService.syncMode != .disabled {
+            cbService.start(client: client)
+        }
+
+        // 5. File transfer
+        let ftService = FileTransferService()
+        ftService.configure(client: client)
+        self.fileTransferService = ftService
+        fileTransferCancellable = ftService.$queuedGuestFileCount
+            .receive(on: RunLoop.main)
+            .sink { [weak self] count in
+                self?.helperToolbar?.setQueuedFileCount(count)
+            }
+
+        // 6. Log polling
+        let logService = LogPollingService(client: client)
+        self.logPollingService = logService
+        logService.start()
+
+        NSLog("GhostVMHelper: Services started for '\(vmName)'")
+    }
+
+    private func stopServices() {
+        healthCheckTimer?.invalidate()
+        healthCheckTimer = nil
+        helperToolbar?.setGuestToolsConnected(false)
+
+        portForwardService?.stop()
+        portForwardService = nil
+
+        clipboardSyncService?.stop()
+        clipboardSyncService = nil
+
+        fileTransferCancellable?.cancel()
+        fileTransferCancellable = nil
+        fileTransferService = nil
+
+        logPollingService?.stop()
+        logPollingService = nil
+
+        ghostClient = nil
+    }
+
+    // MARK: - Port Forward Persistence
+
+    private func loadPortForwards() -> [PortForwardConfig] {
+        guard let layout = layout else { return [] }
+        do {
+            let store = VMConfigStore(layout: layout)
+            let config = try store.load()
+            return config.portForwards
+        } catch {
+            NSLog("GhostVMHelper: Failed to load port forwards: \(error)")
+            return []
+        }
+    }
+
+    private func updateToolbarPortForwards() {
+        guard let service = portForwardService else {
+            helperToolbar?.setPortForwardEntries([])
+            return
+        }
+        let entries = service.activeForwards.map { fwd in
+            PortForwardEntry(hostPort: fwd.hostPort, guestPort: fwd.guestPort, enabled: fwd.enabled)
+        }
+        helperToolbar?.setPortForwardEntries(entries)
+    }
+
+    private func persistPortForwards() {
+        guard let service = portForwardService else { return }
+        let activeForwards = service.activeForwards
+        let bundleURL = self.vmBundleURL!
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let layout = VMFileLayout(bundleURL: bundleURL)
+                let store = VMConfigStore(layout: layout)
+                var config = try store.load()
+                config.portForwards = activeForwards
+                try store.save(config)
+                NSLog("GhostVMHelper: Persisted \(activeForwards.count) port forward(s)")
+            } catch {
+                NSLog("GhostVMHelper: Failed to persist port forwards: \(error)")
+            }
+        }
     }
 
     // MARK: - Window
@@ -397,17 +808,51 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         window.title = vmName
         window.delegate = self
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 1024, height: 640)
+        window.collectionBehavior = [.fullScreenPrimary]
 
-        let vmView = VZVirtualMachineView()
+        // Setup toolbar
+        let toolbar = HelperToolbar()
+        toolbar.delegate = self
+        toolbar.attach(to: window)
+        helperToolbar = toolbar
+
+        // Create container view for VM and overlay
+        let containerView = NSView()
+        containerView.wantsLayer = true
+        window.contentView = containerView
+
+        // Create VM view
+        let vmView = FocusableVMView()
+        vmView.fileTransferDelegate = self
         if #available(macOS 14.0, *) {
             vmView.automaticallyReconfiguresDisplay = true
         }
-        vmView.autoresizingMask = [.width, .height]
+        vmView.translatesAutoresizingMaskIntoConstraints = false
         vmView.virtualMachine = virtualMachine
-        window.contentView = vmView
+        containerView.addSubview(vmView)
+
+        // Create status overlay (on top of VM view)
+        let overlay = StatusOverlay()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        containerView.addSubview(overlay)
+
+        // Layout constraints
+        NSLayoutConstraint.activate([
+            vmView.topAnchor.constraint(equalTo: containerView.topAnchor),
+            vmView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            vmView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            vmView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+
+            overlay.topAnchor.constraint(equalTo: containerView.topAnchor),
+            overlay.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            overlay.bottomAnchor.constraint(equalTo: containerView.bottomAnchor)
+        ])
 
         self.window = window
         self.vmView = vmView
+        self.statusOverlay = overlay
     }
 
     // MARK: - NSWindowDelegate
@@ -427,6 +872,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
         vmView?.virtualMachine = nil
+    }
+
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        window?.toolbar?.isVisible = false
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        DispatchQueue.main.async {
+            self.window?.toolbar?.isVisible = true
+        }
     }
 
     // MARK: - VZVirtualMachineDelegate
@@ -467,6 +922,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
 // MARK: - Main Entry Point
 
-let delegate = HelperAppDelegate()
-NSApplication.shared.delegate = delegate
-NSApplication.shared.run()
+// IMPORTANT: Ignore SIGPIPE signal
+//
+// GhostVMHelper runs as a separate process, so it does NOT inherit
+// the parent app's signal disposition. When writing to a socket/pipe
+// after the remote end has closed (e.g., browser reload, guest
+// disconnect), the OS sends SIGPIPE which terminates the process.
+// By ignoring SIGPIPE, write() returns -1 with errno=EPIPE instead,
+// which PortForwardListener handles gracefully.
+signal(SIGPIPE, SIG_IGN)
+
+MainActor.assumeIsolated {
+    let delegate = HelperAppDelegate()
+    NSApplication.shared.delegate = delegate
+    NSApplication.shared.run()
+}

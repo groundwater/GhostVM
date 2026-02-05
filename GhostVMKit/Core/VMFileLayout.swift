@@ -28,7 +28,7 @@ public final class VMFileLayout {
     public func helperAppURL(vmName: String) -> URL {
         let sanitizedName = vmName.replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ":", with: "-")
-        return helperDirectoryURL.appendingPathComponent("GhostVM-\(sanitizedName).app")
+        return helperDirectoryURL.appendingPathComponent("\(sanitizedName).app")
     }
 
     /// Custom icon stored in the VM bundle (PNG format)

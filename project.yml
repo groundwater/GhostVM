@@ -67,9 +67,14 @@ targets:
     platform: macOS
     sources:
       - path: GhostVMHelper
+      - path: GhostVM/Services
     dependencies:
       - target: GhostVMKit
         embed: true
+      - package: swift-nio
+        products:
+          - NIOCore
+          - NIOPosix
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
