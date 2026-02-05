@@ -172,7 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Auto-Install
 
-    /// Copies app to /Applications if not already running from there, then relaunches
+    /// Copies app to /Applications if not already running from there, or if this version is newer
     /// - Returns: true if relaunching (caller should exit), false to continue
     private func installToApplicationsIfNeeded() -> Bool {
         guard let bundlePath = Bundle.main.bundlePath as String? else { return false }
@@ -183,11 +183,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
 
+        // Check if we're running from a DMG/Volumes with a newer version
+        let fm = FileManager.default
+        if fm.fileExists(atPath: kApplicationsPath) {
+            // Check installed version
+            let installedPlistPath = kApplicationsPath + "/Contents/Info.plist"
+            if let installedPlist = NSDictionary(contentsOfFile: installedPlistPath),
+               let installedVersion = installedPlist["CFBundleShortVersionString"] as? String {
+                print("[GhostTools] Installed version: \(installedVersion), this version: \(kGhostToolsVersion)")
+                if installedVersion == kGhostToolsVersion {
+                    print("[GhostTools] Same version already installed, launching from /Applications")
+                    // Launch the installed version instead
+                    launchInstalledAndExit()
+                    return true
+                }
+                print("[GhostTools] Updating to version \(kGhostToolsVersion)...")
+            }
+        }
+
         // Check if we're running from a DMG or other location
         print("[GhostTools] Running from: \(bundlePath)")
         print("[GhostTools] Installing to /Applications...")
 
-        let fm = FileManager.default
         let sourceURL = URL(fileURLWithPath: bundlePath)
         let destURL = URL(fileURLWithPath: kApplicationsPath)
 
@@ -229,6 +246,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             print("[GhostTools] Failed to install: \(error)")
             // Continue running from current location
             return false
+        }
+    }
+
+    /// Launch the installed version from /Applications and exit this instance
+    private func launchInstalledAndExit() {
+        do {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            task.arguments = ["-n", kApplicationsPath]
+            try task.run()
+            DispatchQueue.main.async {
+                NSApplication.shared.terminate(nil)
+            }
+        } catch {
+            print("[GhostTools] Failed to launch installed version: \(error)")
         }
     }
 

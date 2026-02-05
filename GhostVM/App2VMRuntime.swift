@@ -146,27 +146,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             self.clipboardSyncMode = mode
         }
 
-        // Load persisted port forwarding setting for this VM
-        let portForwardKey = "portForwardingEnabled_\(self.bundleURL.path.hashValue)"
-        if UserDefaults.standard.object(forKey: portForwardKey) != nil {
-            self.portForwardingEnabled = UserDefaults.standard.bool(forKey: portForwardKey)
-        }
-    }
-
-    /// Update port forwarding enabled state and persist the setting
-    func setPortForwardingEnabled(_ enabled: Bool) {
-        portForwardingEnabled = enabled
-
-        // Persist the setting per-VM
-        let key = "portForwardingEnabled_\(bundleURL.path.hashValue)"
-        UserDefaults.standard.set(enabled, forKey: key)
-
-        // Update running service
-        if enabled {
-            startPortForwarding()
-        } else {
-            stopPortForwarding()
-        }
     }
 
     /// Update clipboard sync mode and persist the setting
