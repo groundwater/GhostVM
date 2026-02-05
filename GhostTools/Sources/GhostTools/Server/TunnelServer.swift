@@ -1,38 +1,21 @@
 import Foundation
 
-/// Errors that can occur in the TunnelServer
-enum TunnelServerError: Error, LocalizedError {
-    case socketCreationFailed(Int32)
-    case bindFailed(Int32)
-    case listenFailed(Int32)
-    case acceptFailed(Int32)
-    case connectionFailed(String)
-    case protocolError(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .socketCreationFailed(let errno):
-            return "Failed to create socket: errno \(errno)"
-        case .bindFailed(let errno):
-            return "Failed to bind socket: errno \(errno)"
-        case .listenFailed(let errno):
-            return "Failed to listen: errno \(errno)"
-        case .acceptFailed(let errno):
-            return "Failed to accept connection: errno \(errno)"
-        case .connectionFailed(let reason):
-            return "Connection failed: \(reason)"
-        case .protocolError(let reason):
-            return "Protocol error: \(reason)"
-        }
-    }
-}
-
-/// A vsock server that tunnels connections to localhost ports
-/// Protocol: "CONNECT <port>\r\n" -> "OK\r\n" or "ERROR <msg>\r\n"
+/// TunnelServer listens on vsock port 5001 and handles CONNECT requests
+/// from the host to bridge TCP connections to localhost services in the guest.
+///
+/// Protocol:
+/// 1. Host sends: "CONNECT <port>\r\n"
+/// 2. Server connects to localhost:<port>
+/// 3. Server responds: "OK\r\n" or "ERROR <message>\r\n"
+/// 4. Bidirectional bridging via poll()
 final class TunnelServer: @unchecked Sendable {
     private let port: UInt32 = 5001
     private var serverSocket: Int32 = -1
     private var isRunning = false
+    private var acceptSource: DispatchSourceRead?
+
+    /// Status callback for connection state changes
+    var onStatusChange: ((Bool) -> Void)?
 
     init() {}
 
@@ -40,15 +23,15 @@ final class TunnelServer: @unchecked Sendable {
         stop()
     }
 
-    /// Starts the tunnel server on vsock port 5001
+    /// Starts the tunnel server
     func start() async throws {
-        print("[TunnelServer] Creating socket with AF_VSOCK=40, SOCK_STREAM=\(SOCK_STREAM)")
+        print("[TunnelServer] Creating socket on port \(port)")
 
         // Create vsock socket
-        serverSocket = socket(40, SOCK_STREAM, 0)  // AF_VSOCK = 40
+        serverSocket = socket(AF_VSOCK, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {
             print("[TunnelServer] Socket creation failed! errno=\(errno)")
-            throw TunnelServerError.socketCreationFailed(errno)
+            throw VsockServerError.socketCreationFailed(errno)
         }
 
         // Set socket options for reuse
@@ -65,24 +48,39 @@ final class TunnelServer: @unchecked Sendable {
 
         guard bindResult == 0 else {
             close(serverSocket)
-            throw TunnelServerError.bindFailed(errno)
+            throw VsockServerError.bindFailed(errno)
         }
 
         // Listen for connections
-        guard listen(serverSocket, 10) == 0 else {
+        guard listen(serverSocket, 128) == 0 else {
             close(serverSocket)
-            throw TunnelServerError.listenFailed(errno)
+            throw VsockServerError.listenFailed(errno)
         }
 
+        // Set non-blocking for the server socket
+        var flags = fcntl(serverSocket, F_GETFL, 0)
+        _ = fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK)
+
         isRunning = true
+        onStatusChange?(true)
         print("[TunnelServer] Listening on vsock port \(port)")
 
-        // Accept loop
-        await acceptLoop()
+        // Use DispatchSource for non-blocking accept
+        acceptSource = DispatchSource.makeReadSource(fileDescriptor: serverSocket, queue: .global(qos: .userInitiated))
+        acceptSource?.setEventHandler { [weak self] in
+            self?.acceptConnection()
+        }
+        acceptSource?.setCancelHandler { [weak self] in
+            if let fd = self?.serverSocket, fd >= 0 {
+                close(fd)
+                self?.serverSocket = -1
+            }
+        }
+        acceptSource?.resume()
     }
 
-    /// Main accept loop - runs until stopped
-    private func acceptLoop() async {
+    /// Accept incoming connections (called from DispatchSource)
+    private func acceptConnection() {
         while isRunning {
             var clientAddr = sockaddr_vm(port: 0)
             var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
@@ -94,119 +92,130 @@ final class TunnelServer: @unchecked Sendable {
             }
 
             if clientSocket < 0 {
-                if errno == EINTR {
+                let err = errno
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    // No more connections to accept
+                    return
+                }
+                if err == EINTR {
                     continue
                 }
                 if isRunning {
-                    print("[TunnelServer] Accept failed: errno \(errno)")
+                    fatalError("[TunnelServer] accept() failed: errno=\(err) \(String(cString: strerror(err)))")
                 }
-                break
+                return
             }
 
-            // Handle connection in a task
-            Task {
-                await handleConnection(clientSocket)
+            // Handle connection on a background GCD queue (not Swift concurrency)
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.handleConnection(clientSocket)
             }
         }
     }
 
     /// Handles a single tunnel connection
-    private func handleConnection(_ socket: Int32) async {
+    private func handleConnection(_ vsockFd: Int32) {
+        print("[TunnelServer] New incoming connection from host, fd=\(vsockFd)")
+
         defer {
-            close(socket)
+            close(vsockFd)
+            print("[TunnelServer] Connection closed, fd=\(vsockFd)")
         }
 
-        // Read the CONNECT command
-        guard let command = readLine(from: socket) else {
-            print("[TunnelServer] Failed to read command")
+        // Set non-blocking immediately
+        var flags = fcntl(vsockFd, F_GETFL, 0)
+        _ = fcntl(vsockFd, F_SETFL, flags | O_NONBLOCK)
+
+        // Read the CONNECT command with poll
+        var buffer = [UInt8](repeating: 0, count: 256)
+        var pfd = pollfd(fd: vsockFd, events: Int16(POLLIN), revents: 0)
+
+        let pollResult = poll(&pfd, 1, 5000) // 5 second timeout for handshake
+        if pollResult < 0 {
+            let err = errno
+            fatalError("[TunnelServer] handleConnection poll() failed: errno=\(err) \(String(cString: strerror(err)))")
+        }
+        if pollResult == 0 {
+            fatalError("[TunnelServer] Timeout waiting for CONNECT command from host - is PortForwardListener sending the command?")
+        }
+
+        let bytesRead = read(vsockFd, &buffer, buffer.count - 1)
+
+        if bytesRead <= 0 {
+            let err = errno
+            fatalError("[TunnelServer] Failed to read CONNECT command: bytesRead=\(bytesRead) errno=\(err) \(String(cString: strerror(err)))")
+        }
+
+        // Parse "CONNECT <port>\r\n"
+        guard let command = String(bytes: buffer[0..<bytesRead], encoding: .utf8) else {
+            print("[TunnelServer] ERROR: Invalid command encoding")
+            sendError(vsockFd, message: "Invalid command encoding")
             return
         }
 
-        log("[TunnelServer] Received command: \(command)")
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("[TunnelServer] Received command: '\(trimmed)'")
 
-        // Parse "CONNECT <port>"
-        let parts = command.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
-        guard parts.count >= 2,
-              parts[0].uppercased() == "CONNECT",
-              let targetPort = UInt16(parts[1]) else {
-            sendError(socket, message: "Invalid command. Use: CONNECT <port>")
+        guard trimmed.hasPrefix("CONNECT ") else {
+            print("[TunnelServer] ERROR: Expected CONNECT command, got: '\(trimmed)'")
+            sendError(vsockFd, message: "Expected CONNECT command")
             return
         }
 
-        // Connect to localhost:targetPort
-        let targetSocket = connectToLocalhost(port: targetPort)
-        guard targetSocket >= 0 else {
-            sendError(socket, message: "Cannot connect to localhost:\(targetPort)")
+        let portString = String(trimmed.dropFirst("CONNECT ".count))
+        guard let targetPort = UInt16(portString) else {
+            print("[TunnelServer] ERROR: Invalid port number: '\(portString)'")
+            sendError(vsockFd, message: "Invalid port number")
             return
         }
+
+        print("[TunnelServer] Connecting to localhost:\(targetPort)...")
+
+        // Connect to localhost on the target port
+        guard let tcpFd = connectToLocalhost(port: targetPort) else {
+            print("[TunnelServer] ERROR: Failed to connect to localhost:\(targetPort) - is service running?")
+            sendError(vsockFd, message: "Connection refused to port \(targetPort)")
+            return
+        }
+
+        print("[TunnelServer] Connected to localhost:\(targetPort), sending OK")
 
         // Send OK response
-        let ok = "OK\r\n"
-        ok.withCString { ptr in
-            _ = Darwin.write(socket, ptr, strlen(ptr))
+        let okResponse = "OK\r\n"
+        let okWritten = okResponse.withCString { ptr in
+            write(vsockFd, ptr, strlen(ptr))
+        }
+        if okWritten < 0 {
+            let err = errno
+            fatalError("[TunnelServer] Failed to write OK response: errno=\(err) \(String(cString: strerror(err)))")
         }
 
-        log("[TunnelServer] Bridging vsock -> localhost:\(targetPort)")
+        print("[TunnelServer] Starting bidirectional bridge for port \(targetPort)")
 
-        // Bridge the two sockets bidirectionally
-        bridgeSockets(socket, targetSocket)
+        // Bridge the connections using poll()
+        bridgeConnections(vsockFd: vsockFd, tcpFd: tcpFd)
 
-        close(targetSocket)
-        log("[TunnelServer] Tunnel closed for port \(targetPort)")
+        close(tcpFd)
     }
 
-    /// Read a line (up to \r\n or \n) from a socket
-    private func readLine(from socket: Int32) -> String? {
-        var buffer = [UInt8](repeating: 0, count: 256)
-        var result = ""
-
-        while result.count < 256 {
-            let bytesRead = read(socket, &buffer, 1)
-            if bytesRead <= 0 {
-                break
-            }
-
-            let char = Character(UnicodeScalar(buffer[0]))
-            if char == "\n" {
-                break
-            }
-            if char != "\r" {
-                result.append(char)
-            }
-        }
-
-        return result.isEmpty ? nil : result
-    }
-
-    /// Send an error response
-    private func sendError(_ socket: Int32, message: String) {
-        let response = "ERROR \(message)\r\n"
-        response.withCString { ptr in
-            _ = Darwin.write(socket, ptr, strlen(ptr))
-        }
-    }
-
-    /// Connect to localhost on the specified port (tries IPv4 first, then IPv6)
-    private func connectToLocalhost(port: UInt16) -> Int32 {
+    /// Connect to localhost on the specified port
+    private func connectToLocalhost(port: UInt16) -> Int32? {
         // Try IPv4 first
-        log("[TunnelServer] Trying IPv4 127.0.0.1:\(port)...")
-        if let sock = connectToIPv4(port: port) {
-            log("[TunnelServer] IPv4 connected!")
-            return sock
+        if let fd = connectIPv4(port: port) {
+            return fd
         }
-        log("[TunnelServer] IPv4 failed (errno=\(errno)), trying IPv6...")
+
         // Fall back to IPv6
-        if let sock = connectToIPv6(port: port) {
-            log("[TunnelServer] IPv6 connected!")
-            return sock
-        }
-        log("[TunnelServer] IPv6 also failed (errno=\(errno))")
-        return -1
+        return connectIPv6(port: port)
     }
 
-    private func connectToIPv4(port: UInt16) -> Int32? {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { return nil }
+    private func connectIPv4(port: UInt16) -> Int32? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+
+        // Set TCP_NODELAY to disable Nagle's algorithm
+        var optval: Int32 = 1
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &optval, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -216,20 +225,25 @@ final class TunnelServer: @unchecked Sendable {
 
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                Darwin.connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
 
-        if result != 0 {
-            close(sock)
-            return nil
+        if result == 0 {
+            return fd
         }
-        return sock
+
+        close(fd)
+        return nil
     }
 
-    private func connectToIPv6(port: UInt16) -> Int32? {
-        let sock = socket(AF_INET6, SOCK_STREAM, 0)
-        guard sock >= 0 else { return nil }
+    private func connectIPv6(port: UInt16) -> Int32? {
+        let fd = socket(AF_INET6, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+
+        // Set TCP_NODELAY to disable Nagle's algorithm
+        var optval: Int32 = 1
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &optval, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_in6()
         addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
@@ -239,102 +253,130 @@ final class TunnelServer: @unchecked Sendable {
 
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                Darwin.connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in6>.size))
+                Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in6>.size))
             }
         }
 
-        if result != 0 {
-            close(sock)
-            return nil
+        if result == 0 {
+            return fd
         }
-        return sock
+
+        close(fd)
+        return nil
     }
 
-    /// Bridge two sockets bidirectionally using poll()
-    private func bridgeSockets(_ a: Int32, _ b: Int32) {
-        // Set both sockets to non-blocking
-        var flags = fcntl(a, F_GETFL, 0)
-        fcntl(a, F_SETFL, flags | O_NONBLOCK)
-        flags = fcntl(b, F_GETFL, 0)
-        fcntl(b, F_SETFL, flags | O_NONBLOCK)
+    /// Bridge two file descriptors using two threads - simplest proven approach
+    /// Each direction gets its own thread doing blocking read/write
+    private func bridgeConnections(vsockFd: Int32, tcpFd: Int32) {
+        // Keep sockets BLOCKING - simplest and most reliable
+        // Remove any non-blocking flags that might have been set
+        var flags = fcntl(vsockFd, F_GETFL, 0)
+        _ = fcntl(vsockFd, F_SETFL, flags & ~O_NONBLOCK)
 
+        flags = fcntl(tcpFd, F_GETFL, 0)
+        _ = fcntl(tcpFd, F_SETFL, flags & ~O_NONBLOCK)
+
+        let group = DispatchGroup()
+
+        // Thread 1: vsock -> TCP
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.copyData(from: vsockFd, to: tcpFd, label: "vsock->tcp")
+            Darwin.shutdown(tcpFd, SHUT_WR)  // Signal EOF to TCP peer
+            group.leave()
+        }
+
+        // Thread 2: TCP -> vsock
+        group.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            self.copyData(from: tcpFd, to: vsockFd, label: "tcp->vsock")
+            Darwin.shutdown(vsockFd, SHUT_WR)  // Signal EOF to vsock peer
+            group.leave()
+        }
+
+        // Wait for both directions to complete
+        group.wait()
+    }
+
+    /// Error codes that indicate peer disconnected (not a bug)
+    private func isPeerDisconnected(_ err: Int32) -> Bool {
+        switch err {
+        case ECONNRESET,  // Connection reset by peer
+             EPIPE,       // Broken pipe
+             ENOTCONN,    // Socket not connected
+             ESHUTDOWN,   // Can't send after socket shutdown
+             ECONNABORTED, // Connection aborted
+             EHOSTUNREACH, // Host unreachable
+             ENETUNREACH,  // Network unreachable
+             ETIMEDOUT:    // Connection timed out
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Simple blocking copy: read from source, write to dest, repeat until EOF
+    private func copyData(from source: Int32, to dest: Int32, label: String) {
         var buffer = [UInt8](repeating: 0, count: 65536)
+        var totalBytes: Int = 0
 
-        // Use poll() instead of select() - simpler and no fd_set size limits
-        var fds: [pollfd] = [
-            pollfd(fd: a, events: Int16(POLLIN), revents: 0),
-            pollfd(fd: b, events: Int16(POLLIN), revents: 0)
-        ]
+        while true {
+            let bytesRead = Darwin.read(source, &buffer, buffer.count)
 
-        while isRunning {
-            // Reset revents
-            fds[0].revents = 0
-            fds[1].revents = 0
-
-            let ready = poll(&fds, 2, 30000)  // 30 second timeout
-            if ready < 0 {
-                if errno == EINTR {
-                    continue
-                }
-                break
-            }
-            if ready == 0 {
-                // Timeout - continue to check if still running
-                continue
+            if bytesRead == 0 {
+                print("[TunnelServer] \(label): EOF after \(totalBytes) bytes")
+                return
             }
 
-            // Check for errors or hangup on either socket
-            let errorMask = Int16(POLLERR | POLLHUP | POLLNVAL)
-            if (fds[0].revents & errorMask) != 0 || (fds[1].revents & errorMask) != 0 {
-                break
+            if bytesRead < 0 {
+                let err = errno
+                if err == EINTR { continue }
+                if isPeerDisconnected(err) {
+                    print("[TunnelServer] \(label): peer closed (errno=\(err)) after \(totalBytes) bytes")
+                    return
+                }
+                fatalError("[TunnelServer] \(label): read failed: errno=\(err) \(String(cString: strerror(err)))")
             }
 
-            // Forward data from a to b
-            if (fds[0].revents & Int16(POLLIN)) != 0 {
-                let bytesRead = read(a, &buffer, buffer.count)
-                if bytesRead <= 0 {
-                    break
+            var offset = 0
+            while offset < bytesRead {
+                let written = buffer.withUnsafeBytes { ptr in
+                    Darwin.write(dest, ptr.baseAddress! + offset, bytesRead - offset)
                 }
-                if !writeAll(b, buffer: buffer, count: bytesRead) {
-                    break
+
+                if written <= 0 {
+                    let err = errno
+                    if err == EINTR { continue }
+                    if isPeerDisconnected(err) {
+                        print("[TunnelServer] \(label): peer closed during write (errno=\(err)) after \(totalBytes) bytes")
+                        return
+                    }
+                    fatalError("[TunnelServer] \(label): write failed: errno=\(err) \(String(cString: strerror(err))) offset=\(offset)/\(bytesRead)")
                 }
+                offset += written
             }
 
-            // Forward data from b to a
-            if (fds[1].revents & Int16(POLLIN)) != 0 {
-                let bytesRead = read(b, &buffer, buffer.count)
-                if bytesRead <= 0 {
-                    break
-                }
-                if !writeAll(a, buffer: buffer, count: bytesRead) {
-                    break
-                }
-            }
+            totalBytes += bytesRead
         }
     }
 
-    /// Write all bytes to a socket, handling partial writes
-    private func writeAll(_ socket: Int32, buffer: [UInt8], count: Int) -> Bool {
-        var written = 0
-        while written < count {
-            let result = buffer.withUnsafeBufferPointer { ptr in
-                Darwin.write(socket, ptr.baseAddress! + written, count - written)
-            }
-            if result <= 0 {
-                return false
-            }
-            written += result
+    /// Send an error response
+    private func sendError(_ fd: Int32, message: String) {
+        let response = "ERROR \(message)\r\n"
+        _ = response.withCString { ptr in
+            write(fd, ptr, strlen(ptr))
         }
-        return true
     }
 
     /// Stops the server
     func stop() {
         isRunning = false
+        acceptSource?.cancel()
+        acceptSource = nil
         if serverSocket >= 0 {
             close(serverSocket)
             serverSocket = -1
         }
+        onStatusChange?(false)
     }
 }
-

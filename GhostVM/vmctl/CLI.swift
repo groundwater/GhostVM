@@ -75,12 +75,6 @@ struct CLI {
             } catch {
                 fail(error)
             }
-        case "forward":
-            do {
-                try handleForward(arguments: Array(arguments.dropFirst()))
-            } catch {
-                fail(error)
-            }
         default:
             print("Unknown command '\(arguments[0])'.")
             showHelp(exitCode: 1)
@@ -346,41 +340,6 @@ struct CLI {
         try controller.detachISO(bundleURL: bundleURL)
     }
 
-    private func handleForward(arguments: [String]) throws {
-        guard arguments.count >= 2 else {
-            throw VMError.message("Usage: vmctl forward <bundle-path> <host-port> [--guest-port <port>]")
-        }
-
-        let bundleURL = try resolveBundleURL(argument: arguments[0], mustExist: true)
-        guard let hostPort = UInt16(arguments[1]) else {
-            throw VMError.message("Invalid port number: \(arguments[1])")
-        }
-
-        var guestPort: UInt16?
-        var index = 2
-        while index < arguments.count {
-            let arg = arguments[index]
-            switch arg {
-            case "--guest-port":
-                index += 1
-                guard index < arguments.count, let port = UInt16(arguments[index]) else {
-                    throw VMError.message("Invalid or missing value for --guest-port")
-                }
-                guestPort = port
-            default:
-                throw VMError.message("Unknown option '\(arg)'")
-            }
-            index += 1
-        }
-
-        let command = ForwardCommand(
-            bundlePath: bundleURL.path,
-            hostPort: hostPort,
-            guestPort: guestPort
-        )
-        try command.run()
-    }
-
     private func showHelp(exitCode: Int32) -> Never {
         print("""
 Usage: vmctl <command> [options]
@@ -401,7 +360,6 @@ Common Commands:
   discard-suspend <bundle-path>
   snapshot <bundle-path> list
   snapshot <bundle-path> <create|revert|delete> <snapshot-name>
-  forward <bundle-path> <host-port> [--guest-port <port>]
 
 macOS Examples:
   vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
@@ -424,8 +382,6 @@ Common Examples:
   vmctl snapshot ~/VMs/sandbox.GhostVM create clean
   vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
   vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
-  vmctl forward ~/VMs/sandbox.GhostVM 3000             # Forward port 3000
-  vmctl forward ~/VMs/sandbox.GhostVM 8080 --guest-port 3000  # Forward 8080 to guest 3000
 
 Notes:
   - Linux VMs require ARM64 ISOs (aarch64). x86_64 ISOs will not work.

@@ -987,6 +987,7 @@ struct EditVMView: View {
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
     @State private var sharedFolders: [SharedFolderConfig] = []
+    @State private var portForwards: [PortForwardConfig] = []
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -1038,6 +1039,26 @@ struct EditVMView: View {
                             sharedFolders.append(SharedFolderConfig(path: "", readOnly: true))
                         } label: {
                             Label("Add Shared Folder", systemImage: "plus")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+
+                labeledRow("Port Forwards") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(portForwards.indices, id: \.self) { index in
+                            PortForwardRowView(
+                                forward: $portForwards[index],
+                                onDelete: {
+                                    portForwards.remove(at: index)
+                                }
+                            )
+                        }
+
+                        Button {
+                            portForwards.append(PortForwardConfig(hostPort: 0, guestPort: 0, enabled: true))
+                        } label: {
+                            Label("Add Port Forward", systemImage: "plus")
                         }
                         .buttonStyle(.borderless)
                     }
@@ -1105,6 +1126,9 @@ struct EditVMView: View {
                         self.sharedFolders = []
                     }
 
+                    // Load port forwards
+                    self.portForwards = config.portForwards
+
                     self.isLoading = false
                 }
             } catch {
@@ -1129,11 +1153,15 @@ struct EditVMView: View {
                 // Filter out empty paths
                 let validFolders = sharedFolders.filter { !$0.path.trimmingCharacters(in: .whitespaces).isEmpty }
 
+                // Filter out invalid port forwards (both ports must be > 0)
+                let validForwards = portForwards.filter { $0.hostPort > 0 && $0.guestPort > 0 }
+
                 try controller.updateVMSettings(
                     bundleURL: vm.bundleURL,
                     cpus: cpus,
                     memoryGiB: memory,
-                    sharedFolders: validFolders
+                    sharedFolders: validFolders,
+                    portForwards: validForwards
                 )
 
                 DispatchQueue.main.async {
@@ -1192,6 +1220,61 @@ struct SharedFolderRowView: View {
 
         if panel.runModal() == .OK, let url = panel.url {
             folder.path = url.path
+        }
+    }
+}
+
+@available(macOS 13.0, *)
+struct PortForwardRowView: View {
+    @Binding var forward: PortForwardConfig
+    let onDelete: () -> Void
+
+    @State private var hostPortText: String = ""
+    @State private var guestPortText: String = ""
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text("Host")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Port", text: $hostPortText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 70)
+                .onChange(of: hostPortText) { _, newValue in
+                    if let port = UInt16(newValue) {
+                        forward.hostPort = port
+                    }
+                }
+
+            Image(systemName: "arrow.right")
+                .foregroundStyle(.secondary)
+
+            Text("Guest")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            TextField("Port", text: $guestPortText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 70)
+                .onChange(of: guestPortText) { _, newValue in
+                    if let port = UInt16(newValue) {
+                        forward.guestPort = port
+                    }
+                }
+
+            Toggle("Enabled", isOn: $forward.enabled)
+                .toggleStyle(.checkbox)
+                .fixedSize()
+
+            Button(role: .destructive) {
+                onDelete()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+        }
+        .onAppear {
+            hostPortText = forward.hostPort > 0 ? "\(forward.hostPort)" : ""
+            guestPortText = forward.guestPort > 0 ? "\(forward.guestPort)" : ""
         }
     }
 }
@@ -1449,10 +1532,15 @@ struct VMWindowView: View {
     @StateObject private var connectionMonitor = GuestToolsConnectionMonitor()
     @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
+    @State private var portForwards: [PortForwardConfig] = []
 
     init(vm: App2VM) {
         self.vm = vm
         _session = StateObject(wrappedValue: App2VMRunSession(bundleURL: vm.bundleURL))
+    }
+
+    private var activePortForwards: [PortForwardConfig] {
+        portForwards.filter { $0.enabled }
     }
 
     private var isSuspending: Bool {
@@ -1575,6 +1663,33 @@ struct VMWindowView: View {
                 }
                 .help(connectionMonitor.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
             }
+            if !activePortForwards.isEmpty {
+                ToolbarItem(placement: .automatic) {
+                    Menu {
+                        ForEach(activePortForwards) { forward in
+                            Button {
+                                // Copy the localhost URL to clipboard
+                                let urlString = "http://localhost:\(forward.hostPort)"
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(urlString, forType: .string)
+                            } label: {
+                                HStack {
+                                    Text(verbatim: "localhost:\(forward.hostPort)")
+                                    Image(systemName: "arrow.right")
+                                    Text(verbatim: "guest:\(forward.guestPort)")
+                                }
+                            }
+                        }
+                        Divider()
+                        Text("Click to copy URL")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } label: {
+                        Label("\(activePortForwards.count)", systemImage: "network")
+                    }
+                    .help("Port Forwards: \(activePortForwards.map { "\($0.hostPort)→\($0.guestPort)" }.joined(separator: ", "))")
+                }
+            }
             ToolbarItem(placement: .automatic) {
                 Menu {
                     ForEach(ClipboardSyncMode.allCases) { mode in
@@ -1624,6 +1739,9 @@ struct VMWindowView: View {
             }
         }
         .onAppear {
+            // Load port forwards from config
+            loadPortForwards()
+
             session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store, weak fileTransferService] state in
                 switch state {
                 case .running:
@@ -1663,6 +1781,21 @@ struct VMWindowView: View {
         } message: {
             if let message = guestToolsInstaller.alertMessage {
                 Text(message)
+            }
+        }
+    }
+
+    private func loadPortForwards() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let layout = VMFileLayout(bundleURL: vm.bundleURL)
+                let store = VMConfigStore(layout: layout)
+                let config = try store.load()
+                DispatchQueue.main.async {
+                    self.portForwards = config.portForwards
+                }
+            } catch {
+                print("[VMWindowView] Failed to load port forwards: \(error)")
             }
         }
     }
