@@ -196,7 +196,9 @@ final class PortForwardListener: @unchecked Sendable {
 
         vmQueue.async {
             guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-                fatalError("[PortForwardListener] No socket device - VM may not have vsock configured")
+                connectError = PortForwardError.connectFailed("No socket device - VM may not have vsock configured")
+                semaphore.signal()
+                return
             }
             socketDevice.connect(toPort: port) { result in
                 switch result {
@@ -212,15 +214,18 @@ final class PortForwardListener: @unchecked Sendable {
         // Wait for connection with timeout
         let timeout = DispatchTime.now() + .seconds(5)
         if semaphore.wait(timeout: timeout) == .timedOut {
-            fatalError("[PortForwardListener] Timeout connecting to guest vsock port \(port) - is TunnelServer running in guest?")
+            print("[PortForwardListener] Timeout connecting to guest vsock - TunnelServer may not be running")
+            return  // TCP connection will be closed by defer
         }
 
         if let error = connectError {
-            fatalError("[PortForwardListener] Failed to connect to guest: \(error)")
+            print("[PortForwardListener] Failed to connect to guest: \(error)")
+            return  // TCP connection will be closed by defer
         }
 
         guard let conn = connection else {
-            fatalError("[PortForwardListener] No connection returned from vsock connect")
+            print("[PortForwardListener] No connection returned from vsock connect")
+            return  // TCP connection will be closed by defer
         }
 
         let vsockFd = conn.fileDescriptor
@@ -238,7 +243,9 @@ final class PortForwardListener: @unchecked Sendable {
 
         if cmdWritten < 0 {
             let err = errno
-            fatalError("[PortForwardListener] Failed to send CONNECT command: errno=\(err) \(String(cString: strerror(err)))")
+            print("[PortForwardListener] Failed to send CONNECT command: errno=\(err) \(String(cString: strerror(err)))")
+            conn.close()
+            return
         }
 
         // Read response with poll
@@ -248,26 +255,36 @@ final class PortForwardListener: @unchecked Sendable {
         let pollResult = poll(&pfd, 1, 5000) // 5 second timeout
         if pollResult < 0 {
             let err = errno
-            fatalError("[PortForwardListener] poll() failed waiting for CONNECT response: errno=\(err) \(String(cString: strerror(err)))")
+            print("[PortForwardListener] poll() failed waiting for CONNECT response: errno=\(err) \(String(cString: strerror(err)))")
+            conn.close()
+            return
         }
         if pollResult == 0 {
-            fatalError("[PortForwardListener] Timeout waiting for CONNECT response - guest service may not be listening on port \(guestPort)")
+            print("[PortForwardListener] Timeout waiting for CONNECT response - guest service may not be listening on port \(guestPort)")
+            conn.close()
+            return
         }
 
         let bytesRead = Darwin.read(vsockFd, &buffer, buffer.count - 1)
 
         if bytesRead <= 0 {
             let err = errno
-            fatalError("[PortForwardListener] Failed to read CONNECT response: bytesRead=\(bytesRead) errno=\(err)")
+            print("[PortForwardListener] Failed to read CONNECT response: bytesRead=\(bytesRead) errno=\(err)")
+            conn.close()
+            return
         }
 
         guard let response = String(bytes: buffer[0..<bytesRead], encoding: .utf8) else {
-            fatalError("[PortForwardListener] Invalid CONNECT response encoding")
+            print("[PortForwardListener] Invalid CONNECT response encoding")
+            conn.close()
+            return
         }
 
         let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed != "OK" {
-            fatalError("[PortForwardListener] Guest refused connection: '\(trimmed)'")
+            print("[PortForwardListener] Guest refused connection: '\(trimmed)'")
+            conn.close()
+            return
         }
 
         // Bridge the connections
