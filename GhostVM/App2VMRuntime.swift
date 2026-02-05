@@ -38,6 +38,24 @@ final class App2VMSessionRegistry {
         session?.terminate()
     }
 
+    /// Starts a VM by launching its helper app. Creates a session if needed.
+    /// This is used when no window is needed in the main app (helper provides the window).
+    func startVM(bundleURL: URL) {
+        let path = bundleURL.standardizedFileURL.path
+        lock.lock()
+        var session = sessions[path]
+        lock.unlock()
+
+        if session == nil {
+            session = App2VMRunSession(bundleURL: bundleURL)
+            lock.lock()
+            sessions[path] = session
+            lock.unlock()
+        }
+
+        session?.startIfNeeded()
+    }
+
     /// Returns true if there are any active (running) sessions.
     var hasActiveSessions: Bool {
         lock.lock()
@@ -127,7 +145,17 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var logPollingService: LogPollingService?
     private var logPollingStarting = false
 
+    // Helper app that runs the VM
+    private var helperBundleManager = VMHelperBundleManager()
+    private var helperProcess: NSRunningApplication?
+
     let bundleURL: URL
+
+    /// VM name derived from bundle filename
+    private var vmName: String {
+        let candidate = bundleURL.deletingPathExtension().lastPathComponent
+        return candidate.isEmpty ? bundleURL.lastPathComponent : candidate
+    }
 
     // Callbacks so the SwiftUI layer can reflect status into the list.
     var onStateChange: ((State) -> Void)?
@@ -326,6 +354,133 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         logPollingService = nil
     }
 
+    // MARK: - Helper App (VM Host with Separate Dock Icon)
+
+    private var helperStateObserver: NSObjectProtocol?
+
+    /// Launch the helper app that hosts and runs this VM
+    private func launchHelperApp() {
+        guard helperProcess == nil else { return }
+
+        // Find the helper app in the main bundle
+        guard let sourceHelperURL = VMHelperBundleManager.findHelperInMainBundle() else {
+            print("[App2VMRunSession] GhostVMHelper.app not found in main bundle")
+            transition(to: .failed("Helper app not found"))
+            return
+        }
+
+        do {
+            // Copy helper to VM bundle (preserves signature)
+            let helperAppURL = try helperBundleManager.copyHelperApp(
+                vmBundleURL: bundleURL,
+                sourceHelperAppURL: sourceHelperURL
+            )
+
+            // Register for state change notifications from helper
+            let bundlePathHash = bundleURL.path.hashValue
+            helperStateObserver = DistributedNotificationCenter.default().addObserver(
+                forName: NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
+                object: nil,
+                queue: .main
+            ) { [weak self] notification in
+                self?.handleHelperStateChange(notification)
+            }
+
+            // Launch the helper app with VM bundle path
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.arguments = ["--vm-bundle", bundleURL.path]
+            configuration.activates = true
+
+            NSWorkspace.shared.openApplication(
+                at: helperAppURL,
+                configuration: configuration
+            ) { [weak self] app, error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        print("[App2VMRunSession] Failed to launch helper: \(error)")
+                        self?.transition(to: .failed(error.localizedDescription))
+                    } else if let app = app {
+                        self?.helperProcess = app
+                        print("[App2VMRunSession] Helper launched for '\(self?.vmName ?? "unknown")' (PID \(app.processIdentifier))")
+                    }
+                }
+            }
+
+        } catch {
+            print("[App2VMRunSession] Failed to prepare helper: \(error)")
+            transition(to: .failed(error.localizedDescription))
+        }
+    }
+
+    /// Handle state change notification from helper
+    private func handleHelperStateChange(_ notification: Notification) {
+        guard let stateString = notification.userInfo?["state"] as? String else { return }
+
+        print("[App2VMRunSession] Helper state changed: \(stateString)")
+
+        switch stateString {
+        case "starting":
+            transition(to: .starting, message: "Starting…")
+        case "running":
+            App2VMSessionRegistry.shared.register(self)
+            transition(to: .running, message: "Running")
+        case "stopping":
+            transition(to: .stopping, message: "Stopping…")
+        case "suspending":
+            transition(to: .suspending, message: "Suspending…")
+        case "stopped":
+            cleanupHelper()
+            transition(to: .stopped, message: "Stopped")
+        case "failed":
+            cleanupHelper()
+            transition(to: .failed("VM error"))
+        default:
+            break
+        }
+    }
+
+    /// Send stop command to helper
+    private func sendStopToHelper() {
+        let bundlePathHash = bundleURL.path.hashValue
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.ghostvm.helper.stop.\(bundlePathHash)"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+
+    /// Send suspend command to helper
+    private func sendSuspendToHelper() {
+        let bundlePathHash = bundleURL.path.hashValue
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.ghostvm.helper.suspend.\(bundlePathHash)"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+
+    /// Send terminate (force stop) command to helper
+    private func sendTerminateToHelper() {
+        let bundlePathHash = bundleURL.path.hashValue
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.ghostvm.helper.terminate.\(bundlePathHash)"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+    }
+
+    /// Clean up helper tracking state
+    private func cleanupHelper() {
+        if let observer = helperStateObserver {
+            DistributedNotificationCenter.default().removeObserver(observer)
+            helperStateObserver = nil
+        }
+        helperProcess = nil
+        App2VMSessionRegistry.shared.unregister(self)
+    }
 
     func startIfNeeded() {
         switch state {
@@ -345,6 +500,12 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
         transition(to: .starting, message: "Starting…")
 
+        // Launch the helper app which hosts and runs the VM
+        launchHelperApp()
+    }
+
+    // Legacy in-process start method (kept for reference, not used)
+    private func startInProcess() {
         do {
             let session = try controller.makeWindowlessSession(bundleURL: bundleURL, runtimeSharedFolder: nil)
             self.windowlessSession = session
@@ -434,7 +595,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var stopTimeoutWorkItem: DispatchWorkItem?
 
     func stop() {
-        guard let session = windowlessSession else {
+        guard helperProcess != nil else {
             transition(to: .stopped, message: "Stopped")
             return
         }
@@ -444,7 +605,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         // Set up a 15-second timeout
         let timeoutWorkItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
-            // Only trigger timeout if still in stopping state
             if case .stopping = self.state {
                 self.transition(to: .failed("Stop timed out. Use Terminate to force quit."))
             }
@@ -452,21 +612,8 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         stopTimeoutWorkItem = timeoutWorkItem
         DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeoutWorkItem)
 
-        session.requestStop(force: false) { [weak self] result in
-            guard let self = self else { return }
-            // Cancel the timeout since we got a response
-            self.stopTimeoutWorkItem?.cancel()
-            self.stopTimeoutWorkItem = nil
-
-            self.windowlessSession = nil
-            self.virtualMachine = nil
-            switch result {
-            case .success:
-                self.transition(to: .stopped, message: "Stopped")
-            case .failure(let error):
-                self.transition(to: .failed(error.localizedDescription))
-            }
-        }
+        // Send stop command to helper
+        sendStopToHelper()
     }
 
     func terminate() {
@@ -474,46 +621,32 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         stopTimeoutWorkItem?.cancel()
         stopTimeoutWorkItem = nil
 
-        guard let session = windowlessSession else {
+        guard helperProcess != nil else {
             transition(to: .stopped, message: "Stopped")
             return
         }
 
         transition(to: .stopping, message: "Terminating…")
-        session.requestStop(force: true) { [weak self] result in
-            guard let self = self else { return }
-            self.windowlessSession = nil
-            self.virtualMachine = nil
-            switch result {
-            case .success:
-                self.transition(to: .stopped, message: "Terminated")
-            case .failure(let error):
-                self.transition(to: .failed(error.localizedDescription))
+
+        // Send terminate (force stop) command to helper
+        sendTerminateToHelper()
+
+        // Force kill after timeout if helper doesn't respond
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            if let process = self?.helperProcess, !process.isTerminated {
+                process.terminate()
             }
         }
     }
 
     func suspend() {
-        guard let session = windowlessSession else {
-            return
-        }
-        guard case .running = state else {
-            return
-        }
+        guard helperProcess != nil else { return }
+        guard case .running = state else { return }
 
         transition(to: .suspending, message: "Suspending…")
-        session.suspend { [weak self] result in
-            guard let self = self else { return }
-            switch result {
-            case .success:
-                self.windowlessSession = nil
-                self.virtualMachine = nil
-                self.transition(to: .stopped, message: "Suspended")
-            case .failure(let error):
-                self.transition(to: .running, message: "Running")
-                print("[App2VMRunSession] suspend error: \(error)")
-            }
-        }
+
+        // Send suspend command to helper
+        sendSuspendToHelper()
     }
 
     private func transition(to newState: State, message: String? = nil) {
@@ -539,27 +672,16 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Start/stop services based on VM state
+        // Cancel stop timeout on terminal states
         switch newState {
-        case .running:
-            startClipboardSync()
-            startPortForwarding()
-            startLogPolling()
-        case .stopped, .failed, .stopping, .suspending:
-            stopClipboardSync()
-            stopPortForwarding()
-            stopLogPolling()
+        case .stopped, .failed:
+            stopTimeoutWorkItem?.cancel()
+            stopTimeoutWorkItem = nil
         default:
             break
         }
 
-        // Unregister from session registry when VM is no longer running
-        switch newState {
-        case .stopped, .failed:
-            App2VMSessionRegistry.shared.unregister(self)
-        default:
-            break
-        }
+        // Note: Services (clipboard, port forwarding, log polling) now run in the helper app
 
         onStateChange?(newState)
     }

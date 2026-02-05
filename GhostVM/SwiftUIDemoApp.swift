@@ -256,7 +256,8 @@ struct VMListDemoView: View {
                         vm: vm,
                         isSelected: selectedVMID == vm.id,
                         play: {
-                            openWindow(id: "vm", value: vm)
+                            // Launch helper app (no window in main app - helper provides window)
+                            App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL)
                         },
                         requestDelete: {
                             vmPendingDelete = vm
@@ -285,7 +286,8 @@ struct VMListDemoView: View {
                         VMContextMenu(
                             vm: vm,
                             play: {
-                                openWindow(id: "vm", value: vm)
+                                // Launch helper app (no window in main app - helper provides window)
+                                App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL)
                             },
                             requestDelete: {
                                 vmPendingDelete = vm

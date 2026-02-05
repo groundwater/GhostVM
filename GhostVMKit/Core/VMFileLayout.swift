@@ -19,6 +19,21 @@ public final class VMFileLayout {
     public var suspendStateURL: URL { bundleURL.appendingPathComponent("suspend.vzvmsave") }
     public var efiVariableStoreURL: URL { bundleURL.appendingPathComponent("NVRAM.bin") }
 
+    // MARK: - Helper App Bundle
+
+    /// Directory containing the helper app bundle
+    public var helperDirectoryURL: URL { bundleURL.appendingPathComponent("Helper") }
+
+    /// The helper app bundle URL (computed from VM name)
+    public func helperAppURL(vmName: String) -> URL {
+        let sanitizedName = vmName.replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        return helperDirectoryURL.appendingPathComponent("GhostVM-\(sanitizedName).app")
+    }
+
+    /// Custom icon stored in the VM bundle (PNG format)
+    public var customIconURL: URL { bundleURL.appendingPathComponent("icon.png") }
+
     public func ensureBundleDirectory() throws {
         if !fileManager.fileExists(atPath: bundleURL.path) {
             try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true, attributes: nil)

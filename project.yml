@@ -62,6 +62,29 @@ targets:
           - "@executable_path/../Frameworks"
           - "@executable_path"
 
+  GhostVMHelper:
+    type: application
+    platform: macOS
+    sources:
+      - path: GhostVMHelper
+    dependencies:
+      - target: GhostVMKit
+        embed: true
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMHelper
+        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm.helper
+        INFOPLIST_FILE: GhostVMHelper/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: GhostVMHelper/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+
   GhostVM:
     type: application
     platform: macOS
@@ -82,6 +105,12 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      - target: GhostVMHelper
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+          subpath: Helpers
       - package: swift-nio
         products:
           - NIOCore
