@@ -36,6 +36,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // IMPORTANT: Ignore SIGPIPE signal
+        //
+        // When writing to a socket/pipe after the remote end has closed,
+        // the OS sends SIGPIPE which terminates the process by default.
+        // This happens during normal operation when:
+        // - Host closes vsock connection
+        // - TCP client disconnects mid-transfer
+        //
+        // By ignoring SIGPIPE, write() returns -1 with errno=EPIPE instead,
+        // which our code handles gracefully. This is standard practice for
+        // any application doing network I/O.
+        signal(SIGPIPE, SIG_IGN)
+
         print("[GhostTools] Application launched - version \(kGhostToolsVersion)")
 
         // Auto-install to /Applications if not already there

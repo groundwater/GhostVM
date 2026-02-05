@@ -10,6 +10,24 @@ struct GhostVMSwiftUIApp: App {
     @StateObject private var store = App2VMStore()
     @StateObject private var restoreStore = App2RestoreImageStore()
 
+    init() {
+        // IMPORTANT: Ignore SIGPIPE signal
+        //
+        // When writing to a socket/pipe after the remote end has closed,
+        // the OS sends SIGPIPE which terminates the process by default.
+        // This happens during normal operation when:
+        // - Browser closes connection during page reload
+        // - Guest VM closes vsock connection
+        // - Any network peer disconnects mid-transfer
+        //
+        // By ignoring SIGPIPE, write() returns -1 with errno=EPIPE instead,
+        // which our code handles gracefully. This is standard practice for
+        // any application doing network I/O.
+        //
+        // Without this, rapid browser reloads kill the entire app.
+        signal(SIGPIPE, SIG_IGN)
+    }
+
     var body: some Scene {
         Window("GhostVM", id: "main") {
             VMListDemoView()
