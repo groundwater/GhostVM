@@ -123,6 +123,10 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var portForwardService: PortForwardService?
     private var portForwardingStarted = false
 
+    // Log polling from guest
+    private var logPollingService: LogPollingService?
+    private var logPollingStarting = false
+
     let bundleURL: URL
 
     // Callbacks so the SwiftUI layer can reflect status into the list.
@@ -140,6 +144,28 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         if let storedMode = UserDefaults.standard.string(forKey: key),
            let mode = ClipboardSyncMode(rawValue: storedMode) {
             self.clipboardSyncMode = mode
+        }
+
+        // Load persisted port forwarding setting for this VM
+        let portForwardKey = "portForwardingEnabled_\(self.bundleURL.path.hashValue)"
+        if UserDefaults.standard.object(forKey: portForwardKey) != nil {
+            self.portForwardingEnabled = UserDefaults.standard.bool(forKey: portForwardKey)
+        }
+    }
+
+    /// Update port forwarding enabled state and persist the setting
+    func setPortForwardingEnabled(_ enabled: Bool) {
+        portForwardingEnabled = enabled
+
+        // Persist the setting per-VM
+        let key = "portForwardingEnabled_\(bundleURL.path.hashValue)"
+        UserDefaults.standard.set(enabled, forKey: key)
+
+        // Update running service
+        if enabled {
+            startPortForwarding()
+        } else {
+            stopPortForwarding()
         }
     }
 
@@ -231,6 +257,41 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             return []
         }
     }
+
+    /// Start polling logs from guest VM to host console
+    private func startLogPolling() {
+        guard logPollingService == nil, !logPollingStarting else { return }  // Already started
+        guard let vm = virtualMachine else { return }
+        guard let session = windowlessSession else { return }
+
+        logPollingStarting = true
+
+        Task { @MainActor in
+            // Create GhostClient if not already created
+            if self.ghostClient == nil {
+                self.ghostClient = GhostClient(virtualMachine: vm, vmQueue: session.vmQueue)
+            }
+
+            guard let client = self.ghostClient else {
+                self.logPollingStarting = false
+                return
+            }
+
+            let service = LogPollingService(client: client)
+            self.logPollingService = service
+            self.logPollingStarting = false
+            service.start()
+            print("[App2VMRunSession] Log polling started")
+        }
+    }
+
+    /// Stop log polling
+    private func stopLogPolling() {
+        logPollingStarting = false
+        logPollingService?.stop()
+        logPollingService = nil
+    }
+
 
     func startIfNeeded() {
         switch state {
@@ -449,9 +510,11 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         case .running:
             startClipboardSync()
             startPortForwarding()
+            startLogPolling()
         case .stopped, .failed, .stopping, .suspending:
             stopClipboardSync()
             stopPortForwarding()
+            stopLogPolling()
         default:
             break
         }

@@ -15,7 +15,7 @@ final class URLService {
         lock.lock()
         defer { lock.unlock() }
         pendingURLs.append(url)
-        print("[URLService] Queued URL: \(url.absoluteString)")
+        log("[URLService] Queued URL: \(url.absoluteString)")
     }
 
     /// Get all pending URLs
@@ -30,7 +30,7 @@ final class URLService {
         lock.lock()
         defer { lock.unlock() }
         pendingURLs.removeAll()
-        print("[URLService] Cleared pending URLs")
+        log("[URLService] Cleared pending URLs")
     }
 
     /// Get and clear pending URLs atomically
