@@ -53,20 +53,9 @@ public struct URLListResponse: Codable {
     public let urls: [String]
 }
 
-/// Represents a listening port with process info
-public struct ListeningPortInfo: Codable {
-    public let port: UInt16
-    public let process: String
-}
-
-/// Response from GET /ports endpoint
-public struct PortListResponse: Codable {
-    public let ports: [ListeningPortInfo]
-}
-
-/// Response from GET /port-forwards endpoint
-public struct PortForwardListResponse: Codable {
-    public let ports: [UInt16]
+/// Response from GET /logs endpoint
+public struct LogListResponse: Codable {
+    public let logs: [String]
 }
 
 /// Request body for POST /clipboard endpoint
@@ -214,28 +203,14 @@ public final class GhostClient {
         }
     }
 
-    // MARK: - Port Forwarding
+    // MARK: - Log Streaming
 
-    /// Get listening ports from the guest
-    public func getListeningPorts() async throws -> [ListeningPortInfo] {
-        if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await getListeningPortsViaTCP(host: tcpHost, port: tcpPort)
-        } else if let vm = virtualMachine {
-            return try await getListeningPortsViaVsock(vm: vm)
-        } else {
+    /// Fetch and clear buffered logs from guest
+    public func fetchLogs() async throws -> [String] {
+        guard let vm = virtualMachine else {
             throw GhostClientError.notConnected
         }
-    }
-
-    /// Get port forward requests from the guest (clears the queue)
-    public func getPortForwardRequests() async throws -> [UInt16] {
-        if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await getPortForwardRequestsViaTCP(host: tcpHost, port: tcpPort)
-        } else if let vm = virtualMachine {
-            return try await getPortForwardRequestsViaVsock(vm: vm)
-        } else {
-            throw GhostClientError.notConnected
-        }
+        return try await fetchLogsViaVsock(vm: vm)
     }
 
     // MARK: - Health Check
@@ -271,21 +246,21 @@ public final class GhostClient {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            return false
-        }
-
         guard let queue = self.vmQueue else {
             return false
         }
 
         let port = self.vsockPort
 
-        // Connect using VM's queue (required by Apple)
+        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let connection: VZVirtioSocketConnection
         do {
             connection = try await withCheckedThrowingContinuation { continuation in
                 queue.async {
+                    guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                        continuation.resume(throwing: GhostClientError.connectionFailed("No socket device"))
+                        return
+                    }
                     socketDevice.connect(toPort: port) { result in
                         switch result {
                         case .success(let conn):
@@ -300,23 +275,33 @@ public final class GhostClient {
             return false
         }
 
-        // Send HTTP health check
-        let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+        // Do blocking I/O on background queue - NOT on main thread!
         let fd = connection.fileDescriptor
+        let result: Bool = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Send HTTP health check
+                let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                request.withCString { ptr in
+                    _ = Darwin.write(fd, ptr, strlen(ptr))
+                }
+                Darwin.shutdown(fd, SHUT_WR)
 
-        request.withCString { ptr in
-            _ = Darwin.write(fd, ptr, strlen(ptr))
+                // Read response
+                var buffer = [CChar](repeating: 0, count: 1024)
+                let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
+                connection.close()
+
+                if bytesRead > 0 {
+                    let response = String(cString: buffer)
+                    continuation.resume(returning: response.contains("200"))
+                } else {
+                    continuation.resume(returning: false)
+                }
+            }
         }
-        Darwin.shutdown(fd, SHUT_WR)
 
-        // Read response
-        var buffer = [CChar](repeating: 0, count: 1024)
-        let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
-        connection.close()
-
-        if bytesRead > 0 {
-            let response = String(cString: buffer)
-            return response.contains("200")
+        if result {
+            return true
         }
         return false
     }
@@ -528,58 +513,6 @@ public final class GhostClient {
         return urlResponse.urls
     }
 
-    private func getListeningPortsViaTCP(host: String, port: Int) async throws -> [ListeningPortInfo] {
-        guard let session = urlSession else {
-            throw GhostClientError.notConnected
-        }
-
-        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/ports")!)
-        urlRequest.httpMethod = "GET"
-        if let token = authToken {
-            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        let (data, response) = try await session.data(for: urlRequest)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GhostClientError.invalidResponse(0)
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            throw GhostClientError.invalidResponse(httpResponse.statusCode)
-        }
-
-        let decoder = JSONDecoder()
-        let portResponse = try decoder.decode(PortListResponse.self, from: data)
-        return portResponse.ports
-    }
-
-    private func getPortForwardRequestsViaTCP(host: String, port: Int) async throws -> [UInt16] {
-        guard let session = urlSession else {
-            throw GhostClientError.notConnected
-        }
-
-        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/port-forwards")!)
-        urlRequest.httpMethod = "GET"
-        if let token = authToken {
-            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        }
-
-        let (data, response) = try await session.data(for: urlRequest)
-
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw GhostClientError.invalidResponse(0)
-        }
-
-        guard httpResponse.statusCode == 200 else {
-            throw GhostClientError.invalidResponse(httpResponse.statusCode)
-        }
-
-        let decoder = JSONDecoder()
-        let forwardResponse = try decoder.decode(PortForwardListResponse.self, from: data)
-        return forwardResponse.ports
-    }
-
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
@@ -647,19 +580,18 @@ public final class GhostClient {
         }
         defer { try? fileHandle.close() }
 
-        // Get socket device
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            throw GhostClientError.connectionFailed("No socket device available")
-        }
-
         guard let queue = self.vmQueue else {
             throw GhostClientError.connectionFailed("VM queue not available")
         }
 
-        // Connect
+        // Connect - ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let port = self.vsockPort
         let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
+                    return
+                }
                 socketDevice.connect(toPort: port) { result in
                     switch result {
                     case .success(let conn):
@@ -835,11 +767,11 @@ public final class GhostClient {
         return urlResponse.urls
     }
 
-    private func getListeningPortsViaVsock(vm: VZVirtualMachine) async throws -> [ListeningPortInfo] {
+    private func fetchLogsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
         let responseData = try await sendHTTPRequest(
             vm: vm,
             method: "GET",
-            path: "/api/v1/ports",
+            path: "/api/v1/logs",
             body: nil
         )
 
@@ -854,31 +786,8 @@ public final class GhostClient {
         }
 
         let decoder = JSONDecoder()
-        let portResponse = try decoder.decode(PortListResponse.self, from: body)
-        return portResponse.ports
-    }
-
-    private func getPortForwardRequestsViaVsock(vm: VZVirtualMachine) async throws -> [UInt16] {
-        let responseData = try await sendHTTPRequest(
-            vm: vm,
-            method: "GET",
-            path: "/api/v1/port-forwards",
-            body: nil
-        )
-
-        let (statusCode, body) = try parseHTTPResponse(responseData)
-
-        guard statusCode == 200 else {
-            throw GhostClientError.invalidResponse(statusCode)
-        }
-
-        guard let body = body else {
-            return []
-        }
-
-        let decoder = JSONDecoder()
-        let forwardResponse = try decoder.decode(PortForwardListResponse.self, from: body)
-        return forwardResponse.ports
+        let logResponse = try decoder.decode(LogListResponse.self, from: body)
+        return logResponse.logs
     }
 
     private func sendHTTPRequest(
@@ -889,21 +798,20 @@ public final class GhostClient {
         contentType: String? = nil,
         extraHeaders: [String: String]? = nil
     ) async throws -> Data {
-        // Get the socket device from the VM
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            throw GhostClientError.connectionFailed("No socket device available")
-        }
-
         // Ensure we have the VM queue
         guard let queue = self.vmQueue else {
             throw GhostClientError.connectionFailed("VM queue not available")
         }
 
         // Connect to the guest on the vsock port
-        // IMPORTANT: VZVirtioSocketDevice.connect MUST be called from the VM's queue
+        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let port = self.vsockPort
         let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
+                    return
+                }
                 socketDevice.connect(toPort: port) { result in
                     switch result {
                     case .success(let conn):
@@ -948,36 +856,43 @@ public final class GhostClient {
 
         // Get file descriptor
         let fd = connection.fileDescriptor
-        let fileHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
 
-        // Send request in chunks to handle large files
-        let chunkSize = 65536 // 64KB chunks
-        var offset = 0
-        while offset < requestData.count {
-            let end = min(offset + chunkSize, requestData.count)
-            let chunk = requestData[offset..<end]
-            let bytesWritten = chunk.withUnsafeBytes { ptr in
-                Darwin.write(fd, ptr.baseAddress!, chunk.count)
-            }
-            if bytesWritten < 0 {
-                connection.close()
-                throw GhostClientError.connectionFailed("Write failed: errno \(errno)")
-            }
-            offset += bytesWritten
-        }
+        // Do all blocking I/O on a background queue - NOT on main actor!
+        let responseData: Data = try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Send request in chunks to handle large files
+                let chunkSize = 65536 // 64KB chunks
+                var offset = 0
+                while offset < requestData.count {
+                    let end = min(offset + chunkSize, requestData.count)
+                    let chunk = requestData[offset..<end]
+                    let bytesWritten = chunk.withUnsafeBytes { ptr in
+                        Darwin.write(fd, ptr.baseAddress!, chunk.count)
+                    }
+                    if bytesWritten < 0 {
+                        connection.close()
+                        continuation.resume(throwing: GhostClientError.connectionFailed("Write failed: errno \(errno)"))
+                        return
+                    }
+                    offset += bytesWritten
+                }
 
-        // Shutdown write side to signal end of request
-        Darwin.shutdown(fd, SHUT_WR)
+                // Shutdown write side to signal end of request
+                Darwin.shutdown(fd, SHUT_WR)
 
-        // Read response with timeout
-        let responseData: Data
-        do {
-            responseData = try await withTimeout(seconds: 10) {
-                self.readAllData(from: fileHandle)
+                // Read response
+                let fileHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+                var result = Data()
+                while true {
+                    let chunk = fileHandle.availableData
+                    if chunk.isEmpty {
+                        break
+                    }
+                    result.append(chunk)
+                }
+
+                continuation.resume(returning: result)
             }
-        } catch {
-            connection.close()
-            throw GhostClientError.timeout
         }
 
         connection.close()

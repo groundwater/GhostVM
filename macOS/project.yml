@@ -5,6 +5,11 @@ options:
     macOS: "15.0"
   xcodeVersion: "15.4"
 
+packages:
+  swift-nio:
+    url: https://github.com/apple/swift-nio.git
+    from: "2.65.0"
+
 settings:
   base:
     SWIFT_VERSION: "6.0"
@@ -77,6 +82,10 @@ targets:
         codeSign: true
         copy:
           destination: executables
+      - package: swift-nio
+        products:
+          - NIOCore
+          - NIOPosix
     settings:
       base:
         PRODUCT_NAME: GhostVM

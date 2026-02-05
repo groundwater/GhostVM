@@ -395,9 +395,13 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
             window.toolbar?.isVisible = false
         }
 
-        func windowWillExitFullScreen(_ notification: Notification) {
+        func windowDidExitFullScreen(_ notification: Notification) {
             guard let window = window else { return }
-            window.toolbar?.isVisible = true
+            // Use windowDidExitFullScreen (after animation) + async dispatch
+            // to ensure SwiftUI's toolbar state syncs properly
+            DispatchQueue.main.async {
+                window.toolbar?.isVisible = true
+            }
         }
     }
 

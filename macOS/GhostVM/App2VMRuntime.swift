@@ -120,9 +120,12 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var ghostClient: GhostClient?
 
     // Port forwarding
-    @Published var portForwardingEnabled: Bool = true
-    private var tunnelProxyService: TunnelProxyService?
-    private var portLifecycleManager: PortLifecycleManager?
+    private var portForwardService: PortForwardService?
+    private var portForwardingStarted = false
+
+    // Log polling from guest
+    private var logPollingService: LogPollingService?
+    private var logPollingStarting = false
 
     let bundleURL: URL
 
@@ -143,27 +146,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             self.clipboardSyncMode = mode
         }
 
-        // Load persisted port forwarding setting for this VM
-        let portForwardKey = "portForwardingEnabled_\(self.bundleURL.path.hashValue)"
-        if UserDefaults.standard.object(forKey: portForwardKey) != nil {
-            self.portForwardingEnabled = UserDefaults.standard.bool(forKey: portForwardKey)
-        }
-    }
-
-    /// Update port forwarding enabled state and persist the setting
-    func setPortForwardingEnabled(_ enabled: Bool) {
-        portForwardingEnabled = enabled
-
-        // Persist the setting per-VM
-        let key = "portForwardingEnabled_\(bundleURL.path.hashValue)"
-        UserDefaults.standard.set(enabled, forKey: key)
-
-        // Update running service
-        if enabled {
-            startPortForwarding()
-        } else {
-            stopPortForwarding()
-        }
     }
 
     /// Update clipboard sync mode and persist the setting
@@ -213,57 +195,82 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Start port forwarding services when VM is running
+    /// Start port forwarding service when VM is running
     private func startPortForwarding() {
-        guard tunnelProxyService == nil else { return }  // Already started
+        guard !portForwardingStarted else { return }  // Already started or starting
         guard let vm = virtualMachine else { return }
         guard let session = windowlessSession else { return }
-        guard portForwardingEnabled else { return }
+
+        portForwardingStarted = true  // Set flag synchronously before async Task
 
         Task { @MainActor in
-            // Start tunnel proxy service
-            let proxyService = TunnelProxyService(
-                vm: vm,
-                queue: session.vmQueue,
-                bundlePath: bundleURL.path
-            )
-            self.tunnelProxyService = proxyService
+            let service = PortForwardService(vm: vm, queue: session.vmQueue)
+            self.portForwardService = service
 
-            do {
-                try await proxyService.start()
-                print("[App2VMRunSession] Tunnel proxy started")
-            } catch {
-                print("[App2VMRunSession] Failed to start tunnel proxy: \(error)")
+            // Load port forwards from VM config
+            let forwards = loadPortForwards()
+            if !forwards.isEmpty {
+                service.start(forwards: forwards)
             }
+        }
+    }
 
+    /// Stop port forwarding service
+    private func stopPortForwarding() {
+        portForwardingStarted = false  // Reset flag synchronously
+        Task { @MainActor in
+            portForwardService?.stop()
+            portForwardService = nil
+        }
+    }
+
+    /// Load port forward configuration from VM bundle
+    private func loadPortForwards() -> [PortForwardConfig] {
+        do {
+            let layout = VMFileLayout(bundleURL: bundleURL)
+            let store = VMConfigStore(layout: layout)
+            let config = try store.load()
+            return config.portForwards
+        } catch {
+            print("[App2VMRunSession] Failed to load port forwards: \(error)")
+            return []
+        }
+    }
+
+    /// Start polling logs from guest VM to host console
+    private func startLogPolling() {
+        guard logPollingService == nil, !logPollingStarting else { return }  // Already started
+        guard let vm = virtualMachine else { return }
+        guard let session = windowlessSession else { return }
+
+        logPollingStarting = true
+
+        Task { @MainActor in
             // Create GhostClient if not already created
             if self.ghostClient == nil {
                 self.ghostClient = GhostClient(virtualMachine: vm, vmQueue: session.vmQueue)
             }
 
-            // Start port lifecycle manager
-            if let client = self.ghostClient {
-                let lifecycleManager = PortLifecycleManager(
-                    bundlePath: bundleURL.path,
-                    client: client
-                )
-                lifecycleManager.autoForwardEnabled = portForwardingEnabled
-                self.portLifecycleManager = lifecycleManager
-                lifecycleManager.start()
-                print("[App2VMRunSession] Port lifecycle manager started")
+            guard let client = self.ghostClient else {
+                self.logPollingStarting = false
+                return
             }
+
+            let service = LogPollingService(client: client)
+            self.logPollingService = service
+            self.logPollingStarting = false
+            service.start()
+            print("[App2VMRunSession] Log polling started")
         }
     }
 
-    /// Stop port forwarding services
-    private func stopPortForwarding() {
-        Task { @MainActor in
-            portLifecycleManager?.stop()
-            portLifecycleManager = nil
-            tunnelProxyService?.stop()
-            tunnelProxyService = nil
-        }
+    /// Stop log polling
+    private func stopLogPolling() {
+        logPollingStarting = false
+        logPollingService?.stop()
+        logPollingService = nil
     }
+
 
     func startIfNeeded() {
         switch state {
@@ -477,14 +484,16 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Start/stop clipboard sync based on VM state
+        // Start/stop services based on VM state
         switch newState {
         case .running:
             startClipboardSync()
             startPortForwarding()
+            startLogPolling()
         case .stopped, .failed, .stopping, .suspending:
             stopClipboardSync()
             stopPortForwarding()
+            stopLogPolling()
         default:
             break
         }
