@@ -1297,6 +1297,101 @@ struct PortForwardRowView: View {
     }
 }
 
+// MARK: - Port Forward Editor (Runtime)
+
+@available(macOS 13.0, *)
+struct PortForwardEditorView: View {
+    @ObservedObject var session: App2VMRunSession
+    @ObservedObject var portForwardService: PortForwardService
+    @Binding var isPresented: Bool
+
+    @State private var newHostPort: String = ""
+    @State private var newGuestPort: String = ""
+    @State private var errorMessage: String?
+
+    private var activeForwards: [PortForwardConfig] {
+        portForwardService.activeForwards
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Port Forwards")
+                .font(.headline)
+
+            if activeForwards.isEmpty {
+                Text("No active port forwards")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+            } else {
+                ForEach(activeForwards) { forward in
+                    HStack {
+                        Text(verbatim: "localhost:\(forward.hostPort)")
+                            .font(.system(.body, design: .monospaced))
+                        Image(systemName: "arrow.right")
+                            .foregroundStyle(.secondary)
+                        Text(verbatim: "guest:\(forward.guestPort)")
+                            .font(.system(.body, design: .monospaced))
+                        Spacer()
+                        Button {
+                            session.removePortForward(hostPort: forward.hostPort)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.red)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 8) {
+                TextField("Host", text: $newHostPort)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(.secondary)
+                TextField("Guest", text: $newGuestPort)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                Button("Add") {
+                    addPortForward()
+                }
+                .disabled(newHostPort.isEmpty || newGuestPort.isEmpty)
+            }
+
+            if let error = errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding()
+        .frame(width: 280)
+    }
+
+    private func addPortForward() {
+        errorMessage = nil
+
+        guard let hostPort = UInt16(newHostPort) else {
+            errorMessage = "Invalid host port"
+            return
+        }
+        guard let guestPort = UInt16(newGuestPort) else {
+            errorMessage = "Invalid guest port"
+            return
+        }
+
+        do {
+            try session.addPortForward(hostPort: hostPort, guestPort: guestPort)
+            newHostPort = ""
+            newGuestPort = ""
+        } catch {
+            errorMessage = "Port \(hostPort) already in use"
+        }
+    }
+}
+
 // MARK: - Snapshot Helpers
 
 @available(macOS 13.0, *)
@@ -1550,7 +1645,7 @@ struct VMWindowView: View {
     @StateObject private var connectionMonitor = GuestToolsConnectionMonitor()
     @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
-    @State private var portForwards: [PortForwardConfig] = []
+    @State private var showPortForwardEditor = false
 
     init(vm: App2VM) {
         self.vm = vm
@@ -1558,7 +1653,7 @@ struct VMWindowView: View {
     }
 
     private var activePortForwards: [PortForwardConfig] {
-        portForwards.filter { $0.enabled }
+        session.portForwardService?.activeForwards ?? []
     }
 
     private var isSuspending: Bool {
@@ -1681,9 +1776,9 @@ struct VMWindowView: View {
                 }
                 .help(connectionMonitor.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
             }
-            if !activePortForwards.isEmpty {
-                ToolbarItem(placement: .automatic) {
-                    Menu {
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    if !activePortForwards.isEmpty {
                         ForEach(activePortForwards) { forward in
                             Button {
                                 // Copy the localhost URL to clipboard
@@ -1702,10 +1797,22 @@ struct VMWindowView: View {
                         Text("Click to copy URL")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    } label: {
-                        Label("\(activePortForwards.count)", systemImage: "network")
+                        Divider()
                     }
-                    .help("Port Forwards: \(activePortForwards.map { "\($0.hostPort)→\($0.guestPort)" }.joined(separator: ", "))")
+                    Button("Edit Port Forwards…") {
+                        showPortForwardEditor = true
+                    }
+                } label: {
+                    Label(activePortForwards.isEmpty ? "Ports" : "\(activePortForwards.count)", systemImage: "network")
+                }
+                .help(activePortForwards.isEmpty ? "No port forwards configured" : "Port Forwards: \(activePortForwards.map { "\($0.hostPort)→\($0.guestPort)" }.joined(separator: ", "))")
+                .popover(isPresented: $showPortForwardEditor) {
+                    if let service = session.portForwardService {
+                        PortForwardEditorView(session: session, portForwardService: service, isPresented: $showPortForwardEditor)
+                    } else {
+                        Text("Port forwarding not available")
+                            .padding()
+                    }
                 }
             }
             ToolbarItem(placement: .automatic) {
@@ -1757,9 +1864,6 @@ struct VMWindowView: View {
             }
         }
         .onAppear {
-            // Load port forwards from config
-            loadPortForwards()
-
             session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store, weak fileTransferService] state in
                 switch state {
                 case .running:
@@ -1799,21 +1903,6 @@ struct VMWindowView: View {
         } message: {
             if let message = guestToolsInstaller.alertMessage {
                 Text(message)
-            }
-        }
-    }
-
-    private func loadPortForwards() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let layout = VMFileLayout(bundleURL: vm.bundleURL)
-                let store = VMConfigStore(layout: layout)
-                let config = try store.load()
-                DispatchQueue.main.async {
-                    self.portForwards = config.portForwards
-                }
-            } catch {
-                print("[VMWindowView] Failed to load port forwards: \(error)")
             }
         }
     }

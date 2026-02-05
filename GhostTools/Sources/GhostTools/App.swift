@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UserNotifications
+import CoreServices
 
 /// GhostTools version - update this when making changes to verify correct binary is running
 let kGhostToolsVersion = "1.35.0"
@@ -67,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
         installLaunchAgentIfNeeded()
+        registerAsDefaultBrowser()
         startServer()
         startTunnelServer()
         startUpdateChecker()
@@ -228,6 +230,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             process.waitUntilExit()
             print("[GhostTools] Registered with Launch Services")
 
+            // Set as default browser for URL forwarding
+            registerAsDefaultBrowser()
+
             // Relaunch from /Applications
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -266,6 +271,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // MARK: - Default Browser Registration
+
+    /// Register GhostTools as the default handler for http/https URLs
+    /// This enables URL forwarding from guest to host
+    private func registerAsDefaultBrowser() {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            print("[GhostTools] No bundle identifier, skipping default browser registration")
+            return
+        }
+
+        let schemes = ["http", "https"]
+        for scheme in schemes {
+            let result = LSSetDefaultHandlerForURLScheme(scheme as CFString, bundleID as CFString)
+            if result == noErr {
+                print("[GhostTools] Registered as default handler for \(scheme)")
+            } else {
+                print("[GhostTools] Failed to register as default handler for \(scheme): \(result)")
+            }
+        }
     }
 
     // MARK: - Launch Agent

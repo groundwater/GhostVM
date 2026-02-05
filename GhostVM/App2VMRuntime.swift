@@ -120,7 +120,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var ghostClient: GhostClient?
 
     // Port forwarding
-    private var portForwardService: PortForwardService?
+    @Published private(set) var portForwardService: PortForwardService?
     private var portForwardingStarted = false
 
     // Log polling from guest
@@ -234,6 +234,61 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         } catch {
             print("[App2VMRunSession] Failed to load port forwards: \(error)")
             return []
+        }
+    }
+
+    /// Add a port forward at runtime and persist to config
+    @MainActor
+    func addPortForward(hostPort: UInt16, guestPort: UInt16) throws {
+        guard let service = portForwardService else {
+            throw PortForwardError.serviceNotRunning
+        }
+
+        let config = PortForwardConfig(hostPort: hostPort, guestPort: guestPort, enabled: true)
+        try service.addForward(config)
+
+        // Persist to config.json
+        persistPortForwards()
+    }
+
+    /// Remove a port forward at runtime and persist to config
+    @MainActor
+    func removePortForward(hostPort: UInt16) {
+        guard let service = portForwardService else { return }
+        service.removeForward(hostPort: hostPort)
+
+        // Persist to config.json
+        persistPortForwards()
+    }
+
+    /// Save current port forwards to config.json
+    @MainActor
+    private func persistPortForwards() {
+        guard let service = portForwardService else { return }
+        let activeForwards = service.activeForwards
+
+        DispatchQueue.global(qos: .userInitiated).async { [bundleURL] in
+            do {
+                let layout = VMFileLayout(bundleURL: bundleURL)
+                let store = VMConfigStore(layout: layout)
+                var config = try store.load()
+                config.portForwards = activeForwards
+                try store.save(config)
+                print("[App2VMRunSession] Persisted \(activeForwards.count) port forward(s)")
+            } catch {
+                print("[App2VMRunSession] Failed to persist port forwards: \(error)")
+            }
+        }
+    }
+
+    enum PortForwardError: LocalizedError {
+        case serviceNotRunning
+
+        var errorDescription: String? {
+            switch self {
+            case .serviceNotRunning:
+                return "Port forwarding service is not running"
+            }
         }
     }
 
