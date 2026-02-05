@@ -28,6 +28,12 @@ final class Router: @unchecked Sendable {
             return handleFileGet(request)
         } else if path == "/api/v1/urls" {
             return handleURLs(request)
+        } else if path == "/api/v1/ports" {
+            return handlePorts(request)
+        } else if path == "/api/v1/port-forwards" {
+            return handlePortForwards(request)
+        } else if path == "/api/v1/logs" {
+            return handleLogs(request)
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
@@ -57,13 +63,13 @@ final class Router: @unchecked Sendable {
     }
 
     private func getClipboard() -> HTTPResponse {
-        print("[Router] GET /clipboard")
+        log("[Router] GET /clipboard")
         guard let content = ClipboardService.shared.getClipboardContents() else {
-            print("[Router] No clipboard content")
+            log("[Router] No clipboard content")
             return HTTPResponse(status: .noContent)
         }
 
-        print("[Router] Returning clipboard: \(content.prefix(50))...")
+        log("[Router] Returning clipboard: \(content.prefix(50))...")
         let response = ClipboardResponse(content: content)
         guard let data = try? JSONEncoder().encode(response) else {
             return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
@@ -72,24 +78,24 @@ final class Router: @unchecked Sendable {
     }
 
     private func setClipboard(_ request: HTTPRequest) -> HTTPResponse {
-        print("[Router] POST /clipboard")
+        log("[Router] POST /clipboard")
         guard let body = request.body else {
-            print("[Router] No request body")
+            log("[Router] No request body")
             return HTTPResponse.error(.badRequest, message: "Request body required")
         }
 
         guard let clipboardRequest = try? JSONDecoder().decode(ClipboardRequest.self, from: body) else {
-            print("[Router] Invalid JSON in request body")
+            log("[Router] Invalid JSON in request body")
             return HTTPResponse.error(.badRequest, message: "Invalid JSON")
         }
 
-        print("[Router] Setting clipboard: \(clipboardRequest.content.prefix(50))...")
+        log("[Router] Setting clipboard: \(clipboardRequest.content.prefix(50))...")
         guard ClipboardService.shared.setClipboardContents(clipboardRequest.content) else {
-            print("[Router] Failed to set clipboard")
+            log("[Router] Failed to set clipboard")
             return HTTPResponse.error(.internalServerError, message: "Failed to set clipboard")
         }
 
-        print("[Router] Clipboard set successfully")
+        log("[Router] Clipboard set successfully")
         return HTTPResponse(status: .ok)
     }
 
@@ -100,7 +106,7 @@ final class Router: @unchecked Sendable {
         case .GET:
             // Return outgoing files (queued for host to fetch)
             let files = FileService.shared.listOutgoingFiles()
-            print("[Router] GET /files - returning \(files.count) outgoing file(s)")
+            log("[Router] GET /files - returning \(files.count) outgoing file(s)")
             let response = FileListResponse(files: files)
 
             guard let data = try? JSONEncoder().encode(response) else {
@@ -111,7 +117,7 @@ final class Router: @unchecked Sendable {
         case .DELETE:
             // Clear the outgoing file queue
             FileService.shared.clearOutgoingFiles()
-            print("[Router] DELETE /files - queue cleared")
+            log("[Router] DELETE /files - queue cleared")
             return HTTPResponse(status: .ok)
 
         default:
@@ -131,7 +137,7 @@ final class Router: @unchecked Sendable {
         // Get filename from header or generate one
         let filename = request.header("X-Filename") ?? "received_file_\(Int(Date().timeIntervalSince1970))"
 
-        print("[Router] Receiving file: \(filename) (\(body.count) bytes)")
+        log("[Router] Receiving file: \(filename) (\(body.count) bytes)")
 
         do {
             let savedURL = try FileService.shared.receiveFile(data: body, filename: filename)
@@ -140,10 +146,10 @@ final class Router: @unchecked Sendable {
             guard let data = try? JSONEncoder().encode(response) else {
                 return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
             }
-            print("[Router] File saved to: \(savedURL.path)")
+            log("[Router] File saved to: \(savedURL.path)")
             return HTTPResponse.json(data)
         } catch {
-            print("[Router] Failed to save file: \(error)")
+            log("[Router] Failed to save file: \(error)")
             return HTTPResponse.error(.internalServerError, message: "Failed to save file: \(error.localizedDescription)")
         }
     }
@@ -182,6 +188,60 @@ final class Router: @unchecked Sendable {
         }
     }
 
+    // MARK: - Ports
+
+    private func handlePorts(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        let ports = PortScanner.shared.getListeningPorts()
+        log("[Router] GET /ports - returning \(ports.count) listening port(s)")
+
+        let response = PortListResponse(ports: ports)
+        guard let data = try? JSONEncoder().encode(response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    // MARK: - Port Forwards
+
+    private func handlePortForwards(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        // Pop and clear the requested ports
+        let ports = PortForwardRequestService.shared.popRequests()
+        if !ports.isEmpty {
+            log("[Router] GET /port-forwards - returning \(ports.count) requested port(s)")
+        }
+
+        let response = PortForwardResponse(ports: ports)
+        guard let data = try? JSONEncoder().encode(response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    // MARK: - Logs
+
+    private func handleLogs(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        // Pop and return buffered logs
+        let logs = LogService.shared.popAll()
+
+        let response = LogListResponse(logs: logs)
+        guard let data = try? JSONEncoder().encode(response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
     // MARK: - URLs
 
     private func handleURLs(_ request: HTTPRequest) -> HTTPResponse {
@@ -190,7 +250,7 @@ final class Router: @unchecked Sendable {
             // Get and clear pending URLs atomically
             let urls = URLService.shared.popAllURLs()
             if !urls.isEmpty {
-                print("[Router] GET /urls - returning \(urls.count) URL(s)")
+                log("[Router] GET /urls - returning \(urls.count) URL(s)")
             }
             let response = URLListResponse(urls: urls)
 
@@ -202,7 +262,7 @@ final class Router: @unchecked Sendable {
         case .DELETE:
             // Clear the URL queue (without returning them)
             URLService.shared.clearPendingURLs()
-            print("[Router] DELETE /urls - queue cleared")
+            log("[Router] DELETE /urls - queue cleared")
             return HTTPResponse(status: .ok)
 
         default:
@@ -237,4 +297,8 @@ struct FileListResponse: Codable {
 
 struct URLListResponse: Codable {
     let urls: [String]
+}
+
+struct LogListResponse: Codable {
+    let logs: [String]
 }
