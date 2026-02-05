@@ -18,9 +18,8 @@ struct ForwardCommand {
 
     /// Run the forward command (blocks forever until killed)
     func run() throws -> Never {
-        // Compute Unix socket path from bundle path
-        let hash = abs(bundlePath.hashValue)
-        let socketPath = "/tmp/ghostvm-tunnel-\(hash).sock"
+        // Compute Unix socket path from bundle path using stable hash
+        let socketPath = Self.socketPath(for: bundlePath)
 
         print("[vmctl forward] Forwarding localhost:\(hostPort) -> guest:\(guestPort)")
         print("[vmctl forward] Proxy socket: \(socketPath)")
@@ -271,6 +270,22 @@ struct ForwardCommand {
             written += result
         }
         return true
+    }
+
+    /// Compute the Unix socket path for a given bundle path
+    /// Uses a stable hash (djb2) since String.hashValue is not stable across processes
+    static func socketPath(for bundlePath: String) -> String {
+        let hash = stableHash(bundlePath)
+        return "/tmp/ghostvm-tunnel-\(hash).sock"
+    }
+
+    /// djb2 hash - stable across processes unlike String.hashValue
+    private static func stableHash(_ string: String) -> UInt64 {
+        var hash: UInt64 = 5381
+        for char in string.utf8 {
+            hash = ((hash << 5) &+ hash) &+ UInt64(char)
+        }
+        return hash
     }
 }
 

@@ -69,6 +69,11 @@ public struct PortForwardListResponse: Codable {
     public let ports: [UInt16]
 }
 
+/// Response from GET /logs endpoint
+public struct LogListResponse: Codable {
+    public let logs: [String]
+}
+
 /// Request body for POST /clipboard endpoint
 public struct ClipboardPostRequest: Codable {
     public let content: String
@@ -238,6 +243,16 @@ public final class GhostClient {
         }
     }
 
+    // MARK: - Log Streaming
+
+    /// Fetch and clear buffered logs from guest
+    public func fetchLogs() async throws -> [String] {
+        guard let vm = virtualMachine else {
+            throw GhostClientError.notConnected
+        }
+        return try await fetchLogsViaVsock(vm: vm)
+    }
+
     // MARK: - Health Check
 
     /// Check if GhostTools is running and reachable in the guest
@@ -271,21 +286,21 @@ public final class GhostClient {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            return false
-        }
-
         guard let queue = self.vmQueue else {
             return false
         }
 
         let port = self.vsockPort
 
-        // Connect using VM's queue (required by Apple)
+        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let connection: VZVirtioSocketConnection
         do {
             connection = try await withCheckedThrowingContinuation { continuation in
                 queue.async {
+                    guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                        continuation.resume(throwing: GhostClientError.connectionFailed("No socket device"))
+                        return
+                    }
                     socketDevice.connect(toPort: port) { result in
                         switch result {
                         case .success(let conn):
@@ -647,19 +662,18 @@ public final class GhostClient {
         }
         defer { try? fileHandle.close() }
 
-        // Get socket device
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            throw GhostClientError.connectionFailed("No socket device available")
-        }
-
         guard let queue = self.vmQueue else {
             throw GhostClientError.connectionFailed("VM queue not available")
         }
 
-        // Connect
+        // Connect - ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let port = self.vsockPort
         let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
+                    return
+                }
                 socketDevice.connect(toPort: port) { result in
                     switch result {
                     case .success(let conn):
@@ -881,6 +895,29 @@ public final class GhostClient {
         return forwardResponse.ports
     }
 
+    private func fetchLogsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/logs",
+            body: nil
+        )
+
+        let (statusCode, body) = try parseHTTPResponse(responseData)
+
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+
+        guard let body = body else {
+            return []
+        }
+
+        let decoder = JSONDecoder()
+        let logResponse = try decoder.decode(LogListResponse.self, from: body)
+        return logResponse.logs
+    }
+
     private func sendHTTPRequest(
         vm: VZVirtualMachine,
         method: String,
@@ -889,21 +926,20 @@ public final class GhostClient {
         contentType: String? = nil,
         extraHeaders: [String: String]? = nil
     ) async throws -> Data {
-        // Get the socket device from the VM
-        guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-            throw GhostClientError.connectionFailed("No socket device available")
-        }
-
         // Ensure we have the VM queue
         guard let queue = self.vmQueue else {
             throw GhostClientError.connectionFailed("VM queue not available")
         }
 
         // Connect to the guest on the vsock port
-        // IMPORTANT: VZVirtioSocketDevice.connect MUST be called from the VM's queue
+        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let port = self.vsockPort
         let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
+                    return
+                }
                 socketDevice.connect(toPort: port) { result in
                     switch result {
                     case .success(let conn):

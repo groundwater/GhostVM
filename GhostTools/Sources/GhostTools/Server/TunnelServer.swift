@@ -122,7 +122,7 @@ final class TunnelServer: @unchecked Sendable {
             return
         }
 
-        print("[TunnelServer] Received command: \(command)")
+        log("[TunnelServer] Received command: \(command)")
 
         // Parse "CONNECT <port>"
         let parts = command.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: " ")
@@ -146,13 +146,13 @@ final class TunnelServer: @unchecked Sendable {
             _ = Darwin.write(socket, ptr, strlen(ptr))
         }
 
-        print("[TunnelServer] Bridging vsock -> localhost:\(targetPort)")
+        log("[TunnelServer] Bridging vsock -> localhost:\(targetPort)")
 
         // Bridge the two sockets bidirectionally
         bridgeSockets(socket, targetSocket)
 
         close(targetSocket)
-        print("[TunnelServer] Tunnel closed for port \(targetPort)")
+        log("[TunnelServer] Tunnel closed for port \(targetPort)")
     }
 
     /// Read a line (up to \r\n or \n) from a socket
@@ -186,12 +186,27 @@ final class TunnelServer: @unchecked Sendable {
         }
     }
 
-    /// Connect to localhost on the specified port
+    /// Connect to localhost on the specified port (tries IPv4 first, then IPv6)
     private func connectToLocalhost(port: UInt16) -> Int32 {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else {
-            return -1
+        // Try IPv4 first
+        log("[TunnelServer] Trying IPv4 127.0.0.1:\(port)...")
+        if let sock = connectToIPv4(port: port) {
+            log("[TunnelServer] IPv4 connected!")
+            return sock
         }
+        log("[TunnelServer] IPv4 failed (errno=\(errno)), trying IPv6...")
+        // Fall back to IPv6
+        if let sock = connectToIPv6(port: port) {
+            log("[TunnelServer] IPv6 connected!")
+            return sock
+        }
+        log("[TunnelServer] IPv6 also failed (errno=\(errno))")
+        return -1
+    }
+
+    private func connectToIPv4(port: UInt16) -> Int32? {
+        let sock = socket(AF_INET, SOCK_STREAM, 0)
+        guard sock >= 0 else { return nil }
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -207,13 +222,35 @@ final class TunnelServer: @unchecked Sendable {
 
         if result != 0 {
             close(sock)
-            return -1
+            return nil
         }
-
         return sock
     }
 
-    /// Bridge two sockets bidirectionally using select()
+    private func connectToIPv6(port: UInt16) -> Int32? {
+        let sock = socket(AF_INET6, SOCK_STREAM, 0)
+        guard sock >= 0 else { return nil }
+
+        var addr = sockaddr_in6()
+        addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+        addr.sin6_family = sa_family_t(AF_INET6)
+        addr.sin6_port = port.bigEndian
+        addr.sin6_addr = in6addr_loopback
+
+        let result = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.connect(sock, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in6>.size))
+            }
+        }
+
+        if result != 0 {
+            close(sock)
+            return nil
+        }
+        return sock
+    }
+
+    /// Bridge two sockets bidirectionally using poll()
     private func bridgeSockets(_ a: Int32, _ b: Int32) {
         // Set both sockets to non-blocking
         var flags = fcntl(a, F_GETFL, 0)
@@ -222,27 +259,38 @@ final class TunnelServer: @unchecked Sendable {
         fcntl(b, F_SETFL, flags | O_NONBLOCK)
 
         var buffer = [UInt8](repeating: 0, count: 65536)
-        let maxFd = max(a, b) + 1
+
+        // Use poll() instead of select() - simpler and no fd_set size limits
+        var fds: [pollfd] = [
+            pollfd(fd: a, events: Int16(POLLIN), revents: 0),
+            pollfd(fd: b, events: Int16(POLLIN), revents: 0)
+        ]
 
         while isRunning {
-            var readSet = fd_set()
-            __darwin_fd_zero(&readSet)
-            __darwin_fd_set(a, &readSet)
-            __darwin_fd_set(b, &readSet)
+            // Reset revents
+            fds[0].revents = 0
+            fds[1].revents = 0
 
-            var timeout = timeval(tv_sec: 30, tv_usec: 0)
-
-            let ready = select(maxFd, &readSet, nil, nil, &timeout)
-            if ready <= 0 {
-                if ready == 0 {
-                    // Timeout - continue to check if still running
+            let ready = poll(&fds, 2, 30000)  // 30 second timeout
+            if ready < 0 {
+                if errno == EINTR {
                     continue
                 }
                 break
             }
+            if ready == 0 {
+                // Timeout - continue to check if still running
+                continue
+            }
+
+            // Check for errors or hangup on either socket
+            let errorMask = Int16(POLLERR | POLLHUP | POLLNVAL)
+            if (fds[0].revents & errorMask) != 0 || (fds[1].revents & errorMask) != 0 {
+                break
+            }
 
             // Forward data from a to b
-            if __darwin_fd_isset(a, &readSet) != 0 {
+            if (fds[0].revents & Int16(POLLIN)) != 0 {
                 let bytesRead = read(a, &buffer, buffer.count)
                 if bytesRead <= 0 {
                     break
@@ -253,7 +301,7 @@ final class TunnelServer: @unchecked Sendable {
             }
 
             // Forward data from b to a
-            if __darwin_fd_isset(b, &readSet) != 0 {
+            if (fds[1].revents & Int16(POLLIN)) != 0 {
                 let bytesRead = read(b, &buffer, buffer.count)
                 if bytesRead <= 0 {
                     break
@@ -290,31 +338,3 @@ final class TunnelServer: @unchecked Sendable {
     }
 }
 
-// Helper functions for fd_set manipulation (Darwin-specific)
-private func __darwin_fd_zero(_ set: inout fd_set) {
-    set.fds_bits = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-}
-
-private func __darwin_fd_set(_ fd: Int32, _ set: inout fd_set) {
-    let intOffset = Int(fd / 32)
-    let bitOffset = fd % 32
-    let mask = Int32(1 << bitOffset)
-
-    withUnsafeMutablePointer(to: &set.fds_bits) { ptr in
-        ptr.withMemoryRebound(to: Int32.self, capacity: 32) { bits in
-            bits[intOffset] |= mask
-        }
-    }
-}
-
-private func __darwin_fd_isset(_ fd: Int32, _ set: inout fd_set) -> Int32 {
-    let intOffset = Int(fd / 32)
-    let bitOffset = fd % 32
-    let mask = Int32(1 << bitOffset)
-
-    return withUnsafePointer(to: &set.fds_bits) { ptr in
-        ptr.withMemoryRebound(to: Int32.self, capacity: 32) { bits in
-            (bits[intOffset] & mask) != 0 ? 1 : 0
-        }
-    }
-}

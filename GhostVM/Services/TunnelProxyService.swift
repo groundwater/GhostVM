@@ -33,9 +33,19 @@ public final class TunnelProxyService: ObservableObject {
     }
 
     /// Compute the Unix socket path for a given bundle path
+    /// Uses a stable hash (djb2) since String.hashValue is not stable across processes
     public static func socketPath(for bundlePath: String) -> String {
-        let hash = abs(bundlePath.hashValue)
+        let hash = stableHash(bundlePath)
         return "/tmp/ghostvm-tunnel-\(hash).sock"
+    }
+
+    /// djb2 hash - stable across processes unlike String.hashValue
+    private static func stableHash(_ string: String) -> UInt64 {
+        var hash: UInt64 = 5381
+        for char in string.utf8 {
+            hash = ((hash << 5) &+ hash) &+ UInt64(char)
+        }
+        return hash
     }
 
     /// Start the proxy service
@@ -166,13 +176,17 @@ public final class TunnelProxyService: ObservableObject {
         }
 
         // Connect to guest vsock:5001
-        guard let guestSocket = await connectToGuest() else {
+        print("[TunnelProxy] Connecting to guest TunnelServer...")
+        guard let guestConnection = await connectToGuest() else {
+            print("[TunnelProxy] Failed to connect to guest TunnelServer")
             sendError(clientSocket, message: "Cannot connect to guest tunnel server")
             return
         }
+        let guestSocket = guestConnection.fileDescriptor
+        print("[TunnelProxy] Connected to guest, fd=\(guestSocket)")
 
         defer {
-            close(guestSocket)
+            guestConnection.close()
         }
 
         // Forward the CONNECT command to guest
@@ -180,14 +194,18 @@ public final class TunnelProxyService: ObservableObject {
         forwardCommand.withCString { ptr in
             _ = Darwin.write(guestSocket, ptr, strlen(ptr))
         }
+        print("[TunnelProxy] Sent CONNECT to guest, waiting for response...")
 
         // Read response from guest
         guard let response = readLine(from: guestSocket) else {
+            print("[TunnelProxy] No response from guest (readLine returned nil)")
             sendError(clientSocket, message: "No response from guest")
             return
         }
+        print("[TunnelProxy] Guest response: \(response)")
 
         if response.hasPrefix("ERROR") {
+            print("[TunnelProxy] Guest returned error: \(response)")
             // Forward error to client
             let errorMsg = response + "\r\n"
             errorMsg.withCString { ptr in
@@ -197,6 +215,7 @@ public final class TunnelProxyService: ObservableObject {
         }
 
         if !response.hasPrefix("OK") {
+            print("[TunnelProxy] Unexpected guest response: \(response)")
             sendError(clientSocket, message: "Unexpected response from guest")
             return
         }
@@ -216,16 +235,16 @@ public final class TunnelProxyService: ObservableObject {
     }
 
     /// Connect to guest vsock:5001 (tunnel server)
-    private nonisolated func connectToGuest() async -> Int32? {
-        guard let socketDevice = virtualMachine.socketDevices.first as? VZVirtioSocketDevice else {
-            print("[TunnelProxy] No socket device available")
-            return nil
-        }
-
-        let connection: VZVirtioSocketConnection
+    /// Returns the connection object - caller must keep it alive for the duration of use
+    private nonisolated func connectToGuest() async -> VZVirtioSocketConnection? {
+        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         do {
-            connection = try await withCheckedThrowingContinuation { continuation in
-                vmQueue.async {
+            let connection = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<VZVirtioSocketConnection, Error>) in
+                vmQueue.async { [virtualMachine] in
+                    guard let socketDevice = virtualMachine.socketDevices.first as? VZVirtioSocketDevice else {
+                        continuation.resume(throwing: TunnelProxyError.socketCreationFailed(-1))
+                        return
+                    }
                     socketDevice.connect(toPort: 5001) { result in
                         switch result {
                         case .success(let conn):
@@ -236,12 +255,11 @@ public final class TunnelProxyService: ObservableObject {
                     }
                 }
             }
+            return connection
         } catch {
             print("[TunnelProxy] Failed to connect to guest: \(error)")
             return nil
         }
-
-        return connection.fileDescriptor
     }
 
     /// Read a line from a socket
@@ -275,7 +293,7 @@ public final class TunnelProxyService: ObservableObject {
         }
     }
 
-    /// Bridge two sockets bidirectionally
+    /// Bridge two sockets bidirectionally using poll()
     private nonisolated func bridgeSockets(_ a: Int32, _ b: Int32) {
         // Set both sockets to non-blocking
         var flags = fcntl(a, F_GETFL, 0)
@@ -284,26 +302,38 @@ public final class TunnelProxyService: ObservableObject {
         fcntl(b, F_SETFL, flags | O_NONBLOCK)
 
         var buffer = [UInt8](repeating: 0, count: 65536)
-        let maxFd = max(a, b) + 1
 
-        while isRunning {
-            var readSet = fd_set()
-            __darwin_fd_zero(&readSet)
-            __darwin_fd_set(a, &readSet)
-            __darwin_fd_set(b, &readSet)
+        // Use poll() instead of select() - simpler and no fd_set size limits
+        var fds: [pollfd] = [
+            pollfd(fd: a, events: Int16(POLLIN), revents: 0),
+            pollfd(fd: b, events: Int16(POLLIN), revents: 0)
+        ]
 
-            var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        while true {
+            // Reset revents
+            fds[0].revents = 0
+            fds[1].revents = 0
 
-            let ready = select(maxFd, &readSet, nil, nil, &timeout)
-            if ready <= 0 {
-                if ready == 0 {
+            let ready = poll(&fds, 2, 30000)  // 30 second timeout
+            if ready < 0 {
+                if errno == EINTR {
                     continue
                 }
                 break
             }
+            if ready == 0 {
+                // Timeout - check if sockets are still valid
+                continue
+            }
+
+            // Check for errors or hangup on either socket
+            let errorMask = Int16(POLLERR | POLLHUP | POLLNVAL)
+            if (fds[0].revents & errorMask) != 0 || (fds[1].revents & errorMask) != 0 {
+                break
+            }
 
             // Forward data from a to b
-            if __darwin_fd_isset(a, &readSet) != 0 {
+            if (fds[0].revents & Int16(POLLIN)) != 0 {
                 let bytesRead = read(a, &buffer, buffer.count)
                 if bytesRead <= 0 {
                     break
@@ -314,7 +344,7 @@ public final class TunnelProxyService: ObservableObject {
             }
 
             // Forward data from b to a
-            if __darwin_fd_isset(b, &readSet) != 0 {
+            if (fds[1].revents & Int16(POLLIN)) != 0 {
                 let bytesRead = read(b, &buffer, buffer.count)
                 if bytesRead <= 0 {
                     break
@@ -368,32 +398,3 @@ enum TunnelProxyError: Error, LocalizedError {
     }
 }
 
-// MARK: - fd_set helpers
-
-private func __darwin_fd_zero(_ set: inout fd_set) {
-    set.fds_bits = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-}
-
-private func __darwin_fd_set(_ fd: Int32, _ set: inout fd_set) {
-    let intOffset = Int(fd / 32)
-    let bitOffset = fd % 32
-    let mask = Int32(1 << bitOffset)
-
-    withUnsafeMutablePointer(to: &set.fds_bits) { ptr in
-        ptr.withMemoryRebound(to: Int32.self, capacity: 32) { bits in
-            bits[intOffset] |= mask
-        }
-    }
-}
-
-private func __darwin_fd_isset(_ fd: Int32, _ set: inout fd_set) -> Int32 {
-    let intOffset = Int(fd / 32)
-    let bitOffset = fd % 32
-    let mask = Int32(1 << bitOffset)
-
-    return withUnsafePointer(to: &set.fds_bits) { ptr in
-        ptr.withMemoryRebound(to: Int32.self, capacity: 32) { bits in
-            (bits[intOffset] & mask) != 0 ? 1 : 0
-        }
-    }
-}
