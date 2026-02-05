@@ -33,6 +33,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var shutDownItem: NSToolbarItem?
     private var terminateItem: NSToolbarItem?
 
+    private weak var window: NSWindow?
     private var portForwardPanel: PortForwardPanel?
     private var portForwardEntries: [PortForwardEntry] = []
 
@@ -47,6 +48,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     }
 
     func attach(to window: NSWindow) {
+        self.window = window
         window.toolbar = toolbar
         window.toolbarStyle = .unifiedCompact
     }
@@ -211,8 +213,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private func updateGuestToolsButton() {
         guard let item = guestToolsItem else { return }
 
-        let symbolName = guestToolsConnected ? "checkmark.circle.fill" : "circle.dotted"
-        let color: NSColor = guestToolsConnected ? .systemGreen : .tertiaryLabelColor
+        let symbolName = "app.connected.to.app.below.fill"
+        let color: NSColor = guestToolsConnected ? .systemGreen : .systemGray
 
         if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Guest Tools") {
             let config = NSImage.SymbolConfiguration(paletteColors: [color])
@@ -322,25 +324,24 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     }
 
     @objc private func editPortForwards(_ sender: NSMenuItem) {
-        // Find an anchor view for the popover: try the toolbar item view, fall back to window content view
-        let anchorView: NSView
-        if let itemView = toolbar.items.first(where: { $0.itemIdentifier == ItemID.portForwards })?.value(forKey: "view") as? NSView {
-            anchorView = itemView
-        } else if let contentView = toolbar.items.first?.value(forKey: "window") as? NSWindow {
-            anchorView = contentView.contentView ?? contentView.contentView!
-        } else {
-            delegate?.toolbarDidRequestPortForwardEditor(self)
-            return
+        // Delay to next run loop iteration so the menu fully dismisses first;
+        // otherwise the transient popover immediately closes with the menu.
+        DispatchQueue.main.async { [self] in
+            guard let contentView = window?.contentView else {
+                delegate?.toolbarDidRequestPortForwardEditor(self)
+                return
+            }
+
+            portForwardPanel?.close()
+
+            let panel = PortForwardPanel()
+            panel.delegate = self
+            panel.setEntries(portForwardEntries)
+            // Anchor to top-center of the content view, pointing up toward toolbar
+            let anchorRect = NSRect(x: contentView.bounds.midX - 1, y: contentView.bounds.maxY, width: 2, height: 1)
+            panel.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
+            portForwardPanel = panel
         }
-
-        // Close existing panel if open
-        portForwardPanel?.close()
-
-        let panel = PortForwardPanel()
-        panel.delegate = self
-        panel.setEntries(portForwardEntries)
-        panel.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
-        portForwardPanel = panel
     }
 
     @objc private func receiveQueuedFiles() {

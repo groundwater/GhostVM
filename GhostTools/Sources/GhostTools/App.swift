@@ -399,9 +399,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let color = connected ? NSColor.systemGreen : NSColor.systemGray
 
-        if let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "GhostTools") {
+        if let image = NSImage(systemSymbolName: "app.connected.to.app.below.fill", accessibilityDescription: "GhostTools") {
             let colorConfig = NSImage.SymbolConfiguration(paletteColors: [color])
-            let sizeConfig = NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
+            let sizeConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
             let configuredImage = image.withSymbolConfiguration(colorConfig.applying(sizeConfig))
             button.image = configuredImage
         } else {
