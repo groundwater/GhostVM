@@ -1,5 +1,20 @@
 import Foundation
 
+/// Configuration for a single port forward rule.
+public struct PortForwardConfig: Codable, Equatable, Hashable, Identifiable {
+    public var id: UUID
+    public var hostPort: UInt16
+    public var guestPort: UInt16
+    public var enabled: Bool
+
+    public init(id: UUID = UUID(), hostPort: UInt16, guestPort: UInt16, enabled: Bool = true) {
+        self.id = id
+        self.hostPort = hostPort
+        self.guestPort = guestPort
+        self.enabled = enabled
+    }
+}
+
 /// Persisted VM metadata. Everything lives in config.json inside the bundle.
 public struct VMStoredConfig: Codable {
     public var version: Int
@@ -29,6 +44,8 @@ public struct VMStoredConfig: Codable {
     public var installerISOPath: String?  // Absolute path to installer ISO (not copied into bundle)
     // Guest tools installation tracking
     public var guestToolsInstalled: Bool
+    // Port forwarding configuration
+    public var portForwards: [PortForwardConfig]
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -56,6 +73,7 @@ public struct VMStoredConfig: Codable {
         case efiVariableStorePath
         case installerISOPath
         case guestToolsInstalled
+        case portForwards
     }
 
     public init(
@@ -83,7 +101,8 @@ public struct VMStoredConfig: Codable {
         guestOSType: String = "macOS",
         efiVariableStorePath: String? = nil,
         installerISOPath: String? = nil,
-        guestToolsInstalled: Bool = false
+        guestToolsInstalled: Bool = false,
+        portForwards: [PortForwardConfig] = []
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -110,6 +129,7 @@ public struct VMStoredConfig: Codable {
         self.efiVariableStorePath = efiVariableStorePath
         self.installerISOPath = installerISOPath
         self.guestToolsInstalled = guestToolsInstalled
+        self.portForwards = portForwards
     }
 
     public init(from decoder: Decoder) throws {
@@ -141,6 +161,8 @@ public struct VMStoredConfig: Codable {
         installerISOPath = try container.decodeIfPresent(String.self, forKey: .installerISOPath)
         // Guest tools installation - defaults to false for backwards compatibility
         guestToolsInstalled = try container.decodeIfPresent(Bool.self, forKey: .guestToolsInstalled) ?? false
+        // Port forwards - defaults to empty for backwards compatibility
+        portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {

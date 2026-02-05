@@ -119,6 +119,10 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var clipboardSyncService: ClipboardSyncService?
     private var ghostClient: GhostClient?
 
+    // Port forwarding
+    private var portForwardService: PortForwardService?
+    private var portForwardingStarted = false
+
     let bundleURL: URL
 
     // Callbacks so the SwiftUI layer can reflect status into the list.
@@ -160,6 +164,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Start clipboard sync service when VM is running
     private func startClipboardSync() {
+        guard clipboardSyncService == nil else { return }  // Already started
         guard let vm = virtualMachine else { return }
         guard let session = windowlessSession else { return }
         guard clipboardSyncMode != .disabled else { return }
@@ -182,6 +187,48 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             clipboardSyncService?.stop()
             clipboardSyncService = nil
             ghostClient = nil
+        }
+    }
+
+    /// Start port forwarding service when VM is running
+    private func startPortForwarding() {
+        guard !portForwardingStarted else { return }  // Already started or starting
+        guard let vm = virtualMachine else { return }
+        guard let session = windowlessSession else { return }
+
+        portForwardingStarted = true  // Set flag synchronously before async Task
+
+        Task { @MainActor in
+            let service = PortForwardService(vm: vm, queue: session.vmQueue)
+            self.portForwardService = service
+
+            // Load port forwards from VM config
+            let forwards = loadPortForwards()
+            if !forwards.isEmpty {
+                service.start(forwards: forwards)
+            }
+        }
+    }
+
+    /// Stop port forwarding service
+    private func stopPortForwarding() {
+        portForwardingStarted = false  // Reset flag synchronously
+        Task { @MainActor in
+            portForwardService?.stop()
+            portForwardService = nil
+        }
+    }
+
+    /// Load port forward configuration from VM bundle
+    private func loadPortForwards() -> [PortForwardConfig] {
+        do {
+            let layout = VMFileLayout(bundleURL: bundleURL)
+            let store = VMConfigStore(layout: layout)
+            let config = try store.load()
+            return config.portForwards
+        } catch {
+            print("[App2VMRunSession] Failed to load port forwards: \(error)")
+            return []
         }
     }
 
@@ -397,12 +444,14 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             }
         }
 
-        // Start/stop clipboard sync based on VM state
+        // Start/stop services based on VM state
         switch newState {
         case .running:
             startClipboardSync()
+            startPortForwarding()
         case .stopped, .failed, .stopping, .suspending:
             stopClipboardSync()
+            stopPortForwarding()
         default:
             break
         }

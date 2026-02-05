@@ -3,7 +3,7 @@ import SwiftUI
 import UserNotifications
 
 /// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.3.0-auto-install"
+let kGhostToolsVersion = "1.35.0"
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
@@ -27,6 +27,7 @@ struct GhostToolsApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
+    private var tunnelServer: TunnelServer?
     private var isServerRunning = false
 
     /// Files queued for sending to host (accessor for FileService)
@@ -35,6 +36,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // IMPORTANT: Ignore SIGPIPE signal
+        //
+        // When writing to a socket/pipe after the remote end has closed,
+        // the OS sends SIGPIPE which terminates the process by default.
+        // This happens during normal operation when:
+        // - Host closes vsock connection
+        // - TCP client disconnects mid-transfer
+        //
+        // By ignoring SIGPIPE, write() returns -1 with errno=EPIPE instead,
+        // which our code handles gracefully. This is standard practice for
+        // any application doing network I/O.
+        signal(SIGPIPE, SIG_IGN)
+
         print("[GhostTools] Application launched - version \(kGhostToolsVersion)")
 
         // Auto-install to /Applications if not already there
@@ -43,11 +57,117 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        // Check for updates from mounted volumes on launch
+        if checkForUpdateFromVolumes() {
+            // Will relaunch with new version, exit this instance
+            return
+        }
+
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
         installLaunchAgentIfNeeded()
         startServer()
+        startTunnelServer()
+        startUpdateChecker()
+    }
+
+    // MARK: - Auto-Update from Volumes
+
+    /// Check mounted volumes for a newer GhostTools and update if found
+    /// - Returns: true if updating (caller should exit), false to continue
+    private func checkForUpdateFromVolumes() -> Bool {
+        let fm = FileManager.default
+
+        // Check if /Volumes/GhostTools exists (our DMG is mounted)
+        let volumePath = "/Volumes/GhostTools"
+        let appPath = "\(volumePath)/GhostTools.app"
+        let sourceExecPath = "\(appPath)/Contents/MacOS/GhostTools"
+
+        guard fm.fileExists(atPath: sourceExecPath) else {
+            return false
+        }
+
+        print("[GhostTools] Found mounted GhostTools volume")
+
+        let installedExecPath = "\(kApplicationsPath)/Contents/MacOS/GhostTools"
+
+        // If not installed yet, install from volume
+        guard fm.fileExists(atPath: installedExecPath) else {
+            print("[GhostTools] Not installed, installing from volume...")
+            return performUpdate(from: appPath)
+        }
+
+        // Compare file sizes as a quick check for differences
+        guard let sourceAttrs = try? fm.attributesOfItem(atPath: sourceExecPath),
+              let installedAttrs = try? fm.attributesOfItem(atPath: installedExecPath),
+              let sourceSize = sourceAttrs[.size] as? Int,
+              let installedSize = installedAttrs[.size] as? Int else {
+            return false
+        }
+
+        // Update if sizes differ (different binary)
+        if sourceSize != installedSize {
+            print("[GhostTools] Size differs (installed: \(installedSize), available: \(sourceSize)), updating...")
+            return performUpdate(from: appPath)
+        }
+
+        // Also check modification date
+        if let sourceDate = sourceAttrs[.modificationDate] as? Date,
+           let installedDate = installedAttrs[.modificationDate] as? Date,
+           sourceDate > installedDate {
+            print("[GhostTools] Newer version available, updating...")
+            return performUpdate(from: appPath)
+        }
+
+        return false
+    }
+
+    /// Perform the update from the source app path
+    private func performUpdate(from sourcePath: String) -> Bool {
+        let fm = FileManager.default
+        let sourceURL = URL(fileURLWithPath: sourcePath)
+        let destURL = URL(fileURLWithPath: kApplicationsPath)
+
+        print("[GhostTools] Updating from \(sourcePath)...")
+
+        do {
+            // Remove existing installation
+            if fm.fileExists(atPath: kApplicationsPath) {
+                try fm.removeItem(at: destURL)
+            }
+
+            // Copy new version
+            try fm.copyItem(at: sourceURL, to: destURL)
+            print("[GhostTools] Update complete")
+
+            // Relaunch
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            task.arguments = ["-n", kApplicationsPath]
+            try task.run()
+
+            print("[GhostTools] Relaunching...")
+
+            DispatchQueue.main.async {
+                NSApplication.shared.terminate(nil)
+            }
+            return true
+
+        } catch {
+            print("[GhostTools] Update failed: \(error)")
+            return false
+        }
+    }
+
+    /// Periodically check for updates from mounted volumes
+    private func startUpdateChecker() {
+        // Check every 10 seconds for mounted DMGs with updates
+        Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            if self?.checkForUpdateFromVolumes() == true {
+                // Will terminate and relaunch
+            }
+        }
     }
 
     // MARK: - Auto-Install
@@ -176,6 +296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
+        tunnelServer?.stop()
     }
 
     // MARK: - URL Handling
@@ -192,6 +313,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if scheme == "http" || scheme == "https" {
             print("[GhostTools] Received URL to forward: \(url.absoluteString)")
+
             URLService.shared.queueURL(url)
 
             // Show notification
@@ -233,8 +355,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func updateMenu() {
         let menu = NSMenu()
 
-        // Title (disabled)
-        let titleItem = NSMenuItem(title: "GhostTools", action: nil, keyEquivalent: "")
+        // Title with version (disabled)
+        let titleItem = NSMenuItem(title: "GhostTools v\(kGhostToolsVersion)", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
 
@@ -349,6 +471,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 isServerRunning = false
                 updateStatusIcon(connected: false)
                 updateMenu()
+            }
+        }
+    }
+
+    private func startTunnelServer() {
+        print("[GhostTools] startTunnelServer() called")
+        Task {
+            do {
+                tunnelServer = TunnelServer()
+                print("[GhostTools] Starting tunnel server on vsock port 5001...")
+                try await tunnelServer?.start()
+                print("[GhostTools] Tunnel server started successfully")
+            } catch {
+                print("[GhostTools] Failed to start tunnel server: \(error)")
             }
         }
     }

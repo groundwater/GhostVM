@@ -266,6 +266,68 @@ public final class VMController {
         try store.save(config)
     }
 
+    /// Update VM settings with multiple shared folders and port forwards support.
+    public func updateVMSettings(bundleURL: URL, cpus: Int, memoryGiB: UInt64, sharedFolders: [SharedFolderConfig], portForwards: [PortForwardConfig]) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let vmName = displayName(for: bundleURL)
+        guard !isVMProcessRunning(layout: layout) else {
+            throw VMError.message("Stop VM '\(vmName)' before editing its settings.")
+        }
+
+        var config = try storedConfig(at: bundleURL)
+
+        let minimumCPUs = max(Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount), 1)
+        guard cpus >= minimumCPUs else {
+            throw VMError.message("CPU count must be at least \(minimumCPUs).")
+        }
+
+        guard memoryGiB > 0 else {
+            throw VMError.message("Memory must be greater than zero.")
+        }
+        let memoryBytes = memoryGiB * (1 << 30)
+        let minimumMemory = VZVirtualMachineConfiguration.minimumAllowedMemorySize
+        guard memoryBytes >= minimumMemory else {
+            let minimumGiB = max(1, Int((minimumMemory + ((1 << 30) - 1)) >> 30))
+            throw VMError.message("Memory must be at least \(minimumGiB) GiB.")
+        }
+
+        // Validate and normalize shared folders
+        var validatedFolders: [SharedFolderConfig] = []
+        for folder in sharedFolders {
+            let path = folder.path.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            let absolutePath = standardizedAbsolutePath(path)
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: absolutePath, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("Shared folder path \(path) does not exist or is not a directory.")
+            }
+            validatedFolders.append(SharedFolderConfig(id: folder.id, path: absolutePath, readOnly: folder.readOnly))
+        }
+
+        // Validate port forwards
+        var validatedPortForwards: [PortForwardConfig] = []
+        var usedHostPorts: Set<UInt16> = []
+        for forward in portForwards {
+            guard forward.hostPort > 0 && forward.guestPort > 0 else { continue }
+            guard !usedHostPorts.contains(forward.hostPort) else {
+                throw VMError.message("Duplicate host port \(forward.hostPort) in port forwards.")
+            }
+            usedHostPorts.insert(forward.hostPort)
+            validatedPortForwards.append(forward)
+        }
+
+        config.cpus = cpus
+        config.memoryBytes = memoryBytes
+        config.sharedFolders = validatedFolders
+        config.portForwards = validatedPortForwards
+        // Clear legacy single folder fields when using multiple folders
+        config.sharedFolderPath = nil
+        config.sharedFolderReadOnly = true
+
+        let store = VMConfigStore(layout: layout)
+        try store.save(config)
+    }
+
     // MARK: - Init VM
 
     public func initVM(at providedBundleURL: URL, preferredName: String? = nil, options: InitOptions) throws {
