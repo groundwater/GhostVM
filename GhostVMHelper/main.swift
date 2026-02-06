@@ -240,7 +240,20 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     @objc private func terminateVMAction() {
-        terminateVM()
+        let alert = NSAlert()
+        alert.messageText = "Terminate Virtual Machine?"
+        alert.informativeText = "This will immediately force stop the VM. Any unsaved work in the guest will be lost.\n\nUse \"Shut Down\" for a graceful shutdown instead."
+        alert.alertStyle = .warning
+        alert.icon = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Warning")?
+            .withSymbolConfiguration(.init(pointSize: 48, weight: .regular))
+        alert.addButton(withTitle: "Terminate")
+        alert.addButton(withTitle: "Cancel")
+        alert.buttons[0].hasDestructiveAction = true
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            terminateVM()
+        }
     }
 
     @objc private func setClipboardSyncMode(_ sender: NSMenuItem) {
@@ -347,7 +360,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidRequestTerminate(_ toolbar: HelperToolbar) {
-        terminateVM()
+        terminateVMAction()
     }
 
     // MARK: - FileTransferDelegate
