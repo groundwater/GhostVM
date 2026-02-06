@@ -180,12 +180,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         vmMenu.addItem(NSMenuItem.separator())
 
-        let reinstallToolsItem = NSMenuItem(title: "Reinstall Guest Tools…", action: #selector(reinstallGuestTools), keyEquivalent: "")
-        reinstallToolsItem.target = self
-        vmMenu.addItem(reinstallToolsItem)
-
-        vmMenu.addItem(NSMenuItem.separator())
-
         let suspendItem = NSMenuItem(title: "Suspend", action: #selector(suspendVMAction), keyEquivalent: "s")
         suspendItem.keyEquivalentModifierMask = [.command, .option]
         suspendItem.target = self
@@ -252,11 +246,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         toolbar(helperToolbar!, didSelectClipboardSyncMode: mode)
     }
 
-    @objc private func reinstallGuestTools() {
-        // TODO: Connect to GuestToolsInstaller when integrated
-        NSLog("GhostVMHelper: Reinstall guest tools requested")
-    }
-
     // Menu validation
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
@@ -273,8 +262,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                let currentMode = clipboardSyncService?.syncMode {
                 menuItem.state = (modeString == currentMode.rawValue) ? .on : .off
             }
-            return state == .running
-        case #selector(reinstallGuestTools):
             return state == .running
         default:
             return true

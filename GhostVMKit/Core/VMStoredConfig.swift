@@ -42,8 +42,6 @@ public struct VMStoredConfig: Codable {
     public var guestOSType: String  // "macOS" or "Linux", defaults to "macOS"
     public var efiVariableStorePath: String?  // "NVRAM.bin" for Linux
     public var installerISOPath: String?  // Absolute path to installer ISO (not copied into bundle)
-    // Guest tools installation tracking
-    public var guestToolsInstalled: Bool
     // Port forwarding configuration
     public var portForwards: [PortForwardConfig]
 
@@ -72,7 +70,6 @@ public struct VMStoredConfig: Codable {
         case guestOSType
         case efiVariableStorePath
         case installerISOPath
-        case guestToolsInstalled
         case portForwards
     }
 
@@ -101,7 +98,6 @@ public struct VMStoredConfig: Codable {
         guestOSType: String = "macOS",
         efiVariableStorePath: String? = nil,
         installerISOPath: String? = nil,
-        guestToolsInstalled: Bool = false,
         portForwards: [PortForwardConfig] = []
     ) {
         self.version = version
@@ -128,7 +124,6 @@ public struct VMStoredConfig: Codable {
         self.guestOSType = guestOSType
         self.efiVariableStorePath = efiVariableStorePath
         self.installerISOPath = installerISOPath
-        self.guestToolsInstalled = guestToolsInstalled
         self.portForwards = portForwards
     }
 
@@ -159,8 +154,6 @@ public struct VMStoredConfig: Codable {
         guestOSType = try container.decodeIfPresent(String.self, forKey: .guestOSType) ?? "macOS"
         efiVariableStorePath = try container.decodeIfPresent(String.self, forKey: .efiVariableStorePath)
         installerISOPath = try container.decodeIfPresent(String.self, forKey: .installerISOPath)
-        // Guest tools installation - defaults to false for backwards compatibility
-        guestToolsInstalled = try container.decodeIfPresent(Bool.self, forKey: .guestToolsInstalled) ?? false
         // Port forwards - defaults to empty for backwards compatibility
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
     }

@@ -116,11 +116,6 @@ struct DemoAppCommands: Commands {
             }
             .disabled(activeSession == nil)
 
-            Button("Reinstall Guest Tools…") {
-                GuestToolsInstaller.shared.reinstallGuestTools(for: activeSession)
-            }
-            .disabled(!canReinstallGuestTools)
-
             Divider()
 
             Button("Suspend") {
@@ -185,11 +180,6 @@ struct DemoAppCommands: Commands {
         }
     }
 
-    private var canReinstallGuestTools: Bool {
-        guard let session = activeSession else { return false }
-        if case .running = session.state { return true }
-        return false
-    }
 }
 
 @available(macOS 13.0, *)
@@ -481,13 +471,15 @@ struct CreateVMDemoView: View {
                 : "Provide an ARM64 Linux installer ISO. Adjust CPU, memory, and disk as needed.")
                 .fixedSize(horizontal: false, vertical: true)
 
-            labeledRow("Guest OS") {
-                Picker("", selection: $osType) {
-                    Text("macOS").tag("macOS")
-                    Text("Linux").tag("Linux")
+            if FeatureFlags.shared.linuxVMSupport {
+                labeledRow("Guest OS") {
+                    Picker("", selection: $osType) {
+                        Text("macOS").tag("macOS")
+                        Text("Linux").tag("Linux")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
             }
 
             labeledRow("CPUs") {
@@ -1625,7 +1617,7 @@ struct VMContextMenu: View {
         }
 
         // Show "Detach Installer ISO" for Linux VMs with an attached ISO
-        if vm.isLinux && vm.installerISOPath != nil {
+        if FeatureFlags.shared.linuxVMSupport && vm.isLinux && vm.installerISOPath != nil {
             Button("Detach Installer ISO") {
                 detachISO()
             }
@@ -1760,7 +1752,6 @@ struct VMWindowView: View {
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
     @StateObject private var connectionMonitor = GuestToolsConnectionMonitor()
-    @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
     @State private var showPortForwardEditor = false
 
@@ -2015,13 +2006,6 @@ struct VMWindowView: View {
             session.stopIfNeeded()
         }
         .focusedSceneValue(\.vmSession, session)
-        .alert(guestToolsInstaller.alertTitle, isPresented: $guestToolsInstaller.showAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            if let message = guestToolsInstaller.alertMessage {
-                Text(message)
-            }
-        }
     }
 }
 
@@ -2118,6 +2102,27 @@ struct SettingsDemoView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(maxWidth: 260, alignment: .leading)
+            }
+
+            Divider()
+
+            Text("Experimental Features")
+                .font(.system(size: 13, weight: .semibold))
+
+            ForEach(FeatureFlags.allFlags) { flag in
+                labeledRow(flag.displayName) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("", isOn: Binding(
+                            get: { FeatureFlags.shared.isEnabled(flag.key) },
+                            set: { FeatureFlags.shared.setEnabled(flag.key, value: $0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        Text(flag.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             Spacer()
@@ -2386,85 +2391,3 @@ final class GuestToolsConnectionMonitor: ObservableObject {
     }
 }
 
-// MARK: - Guest Tools Installer
-
-@available(macOS 13.0, *)
-final class GuestToolsInstaller: ObservableObject {
-    static let shared = GuestToolsInstaller()
-
-    @Published var alertMessage: String?
-    @Published var showAlert = false
-    @Published var alertTitle: String = ""
-
-    private let controller = VMController()
-
-    private init() {}
-
-    /// Reinstall guest tools by resetting the flag and restarting the VM.
-    /// On next start, GhostTools.dmg will be auto-attached.
-    func reinstallGuestTools(for session: App2VMRunSession?) {
-        guard let session = session else {
-            showError("No active VM session")
-            return
-        }
-
-        // Check if VM is running
-        guard case .running = session.state else {
-            showError("The VM must be running to reinstall guest tools.")
-            return
-        }
-
-        let bundleURL = session.bundleURL
-
-        // Reset guestToolsInstalled flag
-        do {
-            let layout = VMFileLayout(bundleURL: bundleURL)
-            let store = VMConfigStore(layout: layout)
-            var config = try store.load()
-            config.guestToolsInstalled = false
-            config.modifiedAt = Date()
-            try store.save(config)
-        } catch {
-            showError("Unable to update VM configuration: \(error.localizedDescription)")
-            return
-        }
-
-        // Show info and restart the VM
-        showInfo("Guest tools will be reinstalled on next VM start.\n\nThe VM will now restart. After it boots, GhostTools.dmg will appear as a mounted disk in the guest.")
-
-        // Stop then start the VM to trigger reinstall
-        session.stop()
-
-        // Observe state changes using Combine to restart the VM after it stops
-        var cancellable: AnyCancellable?
-        cancellable = session.$state.sink { newState in
-            if case .stopped = newState {
-                cancellable?.cancel()
-                // Small delay to ensure clean state
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    session.start()
-                }
-            }
-        }
-        // Store the cancellable to keep it alive
-        self.restartCancellable = cancellable
-    }
-
-    private var restartCancellable: AnyCancellable?
-
-    private func showError(_ message: String) {
-        DispatchQueue.main.async {
-            self.alertTitle = "Cannot Reinstall Guest Tools"
-            self.alertMessage = message
-            self.showAlert = true
-        }
-    }
-
-    private func showInfo(_ message: String) {
-        DispatchQueue.main.async {
-            self.alertTitle = "Reinstalling Guest Tools"
-            self.alertMessage = message
-            self.showAlert = true
-        }
-    }
-}
