@@ -1,6 +1,10 @@
 # GhostVM Makefile
 # Builds vmctl CLI and the SwiftUI app via xcodebuild
 
+# Load .env for notarization credentials (NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD)
+-include .env
+export
+
 CODESIGN_ID ?= -
 
 # Xcode project settings (generated via xcodegen)
@@ -104,31 +108,116 @@ DIST_DIR = build/dist
 DMG_NAME = GhostVM
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
+# Auto-detect Developer ID Application identity for distribution
+DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
 # Create signed distribution DMG
 # Note: If you get "Operation not permitted", grant Terminal Full Disk Access in
 # System Preferences > Privacy & Security > Full Disk Access
 dist: app cli
+	@# Verify we have a real signing identity for distribution
+	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
+		echo "Error: No 'Developer ID Application' identity found in keychain."; \
+		echo "Notarization requires a Developer ID certificate from Apple."; \
+		echo "Install one via Xcode > Settings > Accounts > Manage Certificates."; \
+		exit 1; \
+	fi
 	@echo "Creating distribution DMG (version $(VERSION))..."
+	@echo "Signing with: $(DIST_CODESIGN_ID)"
 	@rm -rf "$(DIST_DIR)"
 	@mkdir -p "$(DIST_DIR)/dmg-stage"
 	@# Stage app bundle
 	cp -R "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app" "$(DIST_DIR)/dmg-stage/"
 	@# Embed vmctl CLI inside the app bundle
 	cp "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/"
-	@# Re-sign the app bundle after adding vmctl
-	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app"
+	@# --- Inside-out code signing for notarization ---
+	@echo "Signing nested components (inside-out)..."
+	@# 1. Sign all embedded frameworks (GhostVMKit, NIO, etc.) in GhostVMHelper.app
+	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/Frameworks/"*.framework; do \
+		if [ -d "$$fw" ]; then \
+			echo "  Signing $$(basename $$fw) (in Helper)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$fw"; \
+		fi; \
+	done
+	@# 1b. Sign all embedded dylibs in GhostVMHelper.app
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/Frameworks/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib) (in Helper)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@# 2. Sign GhostVMHelper.app (with its own entitlements)
+	@echo "  Signing GhostVMHelper.app"
+	codesign --force --options runtime --timestamp \
+		--entitlements macOS/GhostVMHelper/entitlements.plist \
+		-s "$(DIST_CODESIGN_ID)" \
+		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"
+	@# 3. Sign all embedded frameworks in the main app
+	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/"*.framework; do \
+		if [ -d "$$fw" ]; then \
+			echo "  Signing $$(basename $$fw)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$fw"; \
+		fi; \
+	done
+	@# 4. Sign embedded dylibs (NIO, etc.)
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@# 5. Sign vmctl binary
+	@echo "  Signing vmctl"
+	codesign --force --options runtime --timestamp \
+		--entitlements macOS/GhostVM/entitlements.plist \
+		-s "$(DIST_CODESIGN_ID)" \
+		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/vmctl"
+	@# 5b. Re-create GhostTools.dmg with Developer ID signing for notarization
+	@echo "  Re-signing GhostTools for distribution..."
+	@rm -rf "$(DIST_DIR)/ghosttools-stage"
+	@mkdir -p "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/MacOS"
+	@mkdir -p "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/Resources"
+	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/MacOS/"
+	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/"
+	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
+	codesign --force --options runtime --timestamp --deep -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
+	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
+	hdiutil makehybrid -o "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" \
+		-hfs -hfs-volume-name "GhostTools" \
+		"$(DIST_DIR)/ghosttools-stage"
+	@rm -rf "$(DIST_DIR)/ghosttools-stage"
+	@# 6. Sign the main app bundle (top-level, with entitlements)
+	@echo "  Signing $(APP_NAME).app"
+	codesign --force --options runtime --timestamp \
+		--entitlements macOS/GhostVM/entitlements.plist \
+		-s "$(DIST_CODESIGN_ID)" \
+		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app"
 	@# Add Applications symlink for drag-to-install
 	ln -s /Applications "$(DIST_DIR)/dmg-stage/Applications"
-	@# Create hybrid ISO/HFS+ image (avoids mounting during creation)
-	hdiutil makehybrid -o "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
-		-hfs \
-		-hfs-volume-name "$(DMG_NAME)" \
+	@# Create disk image (two-step: makehybrid avoids mounting, then convert to UDZO for notarization)
+	hdiutil makehybrid -o "$(DIST_DIR)/$(DMG_NAME)-$(VERSION)-tmp.dmg" \
+		-hfs -hfs-volume-name "$(DMG_NAME)" \
 		"$(DIST_DIR)/dmg-stage"
+	hdiutil convert "$(DIST_DIR)/$(DMG_NAME)-$(VERSION)-tmp.dmg" \
+		-format UDZO -o "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
+	@rm -f "$(DIST_DIR)/$(DMG_NAME)-$(VERSION)-tmp.dmg"
 	@rm -rf "$(DIST_DIR)/dmg-stage"
-	@# Sign the DMG if using a real identity
-	@if [ "$(CODESIGN_ID)" != "-" ]; then \
-		codesign --force -s "$(CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"; \
-		echo "DMG signed with: $(CODESIGN_ID)"; \
+	@# Sign the DMG itself
+	codesign --force --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
+	@echo "DMG signed with: $(DIST_CODESIGN_ID)"
+	@# --- Notarization ---
+	@if [ -n "$(NOTARY_APPLE_ID)" ] && [ -n "$(NOTARY_TEAM_ID)" ] && [ -n "$(NOTARY_PASSWORD)" ]; then \
+		echo "Submitting for notarization..."; \
+		xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
+			--apple-id "$(NOTARY_APPLE_ID)" \
+			--team-id "$(NOTARY_TEAM_ID)" \
+			--password "$(NOTARY_PASSWORD)" \
+			--wait && \
+		echo "Stapling notarization ticket..." && \
+		xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"; \
+	else \
+		echo "Warning: Skipping notarization (NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD not all set)"; \
+		echo "Create a .env file with these variables to enable notarization."; \
 	fi
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/MacOS/vmctl"
@@ -158,5 +247,10 @@ help:
 	@echo "  CODESIGN_ID   - Code signing identity (default: - for ad-hoc)"
 	@echo "  XCODE_CONFIG  - Xcode build configuration (default: Release)"
 	@echo "  VERSION       - Version for DMG (default: git describe)"
+	@echo ""
+	@echo "Notarization (via .env file or environment):"
+	@echo "  NOTARY_APPLE_ID  - Apple ID for notarization"
+	@echo "  NOTARY_TEAM_ID   - Team ID for notarization"
+	@echo "  NOTARY_PASSWORD  - App-specific password for notarization"
 	@echo ""
 	@echo "Requires: xcodegen (brew install xcodegen)"

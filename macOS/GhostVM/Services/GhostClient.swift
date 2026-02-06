@@ -306,6 +306,41 @@ public final class GhostClient {
         return false
     }
 
+    // MARK: - Raw Vsock Connection
+
+    /// Open a raw vsock connection to the guest on the specified port.
+    /// Used by persistent services (HealthCheckService, EventStreamService).
+    ///
+    /// IMPORTANT: The caller must hold the returned connection object alive for the
+    /// duration of I/O. Letting it deallocate closes the underlying file descriptor.
+    ///
+    /// - Parameter port: The vsock port to connect to
+    /// - Returns: The connection (use `.fileDescriptor` for I/O)
+    public func connectRaw(port: UInt32) async throws -> VZVirtioSocketConnection {
+        guard let vm = virtualMachine, let queue = vmQueue else {
+            throw GhostClientError.notConnected
+        }
+
+        let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
+                    return
+                }
+                socketDevice.connect(toPort: port) { result in
+                    switch result {
+                    case .success(let conn):
+                        continuation.resume(returning: conn)
+                    case .failure(let error):
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+
+        return connection
+    }
+
     // MARK: - TCP Implementation (Development)
 
     private func getClipboardViaTCP(host: String, port: Int) async throws -> ClipboardGetResponse {

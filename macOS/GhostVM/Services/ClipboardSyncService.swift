@@ -50,14 +50,12 @@ public enum ClipboardSyncMode: String, CaseIterable, Codable, Identifiable {
     }
 }
 
-/// Service for synchronizing clipboard between host and guest VM
+/// Service for synchronizing clipboard between host and guest VM.
+/// Event-driven: syncs on window focus/blur instead of polling.
 @MainActor
 public final class ClipboardSyncService: ObservableObject {
     /// Current sync mode
     @Published public var syncMode: ClipboardSyncMode = .disabled
-
-    /// Whether the service is actively syncing
-    @Published public private(set) var isActive: Bool = false
 
     /// Last error encountered during sync
     @Published public private(set) var lastError: String?
@@ -67,11 +65,7 @@ public final class ClipboardSyncService: ObservableObject {
 
     private let hostPasteboard = NSPasteboard.general
     private var lastHostChangeCount: Int = 0
-    private var lastGuestChangeCount: Int = 0
     private var lastGuestContent: String?
-
-    private var syncTask: Task<Void, Never>?
-    private let pollInterval: TimeInterval = 0.5 // 500ms
 
     private var guestClient: GhostClient?
     private let bundlePath: String
@@ -81,153 +75,100 @@ public final class ClipboardSyncService: ObservableObject {
         self.lastHostChangeCount = hostPasteboard.changeCount
     }
 
-    /// Start clipboard synchronization
-    public func start(client: GhostClient) {
-        guard syncMode != .disabled else {
-            stop()
-            return
-        }
-
+    /// Configure the service with a GhostClient (no polling started)
+    public func configure(client: GhostClient) {
         self.guestClient = client
-        isActive = true
-        lastError = nil
-
-        syncTask?.cancel()
-        syncTask = Task { [weak self] in
-            await self?.runSyncLoop()
-        }
     }
 
-    /// Stop clipboard synchronization
+    /// Stop and release the client reference
     public func stop() {
-        syncTask?.cancel()
-        syncTask = nil
-        isActive = false
         isConnected = false
         guestClient = nil
     }
 
-    /// Set sync mode and restart if active
+    /// Set sync mode
     public func setSyncMode(_ mode: ClipboardSyncMode) {
-        let wasActive = isActive
-        let client = guestClient
-
         syncMode = mode
+    }
 
-        if mode == .disabled {
-            stop()
-        } else if wasActive, let client = client {
-            start(client: client)
+    // MARK: - Window Focus Events
+
+    /// Called when the VM window becomes key (gains focus).
+    /// Pushes host clipboard to guest and/or pulls guest clipboard to host.
+    public func windowDidBecomeKey() {
+        guard syncMode != .disabled else { return }
+        guard let client = guestClient else { return }
+
+        Task {
+            // Push host clipboard to guest if it changed while away
+            if syncMode.allowsHostToGuest {
+                await pushHostToGuest(client: client)
+            }
+            // Pull guest clipboard to host
+            if syncMode.allowsGuestToHost {
+                await pullGuestToHost(client: client)
+            }
+        }
+    }
+
+    /// Called when the VM window resigns key (loses focus).
+    /// Pulls guest clipboard so the user can paste on the host side.
+    public func windowDidResignKey() {
+        guard syncMode != .disabled else { return }
+        guard let client = guestClient else { return }
+
+        Task {
+            if syncMode.allowsGuestToHost {
+                await pullGuestToHost(client: client)
+            }
         }
     }
 
     // MARK: - Private
 
-    private func runSyncLoop() async {
-        while !Task.isCancelled {
-            await syncOnce()
-
-            do {
-                try await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
-            } catch {
-                break
-            }
-        }
-    }
-
-    private func syncOnce() async {
-        guard let client = guestClient else {
-            print("[ClipboardSync] No client configured")
-            return
-        }
-        guard syncMode != .disabled else {
-            print("[ClipboardSync] Sync is disabled")
-            return
-        }
-
-        // Check host clipboard for changes
-        if syncMode.allowsHostToGuest {
-            await syncHostToGuest(client: client)
-        }
-
-        // Poll guest clipboard for changes
-        if syncMode.allowsGuestToHost {
-            await syncGuestToHost(client: client)
-        }
-    }
-
-    private func syncHostToGuest(client: GhostClient) async {
+    private func pushHostToGuest(client: GhostClient) async {
         let currentCount = hostPasteboard.changeCount
-        guard currentCount != lastHostChangeCount else {
-            return
-        }
+        guard currentCount != lastHostChangeCount else { return }
 
-        print("[ClipboardSync] Host clipboard changed (count: \(currentCount))")
         lastHostChangeCount = currentCount
 
-        guard let content = hostPasteboard.string(forType: .string) else {
-            print("[ClipboardSync] No string content on host clipboard")
-            return
-        }
+        guard let content = hostPasteboard.string(forType: .string) else { return }
 
         // Avoid echo: don't send if this is what we just received from guest
-        if content == lastGuestContent {
-            print("[ClipboardSync] Skipping send - content matches last guest content (echo prevention)")
-            return
-        }
+        if content == lastGuestContent { return }
 
-        print("[ClipboardSync] Sending to guest: \(content.prefix(50))...")
         do {
             try await client.setClipboard(content: content)
-            print("[ClipboardSync] Successfully sent to guest")
             isConnected = true
             lastError = nil
         } catch {
-            print("[ClipboardSync] Failed to send to guest: \(error)")
             lastError = "Failed to send to guest: \(error.localizedDescription)"
             isConnected = false
         }
     }
 
-    private func syncGuestToHost(client: GhostClient) async {
+    private func pullGuestToHost(client: GhostClient) async {
         do {
             let response = try await client.getClipboard()
             isConnected = true
             lastError = nil
 
-            // Check if guest clipboard changed
-            guard let content = response.content else {
-                print("[ClipboardSync] Guest returned no content")
-                return
-            }
+            guard let content = response.content else { return }
+            guard content != lastGuestContent else { return }
 
-            guard content != lastGuestContent else {
-                // No change, skip
-                return
-            }
-
-            print("[ClipboardSync] Guest clipboard changed: \(content.prefix(50))...")
             lastGuestContent = content
 
             // Update host clipboard
             hostPasteboard.clearContents()
             hostPasteboard.setString(content, forType: .string)
             lastHostChangeCount = hostPasteboard.changeCount
-            print("[ClipboardSync] Updated host clipboard")
 
         } catch GhostClientError.noContent {
-            // No clipboard content on guest - this is normal
-            print("[ClipboardSync] Guest clipboard empty (204)")
             isConnected = true
             lastError = nil
         } catch {
-            print("[ClipboardSync] Failed to get from guest: \(error)")
             lastError = "Failed to get from guest: \(error.localizedDescription)"
             isConnected = false
         }
-    }
-
-    deinit {
-        syncTask?.cancel()
     }
 }

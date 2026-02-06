@@ -348,6 +348,7 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
         weak var session: App2VMRunSession?
         weak var window: NSWindow?
         var cancellable: AnyCancellable?
+        var focusObserver: NSObjectProtocol?
 
         func attach(to window: NSWindow) {
             guard self.window !== window else { return }
@@ -372,6 +373,23 @@ struct App2VMWindowCoordinatorHost: NSViewRepresentable {
                             break
                         }
                     }
+
+                // Listen for focus requests from helper app Dock icon clicks
+                focusObserver = NotificationCenter.default.addObserver(
+                    forName: NSNotification.Name("com.ghostvm.focusVM"),
+                    object: session.bundleURL.path,
+                    queue: .main
+                ) { [weak self] _ in
+                    guard let self, let window = self.window else { return }
+                    NSApp.activate(ignoringOtherApps: true)
+                    window.makeKeyAndOrderFront(nil)
+                }
+            }
+        }
+
+        deinit {
+            if let observer = focusObserver {
+                NotificationCenter.default.removeObserver(observer)
             }
         }
 

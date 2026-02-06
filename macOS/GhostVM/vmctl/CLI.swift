@@ -64,12 +64,20 @@ struct CLI {
                 fail(error)
             }
         case "create-linux":
+            guard FeatureFlags.shared.linuxVMSupport else {
+                print("Error: Linux VM support is disabled. Enable it in GhostVM > Settings > Experimental Features.")
+                exit(1)
+            }
             do {
                 try handleCreateLinux(arguments: Array(arguments.dropFirst()))
             } catch {
                 fail(error)
             }
         case "detach-iso":
+            guard FeatureFlags.shared.linuxVMSupport else {
+                print("Error: Linux VM support is disabled. Enable it in GhostVM > Settings > Experimental Features.")
+                exit(1)
+            }
             do {
                 try handleDetachISO(arguments: Array(arguments.dropFirst()))
             } catch {
@@ -341,17 +349,24 @@ struct CLI {
     }
 
     private func showHelp(exitCode: Int32) -> Never {
-        print("""
+        let linuxEnabled = FeatureFlags.shared.linuxVMSupport
+        var help = """
 Usage: vmctl <command> [options]
 
 macOS VM Commands:
   init <bundle-path> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
   install <bundle-path>
 
+"""
+        if linuxEnabled {
+            help += """
 Linux VM Commands:
   create-linux <bundle-path> [--iso PATH] [--cpus N] [--memory GiB] [--disk GiB]
   detach-iso <bundle-path>
 
+"""
+        }
+        help += """
 Common Commands:
   start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
   stop <bundle-path>
@@ -367,11 +382,17 @@ macOS Examples:
   vmctl start ~/VMs/sandbox.GhostVM                    # GUI
   vmctl start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
 
+"""
+        if linuxEnabled {
+            help += """
 Linux Examples:
   vmctl create-linux ~/VMs/ubuntu.GhostVM --iso ~/Downloads/ubuntu-24.04-live-server-arm64.iso --disk 50 --memory 4 --cpus 4
   vmctl start ~/VMs/ubuntu.GhostVM                     # Boot into ISO installer
   vmctl detach-iso ~/VMs/ubuntu.GhostVM                # Remove ISO after installation
 
+"""
+        }
+        help += """
 Common Examples:
   vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
   vmctl stop ~/VMs/sandbox.GhostVM
@@ -384,11 +405,16 @@ Common Examples:
   vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
 
 Notes:
-  - Linux VMs require ARM64 ISOs (aarch64). x86_64 ISOs will not work.
+"""
+        if linuxEnabled {
+            help += "  - Linux VMs require ARM64 ISOs (aarch64). x86_64 ISOs will not work.\n"
+        }
+        help += """
   - After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
   - Apple's EULA requires macOS guests to run on Apple-branded hardware.
   - Use Virtual Machine > Suspend menu (Cmd+S) to suspend a running VM.
-""")
+"""
+        print(help)
         exit(exitCode)
     }
 

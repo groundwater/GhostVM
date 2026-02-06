@@ -13,8 +13,9 @@ final class URLService {
     /// Queue a URL to be opened on the host
     func queueURL(_ url: URL) {
         lock.lock()
-        defer { lock.unlock() }
         pendingURLs.append(url)
+        lock.unlock()
+        EventPushServer.shared.pushEvent(.urls([url.absoluteString]))
         log("[URLService] Queued URL: \(url.absoluteString)")
     }
 

@@ -67,9 +67,9 @@ public final class VMConfigurationBuilder {
 
         config.storageDevices = storageDevices
 
-        // Basic NAT networking so the guest can reach the internet via the host.
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
         networkDevice.attachment = VZNATNetworkDeviceAttachment()
+
         // Use persistent MAC address from config to ensure suspend/resume consistency.
         if let macAddressString = storedConfig.macAddress,
            let macAddress = VZMACAddress(string: macAddressString) {

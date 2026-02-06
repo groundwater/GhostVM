@@ -48,10 +48,6 @@ struct GhostVMSwiftUIApp: App {
                 .environmentObject(restoreStore)
         }
 
-        WindowGroup("Market", id: "store") {
-            MarketplaceDemoView()
-        }
-
         // Real VM window shown when pressing Play.
         WindowGroup(id: "vm", for: App2VM.self) { vmBinding in
             if let vm = vmBinding.wrappedValue {
@@ -120,11 +116,6 @@ struct DemoAppCommands: Commands {
             }
             .disabled(activeSession == nil)
 
-            Button("Reinstall Guest Tools…") {
-                GuestToolsInstaller.shared.reinstallGuestTools(for: activeSession)
-            }
-            .disabled(!canReinstallGuestTools)
-
             Divider()
 
             Button("Suspend") {
@@ -153,9 +144,6 @@ struct DemoAppCommands: Commands {
             }
             Button("Restore Images") {
                 openWindow(id: "restoreImages")
-            }
-            Button("Market") {
-                openWindow(id: "store")
             }
         }
     }
@@ -192,11 +180,6 @@ struct DemoAppCommands: Commands {
         }
     }
 
-    private var canReinstallGuestTools: Bool {
-        guard let session = activeSession else { return false }
-        if case .running = session.state { return true }
-        return false
-    }
 }
 
 @available(macOS 13.0, *)
@@ -228,14 +211,6 @@ struct VMListDemoView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
-                Button {
-                    openWindow(id: "store")
-                } label: {
-                    Label("Market", systemImage: "cart")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-
                 Spacer()
             }
             .padding(.top, 8)
@@ -256,7 +231,8 @@ struct VMListDemoView: View {
                         vm: vm,
                         isSelected: selectedVMID == vm.id,
                         play: {
-                            openWindow(id: "vm", value: vm)
+                            // Launch helper app (no window in main app - helper provides window)
+                            App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
                         },
                         requestDelete: {
                             vmPendingDelete = vm
@@ -285,7 +261,8 @@ struct VMListDemoView: View {
                         VMContextMenu(
                             vm: vm,
                             play: {
-                                openWindow(id: "vm", value: vm)
+                                // Launch helper app (no window in main app - helper provides window)
+                                App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
                             },
                             requestDelete: {
                                 vmPendingDelete = vm
@@ -494,13 +471,15 @@ struct CreateVMDemoView: View {
                 : "Provide an ARM64 Linux installer ISO. Adjust CPU, memory, and disk as needed.")
                 .fixedSize(horizontal: false, vertical: true)
 
-            labeledRow("Guest OS") {
-                Picker("", selection: $osType) {
-                    Text("macOS").tag("macOS")
-                    Text("Linux").tag("Linux")
+            if FeatureFlags.shared.linuxVMSupport {
+                labeledRow("Guest OS") {
+                    Picker("", selection: $osType) {
+                        Text("macOS").tag("macOS")
+                        Text("Linux").tag("Linux")
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 200)
                 }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 200)
             }
 
             labeledRow("CPUs") {
@@ -846,8 +825,30 @@ struct VMRowView: View {
     let requestTerminate: () -> Void
     let requestInstall: () -> Void
 
+    private var vmIcon: NSImage? {
+        let iconURL = vm.bundleURL.appendingPathComponent("icon.png")
+        if FileManager.default.fileExists(atPath: iconURL.path) {
+            return NSImage(contentsOf: iconURL)
+        }
+        return nil
+    }
+
     var body: some View {
         HStack(spacing: 12) {
+            Group {
+                if let icon = vmIcon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 18))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 32, height: 32)
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(vm.name)
                     .font(.headline)
@@ -1006,6 +1007,23 @@ struct EditVMView: View {
     @State private var memoryGiB: String = "8"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
+    @State private var customIcon: NSImage?
+    @State private var customIconChanged: Bool = false
+    @State private var iconRemoved: Bool = false
+    @State private var selectedPresetIcon: String?
+
+    private static let presetIcons: [(name: String, resource: String)] = [
+        ("Daemon", "icon-daemon"),
+        ("Hipster", "icon-hipster"),
+        ("80s Bro", "icon-80s-bro"),
+        ("Quill", "icon-quill"),
+        ("Terminal", "icon-terminal"),
+        ("Banana", "icon-banana"),
+        ("Typewriter", "icon-typewriter"),
+        ("Nerd", "icon-nerd"),
+        ("Kernel", "icon-kernel"),
+        ("Papaya", "icon-papaya"),
+    ]
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -1022,6 +1040,8 @@ struct EditVMView: View {
                 ProgressView("Loading settings…")
                     .padding(.vertical, 8)
             } else {
+                iconRow
+
                 labeledRow("CPUs") {
                     HStack(spacing: 8) {
                         TextField("Number of vCPUs", text: $cpuCount)
@@ -1105,7 +1125,7 @@ struct EditVMView: View {
             }
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
-        .frame(minWidth: 520)
+        .frame(minWidth: 620)
         .onAppear {
             loadCurrentSettings()
         }
@@ -1114,6 +1134,83 @@ struct EditVMView: View {
         } message: {
             Text(errorMessage ?? "An unknown error occurred.")
         }
+    }
+
+    private var iconRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("Icon")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+                .padding(.top, 4)
+
+            let columns = Array(repeating: GridItem(.fixed(80), spacing: 8), count: 4)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                // "None" tile
+                iconTile(selected: customIcon == nil && selectedPresetIcon == nil) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                } action: {
+                    customIcon = nil
+                    selectedPresetIcon = nil
+                    customIconChanged = true
+                    iconRemoved = true
+                }
+
+                // Preset icon tiles
+                ForEach(Self.presetIcons, id: \.resource) { preset in
+                    let isSelected = selectedPresetIcon == preset.resource
+                    iconTile(selected: isSelected) {
+                        if let img = NSImage(named: preset.resource) {
+                            Image(nsImage: img)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipped()
+                        }
+                    } action: {
+                        if let img = NSImage(named: preset.resource) {
+                            customIcon = img
+                            selectedPresetIcon = preset.resource
+                            customIconChanged = true
+                            iconRemoved = false
+                        }
+                    }
+                }
+
+                // "Custom..." tile
+                iconTile(selected: customIcon != nil && selectedPresetIcon == nil) {
+                    Image(systemName: "plus.square")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                } action: {
+                    selectIconFile()
+                }
+            }
+        }
+        .onDrop(of: [UTType.image], isTargeted: nil) { providers in
+            handleIconDrop(providers)
+        }
+    }
+
+    private func iconTile<Icon: View>(
+        selected: Bool,
+        @ViewBuilder icon: () -> Icon,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.secondary.opacity(0.1))
+                    .frame(width: 80, height: 80)
+                icon()
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -1146,6 +1243,12 @@ struct EditVMView: View {
 
                     // Load port forwards
                     self.portForwards = config.portForwards
+
+                    // Load custom icon
+                    let layout = VMFileLayout(bundleURL: vm.bundleURL)
+                    if FileManager.default.fileExists(atPath: layout.customIconURL.path) {
+                        self.customIcon = NSImage(contentsOf: layout.customIconURL)
+                    }
 
                     self.isLoading = false
                 }
@@ -1182,6 +1285,19 @@ struct EditVMView: View {
                     portForwards: validForwards
                 )
 
+                // Save or remove custom icon
+                let layout = VMFileLayout(bundleURL: vm.bundleURL)
+                if customIconChanged {
+                    if iconRemoved {
+                        try? FileManager.default.removeItem(at: layout.customIconURL)
+                    } else if let icon = customIcon,
+                              let tiff = icon.tiffRepresentation,
+                              let bitmap = NSBitmapImageRep(data: tiff),
+                              let pngData = bitmap.representation(using: .png, properties: [:]) {
+                        try pngData.write(to: layout.customIconURL)
+                    }
+                }
+
                 DispatchQueue.main.async {
                     self.isSaving = false
                     self.isPresented = false
@@ -1194,6 +1310,47 @@ struct EditVMView: View {
                 }
             }
         }
+    }
+
+    private func selectIconFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType.png, UTType.jpeg, UTType.tiff, UTType.heic]
+        panel.message = "Choose an icon image for this VM"
+
+        if panel.runModal() == .OK, let url = panel.url,
+           let image = NSImage(contentsOf: url) {
+            customIcon = image
+            selectedPresetIcon = nil
+            customIconChanged = true
+            iconRemoved = false
+        }
+    }
+
+    private func handleIconDrop(_ providers: [NSItemProvider]) -> Bool {
+        guard let provider = providers.first else { return false }
+
+        if provider.hasItemConformingToTypeIdentifier(UTType.image.identifier) {
+            provider.loadItem(forTypeIdentifier: UTType.image.identifier, options: nil) { item, _ in
+                DispatchQueue.main.async {
+                    if let url = item as? URL, let image = NSImage(contentsOf: url) {
+                        self.customIcon = image
+                        self.selectedPresetIcon = nil
+                        self.customIconChanged = true
+                        self.iconRemoved = false
+                    } else if let data = item as? Data, let image = NSImage(data: data) {
+                        self.customIcon = image
+                        self.selectedPresetIcon = nil
+                        self.customIconChanged = true
+                        self.iconRemoved = false
+                    }
+                }
+            }
+            return true
+        }
+        return false
     }
 }
 
@@ -1293,6 +1450,101 @@ struct PortForwardRowView: View {
         .onAppear {
             hostPortText = forward.hostPort > 0 ? "\(forward.hostPort)" : ""
             guestPortText = forward.guestPort > 0 ? "\(forward.guestPort)" : ""
+        }
+    }
+}
+
+// MARK: - Port Forward Editor (Runtime)
+
+@available(macOS 13.0, *)
+struct PortForwardEditorView: View {
+    @ObservedObject var session: App2VMRunSession
+    @ObservedObject var portForwardService: PortForwardService
+    @Binding var isPresented: Bool
+
+    @State private var newHostPort: String = ""
+    @State private var newGuestPort: String = ""
+    @State private var errorMessage: String?
+
+    private var activeForwards: [PortForwardConfig] {
+        portForwardService.activeForwards
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Port Forwards")
+                .font(.headline)
+
+            if activeForwards.isEmpty {
+                Text("No active port forwards")
+                    .foregroundStyle(.secondary)
+                    .font(.subheadline)
+            } else {
+                ForEach(activeForwards) { forward in
+                    HStack {
+                        Text(verbatim: "localhost:\(forward.hostPort)")
+                            .font(.system(.body, design: .monospaced))
+                        Image(systemName: "arrow.right")
+                            .foregroundStyle(.secondary)
+                        Text(verbatim: "guest:\(forward.guestPort)")
+                            .font(.system(.body, design: .monospaced))
+                        Spacer()
+                        Button {
+                            session.removePortForward(hostPort: forward.hostPort)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                                .foregroundStyle(.red)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            Divider()
+
+            HStack(spacing: 8) {
+                TextField("Host", text: $newHostPort)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                Image(systemName: "arrow.right")
+                    .foregroundStyle(.secondary)
+                TextField("Guest", text: $newGuestPort)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                Button("Add") {
+                    addPortForward()
+                }
+                .disabled(newHostPort.isEmpty || newGuestPort.isEmpty)
+            }
+
+            if let error = errorMessage {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding()
+        .frame(width: 280)
+    }
+
+    private func addPortForward() {
+        errorMessage = nil
+
+        guard let hostPort = UInt16(newHostPort) else {
+            errorMessage = "Invalid host port"
+            return
+        }
+        guard let guestPort = UInt16(newGuestPort) else {
+            errorMessage = "Invalid guest port"
+            return
+        }
+
+        do {
+            try session.addPortForward(hostPort: hostPort, guestPort: guestPort)
+            newHostPort = ""
+            newGuestPort = ""
+        } catch {
+            errorMessage = "Port \(hostPort) already in use"
         }
     }
 }
@@ -1413,7 +1665,7 @@ struct VMContextMenu: View {
         }
 
         // Show "Detach Installer ISO" for Linux VMs with an attached ISO
-        if vm.isLinux && vm.installerISOPath != nil {
+        if FeatureFlags.shared.linuxVMSupport && vm.isLinux && vm.installerISOPath != nil {
             Button("Detach Installer ISO") {
                 detachISO()
             }
@@ -1547,10 +1799,9 @@ struct VMWindowView: View {
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
-    @StateObject private var connectionMonitor = GuestToolsConnectionMonitor()
-    @ObservedObject private var guestToolsInstaller = GuestToolsInstaller.shared
+    @StateObject private var healthCheckService = HealthCheckService()
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
-    @State private var portForwards: [PortForwardConfig] = []
+    @State private var showPortForwardEditor = false
 
     init(vm: App2VM) {
         self.vm = vm
@@ -1558,7 +1809,7 @@ struct VMWindowView: View {
     }
 
     private var activePortForwards: [PortForwardConfig] {
-        portForwards.filter { $0.enabled }
+        session.portForwardService?.activeForwards ?? []
     }
 
     private var isSuspending: Bool {
@@ -1673,17 +1924,17 @@ struct VMWindowView: View {
             ToolbarItem(placement: .automatic) {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(connectionMonitor.isConnected ? Color.green : Color.gray.opacity(0.5))
+                        .fill(healthCheckService.isConnected ? Color.green : Color.gray.opacity(0.5))
                         .frame(width: 8, height: 8)
                     Text("Guest Tools")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                .help(connectionMonitor.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
+                .help(healthCheckService.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
             }
-            if !activePortForwards.isEmpty {
-                ToolbarItem(placement: .automatic) {
-                    Menu {
+            ToolbarItem(placement: .automatic) {
+                Menu {
+                    if !activePortForwards.isEmpty {
                         ForEach(activePortForwards) { forward in
                             Button {
                                 // Copy the localhost URL to clipboard
@@ -1702,10 +1953,22 @@ struct VMWindowView: View {
                         Text("Click to copy URL")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    } label: {
-                        Label("\(activePortForwards.count)", systemImage: "network")
+                        Divider()
                     }
-                    .help("Port Forwards: \(activePortForwards.map { "\($0.hostPort)→\($0.guestPort)" }.joined(separator: ", "))")
+                    Button("Edit Port Forwards…") {
+                        showPortForwardEditor = true
+                    }
+                } label: {
+                    Label(activePortForwards.isEmpty ? "Ports" : "\(activePortForwards.count)", systemImage: "network")
+                }
+                .help(activePortForwards.isEmpty ? "No port forwards configured" : "Port Forwards: \(activePortForwards.map { "\($0.hostPort)→\($0.guestPort)" }.joined(separator: ", "))")
+                .popover(isPresented: $showPortForwardEditor) {
+                    if let service = session.portForwardService {
+                        PortForwardEditorView(session: session, portForwardService: service, isPresented: $showPortForwardEditor)
+                    } else {
+                        Text("Port forwarding not available")
+                            .padding()
+                    }
                 }
             }
             ToolbarItem(placement: .automatic) {
@@ -1757,9 +2020,6 @@ struct VMWindowView: View {
             }
         }
         .onAppear {
-            // Load port forwards from config
-            loadPortForwards()
-
             session.onStateChange = { [vmID = vm.id, bundleURL = vm.bundleURL, store, weak fileTransferService] state in
                 switch state {
                 case .running:
@@ -1784,38 +2044,16 @@ struct VMWindowView: View {
             if let vm = vm, let queue = session.vmQueue {
                 let client = GhostClient(virtualMachine: vm, vmQueue: queue)
                 fileTransferService.configure(client: client)
-                connectionMonitor.configure(client: client)
+                healthCheckService.start(client: client)
             } else {
-                connectionMonitor.stopMonitoring()
+                healthCheckService.stop()
             }
         }
         .onDisappear {
-            connectionMonitor.stopMonitoring()
+            healthCheckService.stop()
             session.stopIfNeeded()
         }
         .focusedSceneValue(\.vmSession, session)
-        .alert(guestToolsInstaller.alertTitle, isPresented: $guestToolsInstaller.showAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            if let message = guestToolsInstaller.alertMessage {
-                Text(message)
-            }
-        }
-    }
-
-    private func loadPortForwards() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let layout = VMFileLayout(bundleURL: vm.bundleURL)
-                let store = VMConfigStore(layout: layout)
-                let config = try store.load()
-                DispatchQueue.main.async {
-                    self.portForwards = config.portForwards
-                }
-            } catch {
-                print("[VMWindowView] Failed to load port forwards: \(error)")
-            }
-        }
     }
 }
 
@@ -1828,7 +2066,6 @@ struct SettingsDemoView: View {
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
     @State private var showRacecarBackground: Bool = true
-    @State private var iconMode: DemoIconMode = .system
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     private let labelWidth: CGFloat = 130
@@ -1904,7 +2141,10 @@ struct SettingsDemoView: View {
             }
 
             labeledRow("App Icon") {
-                Picker("", selection: $iconMode) {
+                Picker("", selection: Binding(
+                    get: { AppIconAdapter.shared.iconMode },
+                    set: { AppIconAdapter.shared.iconMode = $0 }
+                )) {
                     ForEach(DemoIconMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
@@ -1914,16 +2154,31 @@ struct SettingsDemoView: View {
                 .frame(maxWidth: 260, alignment: .leading)
             }
 
+            Divider()
+
+            Text("Experimental Features")
+                .font(.system(size: 13, weight: .semibold))
+
+            ForEach(FeatureFlags.allFlags) { flag in
+                labeledRow(flag.displayName) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("", isOn: Binding(
+                            get: { FeatureFlags.shared.isEnabled(flag.key) },
+                            set: { FeatureFlags.shared.setEnabled(flag.key, value: $0) }
+                        ))
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        Text(flag.description)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
             Spacer()
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 320)
-        .onAppear {
-            AppIconAdapter.updateIcon(for: iconMode)
-        }
-        .onChange(of: iconMode) { _, newValue in
-            AppIconAdapter.updateIcon(for: newValue)
-        }
     }
 
     @ViewBuilder
@@ -2134,232 +2389,4 @@ struct FileTransferProgressView: View {
     }
 }
 
-@available(macOS 13.0, *)
-struct MarketplaceDemoView: View {
-    private struct StoreItem: Identifiable, Hashable {
-        let id = UUID()
-        let name: String
-        let detail: String
-        let price: String
-    }
 
-    @State private var items: [StoreItem] = [
-        StoreItem(name: "Race Car Pack", detail: "High-speed virtual machines with bright racecar artwork.", price: "$4.99"),
-        StoreItem(name: "Unicorn Lab", detail: "Whimsical macOS guests with experimental settings.", price: "$3.99"),
-        StoreItem(name: "Galaxy Bundle", detail: "Starfield-themed VMs for space explorers.", price: "$5.99"),
-        StoreItem(name: "Retro Arcade", detail: "Pixel art desktops and chunky fonts for nostalgia.", price: "$2.99")
-    ]
-    @State private var selectionID: StoreItem.ID?
-    @State private var searchText: String = ""
-
-    private var selection: StoreItem? {
-        guard let selectionID else { return nil }
-        return items.first(where: { $0.id == selectionID })
-    }
-
-    private var filteredItems: [StoreItem] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return items }
-        return items.filter { item in
-            item.name.localizedCaseInsensitiveContains(query) ||
-            item.detail.localizedCaseInsensitiveContains(query)
-        }
-    }
-
-    var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 8) {
-                TextField("Search market", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .padding([.top, .horizontal], 8)
-
-                List(filteredItems, selection: $selectionID) { item in
-                    Text(item.name)
-                        .tag(item.id)
-                }
-            }
-            .navigationTitle("Market")
-        } detail: {
-            if let item = selection {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(item.name)
-                        .font(.largeTitle.bold())
-
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.secondary.opacity(0.15))
-                        Image(systemName: "shippingbox.fill")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 64, height: 64)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(height: 160)
-
-                    Text(item.detail)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    HStack {
-                        Spacer()
-                        Button {
-                            // Placeholder purchase action.
-                        } label: {
-                            Text(item.price)
-                                .font(.headline)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-                .padding()
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "cart")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 80, height: 80)
-                        .foregroundStyle(.secondary)
-                    Text("Browse whimsical VM packs in the store.")
-                        .font(.title3)
-                    Text("Race cars, unicorns, galaxies, and more — all placeholder content for now.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .frame(minWidth: 640, minHeight: 380)
-    }
-}
-
-// MARK: - Guest Tools Connection Monitor
-
-@available(macOS 13.0, *)
-@MainActor
-final class GuestToolsConnectionMonitor: ObservableObject {
-    @Published private(set) var isConnected: Bool = false
-    @Published private(set) var isChecking: Bool = false
-
-    private var client: GhostClient?
-    private var checkTask: Task<Void, Never>?
-    private let checkInterval: TimeInterval = 3.0
-
-    func configure(client: GhostClient) {
-        self.client = client
-        startMonitoring()
-    }
-
-    func startMonitoring() {
-        stopMonitoring()
-        checkTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                await self?.checkConnection()
-                try? await Task.sleep(nanoseconds: UInt64((self?.checkInterval ?? 3.0) * 1_000_000_000))
-            }
-        }
-    }
-
-    func stopMonitoring() {
-        checkTask?.cancel()
-        checkTask = nil
-        isConnected = false
-    }
-
-    private func checkConnection() async {
-        guard let client = client else {
-            isConnected = false
-            return
-        }
-
-        isChecking = true
-        let connected = await client.checkHealth()
-        isConnected = connected
-        isChecking = false
-    }
-}
-
-// MARK: - Guest Tools Installer
-
-@available(macOS 13.0, *)
-final class GuestToolsInstaller: ObservableObject {
-    static let shared = GuestToolsInstaller()
-
-    @Published var alertMessage: String?
-    @Published var showAlert = false
-    @Published var alertTitle: String = ""
-
-    private let controller = VMController()
-
-    private init() {}
-
-    /// Reinstall guest tools by resetting the flag and restarting the VM.
-    /// On next start, GhostTools.dmg will be auto-attached.
-    func reinstallGuestTools(for session: App2VMRunSession?) {
-        guard let session = session else {
-            showError("No active VM session")
-            return
-        }
-
-        // Check if VM is running
-        guard case .running = session.state else {
-            showError("The VM must be running to reinstall guest tools.")
-            return
-        }
-
-        let bundleURL = session.bundleURL
-
-        // Reset guestToolsInstalled flag
-        do {
-            let layout = VMFileLayout(bundleURL: bundleURL)
-            let store = VMConfigStore(layout: layout)
-            var config = try store.load()
-            config.guestToolsInstalled = false
-            config.modifiedAt = Date()
-            try store.save(config)
-        } catch {
-            showError("Unable to update VM configuration: \(error.localizedDescription)")
-            return
-        }
-
-        // Show info and restart the VM
-        showInfo("Guest tools will be reinstalled on next VM start.\n\nThe VM will now restart. After it boots, GhostTools.dmg will appear as a mounted disk in the guest.")
-
-        // Stop then start the VM to trigger reinstall
-        session.stop()
-
-        // Observe state changes using Combine to restart the VM after it stops
-        var cancellable: AnyCancellable?
-        cancellable = session.$state.sink { newState in
-            if case .stopped = newState {
-                cancellable?.cancel()
-                // Small delay to ensure clean state
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    session.start()
-                }
-            }
-        }
-        // Store the cancellable to keep it alive
-        self.restartCancellable = cancellable
-    }
-
-    private var restartCancellable: AnyCancellable?
-
-    private func showError(_ message: String) {
-        DispatchQueue.main.async {
-            self.alertTitle = "Cannot Reinstall Guest Tools"
-            self.alertMessage = message
-            self.showAlert = true
-        }
-    }
-
-    private func showInfo(_ message: String) {
-        DispatchQueue.main.async {
-            self.alertTitle = "Reinstalling Guest Tools"
-            self.alertMessage = message
-            self.showAlert = true
-        }
-    }
-}

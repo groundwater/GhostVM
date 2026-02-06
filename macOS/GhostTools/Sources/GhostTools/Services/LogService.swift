@@ -32,9 +32,10 @@ final class LogService: @unchecked Sendable {
     }
 }
 
-/// Global logging function that prints locally and buffers for host polling
-/// Use this instead of print() throughout GhostTools
+/// Global logging function that prints locally, buffers for host polling,
+/// and pushes to host via EventPushServer
 func log(_ message: String) {
     print(message)
     LogService.shared.append(message)
+    EventPushServer.shared.pushEvent(.log(message))
 }

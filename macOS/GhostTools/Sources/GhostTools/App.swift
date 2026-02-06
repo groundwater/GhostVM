@@ -1,9 +1,10 @@
 import AppKit
 import SwiftUI
 import UserNotifications
+import CoreServices
 
 /// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.35.0"
+let kGhostToolsVersion = "1.38.0"
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
@@ -28,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
     private var tunnelServer: TunnelServer?
+    private var healthServer: HealthServer?
     private var isServerRunning = false
 
     /// Files queued for sending to host (accessor for FileService)
@@ -67,8 +69,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
         installLaunchAgentIfNeeded()
+        registerAsDefaultBrowser()
         startServer()
         startTunnelServer()
+        startHealthServer()
+        startEventPushServer()
         startUpdateChecker()
     }
 
@@ -228,6 +233,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             process.waitUntilExit()
             print("[GhostTools] Registered with Launch Services")
 
+            // Set as default browser for URL forwarding
+            registerAsDefaultBrowser()
+
             // Relaunch from /Applications
             let task = Process()
             task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
@@ -266,6 +274,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    // MARK: - Default Browser Registration
+
+    /// Register GhostTools as the default handler for http/https URLs
+    /// This enables URL forwarding from guest to host
+    private func registerAsDefaultBrowser() {
+        guard let bundleID = Bundle.main.bundleIdentifier else {
+            print("[GhostTools] No bundle identifier, skipping default browser registration")
+            return
+        }
+
+        let schemes = ["http", "https"]
+        for scheme in schemes {
+            let result = LSSetDefaultHandlerForURLScheme(scheme as CFString, bundleID as CFString)
+            if result == noErr {
+                print("[GhostTools] Registered as default handler for \(scheme)")
+            } else {
+                print("[GhostTools] Failed to register as default handler for \(scheme): \(result)")
+            }
+        }
     }
 
     // MARK: - Launch Agent
@@ -329,6 +358,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
         tunnelServer?.stop()
+        healthServer?.stop()
+        EventPushServer.shared.stop()
     }
 
     // MARK: - URL Handling
@@ -373,9 +404,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let color = connected ? NSColor.systemGreen : NSColor.systemGray
 
-        if let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "GhostTools") {
+        if let image = NSImage(systemSymbolName: "app.connected.to.app.below.fill", accessibilityDescription: "GhostTools") {
             let colorConfig = NSImage.SymbolConfiguration(paletteColors: [color])
-            let sizeConfig = NSImage.SymbolConfiguration(pointSize: 8, weight: .regular)
+            let sizeConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
             let configuredImage = image.withSymbolConfiguration(colorConfig.applying(sizeConfig))
             button.image = configuredImage
         } else {
@@ -444,6 +475,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseFiles = true
         panel.message = "Select files to send to host"
         panel.prompt = "Send"
+
+        // Force the panel above all other windows (GhostTools is a menu bar
+        // app with no key window, so the panel would otherwise appear behind
+        // the frontmost app).
+        panel.level = .floating
+        NSApp.activate(ignoringOtherApps: true)
 
         panel.begin { [weak self] response in
             guard response == .OK else { return }
@@ -517,6 +554,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[GhostTools] Tunnel server started successfully")
             } catch {
                 print("[GhostTools] Failed to start tunnel server: \(error)")
+            }
+        }
+    }
+
+    private func startHealthServer() {
+        print("[GhostTools] startHealthServer() called")
+        Task {
+            do {
+                healthServer = HealthServer()
+                print("[GhostTools] Starting health server on vsock port 5002...")
+                try await healthServer?.start()
+                print("[GhostTools] Health server started successfully")
+            } catch {
+                print("[GhostTools] Failed to start health server: \(error)")
+            }
+        }
+    }
+
+    private func startEventPushServer() {
+        print("[GhostTools] startEventPushServer() called")
+        Task {
+            do {
+                print("[GhostTools] Starting event push server on vsock port 5003...")
+                try await EventPushServer.shared.start()
+                print("[GhostTools] Event push server started successfully")
+            } catch {
+                print("[GhostTools] Failed to start event push server: \(error)")
             }
         }
     }
