@@ -159,7 +159,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Ports"
         item.paletteLabel = "Port Forwards"
         item.toolTip = "Manage port forwards"
-        item.image = NSImage(systemSymbolName: "network", accessibilityDescription: "Port Forwards")
+        item.image = NSImage(systemSymbolName: "powerplug", accessibilityDescription: "Port Forwards")
         item.showsIndicator = true
 
         portForwardsItem = item
@@ -269,11 +269,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         let symbolName: String
         switch clipboardSyncMode {
         case "bidirectional":
-            symbolName = "arrow.left.arrow.right.circle.fill"
+            symbolName = "clipboard.fill"
         case "hostToGuest":
-            symbolName = "arrow.right.circle.fill"
+            symbolName = "doc.on.clipboard"
         case "guestToHost":
-            symbolName = "arrow.left.circle.fill"
+            symbolName = "doc.on.clipboard.fill"
         default:
             symbolName = "clipboard"
         }
@@ -358,6 +358,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
             menuItem.state = (policy == networkAccessPolicy) ? .on : .off
             menu.addItem(menuItem)
         }
+
+        menu.addItem(NSMenuItem.separator())
+        let noteItem = NSMenuItem(title: "Requires VM restart", action: nil, keyEquivalent: "")
+        noteItem.isEnabled = false
+        menu.addItem(noteItem)
 
         item.menu = menu
     }
