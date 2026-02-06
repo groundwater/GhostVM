@@ -14,33 +14,35 @@ protocol PortForwardPanelDelegate: AnyObject {
     func portForwardPanel(_ panel: PortForwardPanel, didRemoveForwardWithHostPort hostPort: UInt16)
 }
 
-/// NSPopover-based port forward editor
+/// Sheet-based port forward editor (immune to FocusableVMView responder stealing)
 final class PortForwardPanel: NSObject {
 
     weak var delegate: PortForwardPanelDelegate?
 
-    private var popover: NSPopover?
+    private var sheetWindow: NSWindow?
     private var entries: [PortForwardEntry] = []
     private var contentViewController: PortForwardContentViewController?
 
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 300, height: 200)
-
+    func show(in parentWindow: NSWindow) {
         let vc = PortForwardContentViewController()
         vc.delegate = self
         vc.setEntries(entries)
         contentViewController = vc
 
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
+        let sheetWindow = NSWindow(contentViewController: vc)
+        sheetWindow.styleMask = [.titled, .closable]
+        sheetWindow.title = "Port Forwards"
+        self.sheetWindow = sheetWindow
+
+        parentWindow.beginSheet(sheetWindow)
     }
 
     func close() {
-        popover?.close()
-        popover = nil
+        if let sheet = sheetWindow, let parent = sheet.sheetParent {
+            parent.endSheet(sheet)
+        }
+        sheetWindow = nil
+        contentViewController = nil
     }
 
     func setEntries(_ newEntries: [PortForwardEntry]) {
@@ -78,7 +80,7 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
     private var errorLabel: NSTextField!
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 280))
         container.translatesAutoresizingMaskIntoConstraints = false
 
         // Title
@@ -159,6 +161,12 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
         errorLabel.isHidden = true
         container.addSubview(errorLabel)
 
+        let doneButton = NSButton(title: "Done", target: self, action: #selector(dismissSheet))
+        doneButton.translatesAutoresizingMaskIntoConstraints = false
+        doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        container.addSubview(doneButton)
+
         // Layout
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
@@ -167,7 +175,7 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
             scrollView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            scrollView.heightAnchor.constraint(equalToConstant: 80),
+            scrollView.heightAnchor.constraint(equalToConstant: 140),
 
             hostLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 12),
             hostLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
@@ -193,7 +201,10 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
             errorLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
             errorLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
 
-            container.bottomAnchor.constraint(greaterThanOrEqualTo: errorLabel.bottomAnchor, constant: 12)
+            doneButton.topAnchor.constraint(equalTo: errorLabel.bottomAnchor, constant: 12),
+            doneButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+
+            container.bottomAnchor.constraint(equalTo: doneButton.bottomAnchor, constant: 12)
         ])
 
         self.view = container
@@ -229,12 +240,8 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
             let cell = NSTextField(labelWithString: "\(entry.guestPort)")
             return cell
         case "delete":
-            let button = NSButton(image: NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: "Remove")!, target: self, action: #selector(removeForward(_:)))
-            button.bezelStyle = .inline
-            button.isBordered = false
+            let button = RemoveButton(target: self, action: #selector(removeForward(_:)))
             button.tag = row
-            let config = NSImage.SymbolConfiguration(paletteColors: [.systemRed])
-            button.image = button.image?.withSymbolConfiguration(config)
             return button
         default:
             return nil
@@ -269,6 +276,12 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
         guestPortField.stringValue = ""
     }
 
+    @objc private func dismissSheet() {
+        if let sheet = view.window, let parent = sheet.sheetParent {
+            parent.endSheet(sheet)
+        }
+    }
+
     @objc private func removeForward(_ sender: NSButton) {
         let row = sender.tag
         guard row < entries.count else { return }
@@ -285,5 +298,48 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
 
     func controlTextDidChange(_ obj: Notification) {
         errorLabel.isHidden = true
+    }
+}
+
+// MARK: - Remove Button
+
+/// A subtle remove button that shows a muted `xmark` and turns red on hover.
+private final class RemoveButton: NSButton {
+
+    private var isHovered = false
+    private var trackingArea: NSTrackingArea?
+
+    convenience init(target: AnyObject?, action: Selector?) {
+        self.init(frame: .zero)
+        self.target = target
+        self.action = action
+        bezelStyle = .inline
+        isBordered = false
+        applyStyle()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow], owner: self, userInfo: nil)
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        applyStyle()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        applyStyle()
+    }
+
+    private func applyStyle() {
+        let color: NSColor = isHovered ? .systemRed : .tertiaryLabelColor
+        let config = NSImage.SymbolConfiguration(paletteColors: [color])
+        image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Remove")?
+            .withSymbolConfiguration(config)
     }
 }

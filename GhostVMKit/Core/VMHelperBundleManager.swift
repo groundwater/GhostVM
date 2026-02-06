@@ -36,6 +36,9 @@ public final class VMHelperBundleManager {
         // Copy the entire app bundle to temp name
         try fileManager.copyItem(at: sourceHelperAppURL, to: tempHelperURL)
 
+        // Copy GhostTools.dmg into the helper's Resources so the helper process can find it
+        copyGhostToolsDMG(into: tempHelperURL)
+
         // Patch Info.plist with VM name and unique bundle ID
         try customizeHelperPlist(
             helperAppURL: tempHelperURL,
@@ -102,6 +105,21 @@ public final class VMHelperBundleManager {
     }
 
     // MARK: - Private helpers
+
+    /// Copies GhostTools.dmg from the main GhostVM.app bundle into the helper app's Resources.
+    /// Fails silently if the DMG is not found (it's optional in project.yml).
+    private func copyGhostToolsDMG(into helperAppURL: URL) {
+        guard let dmgURL = Bundle.main.url(forResource: "GhostTools", withExtension: "dmg") else {
+            return
+        }
+
+        let destURL = helperAppURL
+            .appendingPathComponent("Contents")
+            .appendingPathComponent("Resources")
+            .appendingPathComponent("GhostTools.dmg")
+
+        try? fileManager.copyItem(at: dmgURL, to: destURL)
+    }
 
     /// Patches the helper's Info.plist so the Dock and CMD+TAB show the VM name.
     private func customizeHelperPlist(helperAppURL: URL, vmName: String, vmBundlePath: String) throws {

@@ -2,7 +2,7 @@ import AppKit
 
 /// NSToolbar implementation for the VM helper window.
 /// Provides quick access to VM status and controls.
-final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate {
+final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, QueuedFilesPanelDelegate {
 
     // MARK: - Toolbar Item Identifiers
 
@@ -36,6 +36,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private weak var window: NSWindow?
     private var portForwardPanel: PortForwardPanel?
     private var portForwardEntries: [PortForwardEntry] = []
+    private var queuedFilesPanel: QueuedFilesPanel?
+    private var previousQueuedFileCount = 0
 
     // MARK: - Initialization
 
@@ -173,10 +175,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Files"
         item.paletteLabel = "Queued Files"
         item.toolTip = "Receive files from guest"
-        item.image = NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Receive Files")
-        item.target = self
-        item.action = #selector(receiveQueuedFiles)
 
+        let button = NSButton(image: NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Receive Files")!, target: self, action: #selector(receiveQueuedFiles))
+        button.bezelStyle = .toolbar
+        button.isBordered = true
+        item.view = button
+
+        item.isHidden = true
         queuedFilesItem = item
 
         return item
@@ -252,10 +257,19 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
     private func updateQueuedFilesButton() {
         guard let item = queuedFilesItem else { return }
+
+        let wasZero = previousQueuedFileCount == 0
+        previousQueuedFileCount = queuedFileCount
+
         if queuedFileCount > 0 {
             item.label = "\(queuedFileCount) File\(queuedFileCount == 1 ? "" : "s")"
+            item.isHidden = false
+            if wasZero {
+                delegate?.toolbarDidDetectNewQueuedFiles(self)
+            }
         } else {
             item.label = "Files"
+            item.isHidden = true
         }
     }
 
@@ -324,28 +338,38 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     }
 
     @objc private func editPortForwards(_ sender: NSMenuItem) {
-        // Delay to next run loop iteration so the menu fully dismisses first;
-        // otherwise the transient popover immediately closes with the menu.
-        DispatchQueue.main.async { [self] in
-            guard let contentView = window?.contentView else {
-                delegate?.toolbarDidRequestPortForwardEditor(self)
-                return
-            }
-
-            portForwardPanel?.close()
-
-            let panel = PortForwardPanel()
-            panel.delegate = self
-            panel.setEntries(portForwardEntries)
-            // Anchor to top-center of the content view, pointing up toward toolbar
-            let anchorRect = NSRect(x: contentView.bounds.midX - 1, y: contentView.bounds.maxY, width: 2, height: 1)
-            panel.show(relativeTo: anchorRect, of: contentView, preferredEdge: .maxY)
-            portForwardPanel = panel
+        let targetWindow = window ?? NSApp.keyWindow
+        guard let targetWindow = targetWindow else {
+            delegate?.toolbarDidRequestPortForwardEditor(self)
+            return
         }
+
+        portForwardPanel?.close()
+
+        let panel = PortForwardPanel()
+        panel.delegate = self
+        panel.setEntries(portForwardEntries)
+        panel.show(in: targetWindow)
+        portForwardPanel = panel
     }
 
     @objc private func receiveQueuedFiles() {
-        delegate?.toolbarDidRequestReceiveFiles(self)
+        showQueuedFilesPopover()
+    }
+
+    func setQueuedFileNames(_ names: [String]) {
+        queuedFilesPanel?.setFileNames(names)
+    }
+
+    func showQueuedFilesPopover() {
+        guard let button = queuedFilesItem?.view else { return }
+
+        queuedFilesPanel?.close()
+
+        let panel = QueuedFilesPanel()
+        panel.delegate = self
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        queuedFilesPanel = panel
     }
 
     @objc private func shutDownVM() {
@@ -365,6 +389,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     func portForwardPanel(_ panel: PortForwardPanel, didRemoveForwardWithHostPort hostPort: UInt16) {
         delegate?.toolbar(self, didRemovePortForwardWithHostPort: hostPort)
     }
+
+    // MARK: - QueuedFilesPanelDelegate
+
+    func queuedFilesPanelDidAllow(_ panel: QueuedFilesPanel) {
+        panel.close()
+        queuedFilesPanel = nil
+        delegate?.toolbarDidRequestReceiveFiles(self)
+    }
+
+    func queuedFilesPanelDidDeny(_ panel: QueuedFilesPanel) {
+        panel.close()
+        queuedFilesPanel = nil
+        delegate?.toolbarDidRequestDenyFiles(self)
+    }
 }
 
 // MARK: - Delegate Protocol
@@ -375,6 +413,8 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didRemovePortForwardWithHostPort hostPort: UInt16)
     func toolbarDidRequestPortForwardEditor(_ toolbar: HelperToolbar)
     func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar)
+    func toolbarDidRequestDenyFiles(_ toolbar: HelperToolbar)
+    func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar)
     func toolbarDidRequestShutDown(_ toolbar: HelperToolbar)
     func toolbarDidRequestTerminate(_ toolbar: HelperToolbar)
 }

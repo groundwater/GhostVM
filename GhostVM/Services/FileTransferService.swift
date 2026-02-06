@@ -304,6 +304,19 @@ public final class FileTransferService: ObservableObject {
         }
     }
 
+    /// Clear the guest file queue without fetching (Deny action)
+    public func clearGuestFileQueue() {
+        guard let client = ghostClient else { return }
+        Task {
+            do {
+                try await client.clearFileQueue()
+                queuedGuestFileCount = 0
+            } catch {
+                lastError = "Failed to clear guest file queue: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// Clear completed and failed transfers from the list
     public func clearCompletedTransfers() {
         transfers.removeAll { transfer in

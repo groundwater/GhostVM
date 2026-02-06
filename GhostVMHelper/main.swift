@@ -327,6 +327,19 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         fileTransferService?.fetchAllGuestFiles()
     }
 
+    func toolbarDidRequestDenyFiles(_ toolbar: HelperToolbar) {
+        fileTransferService?.clearGuestFileQueue()
+    }
+
+    func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
+        Task {
+            let files = (try? await fileTransferService?.listGuestFiles()) ?? []
+            let names = files.map { URL(fileURLWithPath: $0).lastPathComponent }
+            helperToolbar?.setQueuedFileNames(names)
+            helperToolbar?.showQueuedFilesPopover()
+        }
+    }
+
     func toolbarDidRequestShutDown(_ toolbar: HelperToolbar) {
         stopVM()
     }
