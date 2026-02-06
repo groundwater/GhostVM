@@ -45,6 +45,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var helperToolbar: HelperToolbar?
     private var statusOverlay: StatusOverlay?
 
+    // Network filtering
+    private var networkFilterFD: Int32 = -1
+    private var networkPolicy: NetworkAccessPolicy = .fullAccess
+    private var networkFilterService: NetworkFilterService?
+
     // Services
     private var ghostClient: GhostClient?
     private var clipboardSyncService: ClipboardSyncService?
@@ -300,6 +305,30 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         NSLog("GhostVMHelper: Clipboard sync mode changed to \(mode)")
     }
 
+    func toolbar(_ toolbar: HelperToolbar, didSelectNetworkAccessPolicy policy: String) {
+        guard let newPolicy = NetworkAccessPolicy(rawValue: policy) else { return }
+
+        // Apply at runtime
+        networkPolicy = newPolicy
+        networkFilterService?.updatePolicy(newPolicy)
+        NSLog("GhostVMHelper: Network access policy changed to \(policy)")
+
+        // Persist to config.json
+        let bundleURL = self.vmBundleURL!
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let layout = VMFileLayout(bundleURL: bundleURL)
+                let store = VMConfigStore(layout: layout)
+                var config = try store.load()
+                config.networkAccessPolicy = newPolicy
+                config.modifiedAt = Date()
+                try store.save(config)
+            } catch {
+                NSLog("GhostVMHelper: Failed to persist network access policy: \(error)")
+            }
+        }
+    }
+
     func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) {
         let config = PortForwardConfig(hostPort: hostPort, guestPort: guestPort, enabled: true)
         do {
@@ -440,11 +469,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
             // Build VM configuration
             let builder = VMConfigurationBuilder(layout: layout!, storedConfig: config)
-            let vmConfig = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+            let configResult = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+
+            // Store network filter info for service startup
+            self.networkFilterFD = configResult.networkFilterFD
+            self.networkPolicy = configResult.networkPolicy
 
             // Create VM
             vmQueue = DispatchQueue(label: "ghostvm.helper.\(vmName)")
-            virtualMachine = VZVirtualMachine(configuration: vmConfig, queue: vmQueue!)
+            virtualMachine = VZVirtualMachine(configuration: configResult.configuration, queue: vmQueue!)
             virtualMachine!.delegate = self
 
             // Create window and view
@@ -528,6 +561,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
             // Start services
             startServices()
+
+            // Set initial network policy in toolbar
+            helperToolbar?.setNetworkAccessPolicy(networkPolicy.rawValue)
 
             // Show window
             window?.center()
@@ -741,6 +777,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         self.logPollingService = logService
         logService.start()
 
+        // 7. Network filter service (always present for runtime policy switching)
+        let nfService = NetworkFilterService(policy: networkPolicy, hostFD: networkFilterFD)
+        nfService.start()
+        self.networkFilterService = nfService
+        networkFilterFD = -1  // Ownership transferred to service
+
         NSLog("GhostVMHelper: Services started for '\(vmName)'")
     }
 
@@ -761,6 +803,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         logPollingService?.stop()
         logPollingService = nil
+
+        networkFilterService?.stop()
+        networkFilterService = nil
 
         ghostClient = nil
     }

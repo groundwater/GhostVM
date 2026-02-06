@@ -75,6 +75,7 @@ targets:
         products:
           - NIOCore
           - NIOPosix
+      - sdk: vmnet.framework
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
@@ -120,6 +121,7 @@ targets:
         products:
           - NIOCore
           - NIOPosix
+      - sdk: vmnet.framework
     settings:
       base:
         PRODUCT_NAME: GhostVM

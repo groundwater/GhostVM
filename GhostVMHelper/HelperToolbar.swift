@@ -10,6 +10,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         static let guestToolsStatus = NSToolbarItem.Identifier("guestToolsStatus")
         static let portForwards = NSToolbarItem.Identifier("portForwards")
         static let clipboardSync = NSToolbarItem.Identifier("clipboardSync")
+        static let networkAccess = NSToolbarItem.Identifier("networkAccess")
         static let queuedFiles = NSToolbarItem.Identifier("queuedFiles")
         static let flexibleSpace = NSToolbarItem.Identifier.flexibleSpace
         static let shutDown = NSToolbarItem.Identifier("shutDown")
@@ -24,11 +25,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var guestToolsConnected = false
     private var portForwardCount = 0
     private var clipboardSyncMode = "disabled"
+    private var networkAccessPolicy = "fullAccess"
     private var queuedFileCount = 0
 
     private var guestToolsItem: NSToolbarItem?
     private var portForwardsItem: NSMenuToolbarItem?
     private var clipboardSyncItem: NSMenuToolbarItem?
+    private var networkAccessItem: NSMenuToolbarItem?
     private var queuedFilesItem: NSToolbarItem?
     private var shutDownItem: NSToolbarItem?
     private var terminateItem: NSToolbarItem?
@@ -81,6 +84,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         rebuildClipboardSyncMenu()
     }
 
+    func setNetworkAccessPolicy(_ policy: String) {
+        networkAccessPolicy = policy
+        updateNetworkAccessButton()
+        rebuildNetworkAccessMenu()
+    }
+
     func setQueuedFileCount(_ count: Int) {
         queuedFileCount = count
         updateQueuedFilesButton()
@@ -98,6 +107,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
             ItemID.guestToolsStatus,
             ItemID.portForwards,
             ItemID.clipboardSync,
+            ItemID.networkAccess,
             ItemID.queuedFiles,
             ItemID.flexibleSpace,
             ItemID.shutDown,
@@ -117,6 +127,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
             return makePortForwardsItem()
         case ItemID.clipboardSync:
             return makeClipboardSyncItem()
+        case ItemID.networkAccess:
+            return makeNetworkAccessItem()
         case ItemID.queuedFiles:
             return makeQueuedFilesItem()
         case ItemID.shutDown:
@@ -166,6 +178,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         clipboardSyncItem = item
         updateClipboardSyncButton()
         rebuildClipboardSyncMenu()
+
+        return item
+    }
+
+    private func makeNetworkAccessItem() -> NSMenuToolbarItem {
+        let item = NSMenuToolbarItem(itemIdentifier: ItemID.networkAccess)
+        item.label = "Network"
+        item.paletteLabel = "Network Access"
+        item.toolTip = "Network access policy"
+        item.showsIndicator = true
+
+        networkAccessItem = item
+        updateNetworkAccessButton()
+        rebuildNetworkAccessMenu()
 
         return item
     }
@@ -255,6 +281,24 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Clipboard Sync")
     }
 
+    private func updateNetworkAccessButton() {
+        guard let item = networkAccessItem else { return }
+
+        let symbolName: String
+        switch networkAccessPolicy {
+        case "fullAccess":
+            symbolName = "network"
+        case "internetOnly":
+            symbolName = "globe"
+        case "disableNetwork":
+            symbolName = "network.slash"
+        default:
+            symbolName = "network"
+        }
+
+        item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Network Access")
+    }
+
     private func updateQueuedFilesButton() {
         guard let item = queuedFilesItem else { return }
 
@@ -291,6 +335,27 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
             menuItem.target = self
             menuItem.representedObject = mode
             menuItem.state = (mode == clipboardSyncMode) ? .on : .off
+            menu.addItem(menuItem)
+        }
+
+        item.menu = menu
+    }
+
+    private func rebuildNetworkAccessMenu() {
+        guard let item = networkAccessItem else { return }
+
+        let menu = NSMenu()
+        let policies: [(String, String)] = [
+            ("Full Access", "fullAccess"),
+            ("Internet Only", "internetOnly"),
+            ("Disable Network", "disableNetwork")
+        ]
+
+        for (title, policy) in policies {
+            let menuItem = NSMenuItem(title: title, action: #selector(setNetworkPolicy(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.representedObject = policy
+            menuItem.state = (policy == networkAccessPolicy) ? .on : .off
             menu.addItem(menuItem)
         }
 
@@ -335,6 +400,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         updateClipboardSyncButton()
         rebuildClipboardSyncMenu()
         delegate?.toolbar(self, didSelectClipboardSyncMode: mode)
+    }
+
+    @objc private func setNetworkPolicy(_ sender: NSMenuItem) {
+        guard let policy = sender.representedObject as? String else { return }
+        networkAccessPolicy = policy
+        updateNetworkAccessButton()
+        rebuildNetworkAccessMenu()
+        delegate?.toolbar(self, didSelectNetworkAccessPolicy: policy)
     }
 
     @objc private func editPortForwards(_ sender: NSMenuItem) {
@@ -409,6 +482,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
 protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String)
+    func toolbar(_ toolbar: HelperToolbar, didSelectNetworkAccessPolicy policy: String)
     func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16)
     func toolbar(_ toolbar: HelperToolbar, didRemovePortForwardWithHostPort hostPort: UInt16)
     func toolbarDidRequestPortForwardEditor(_ toolbar: HelperToolbar)
