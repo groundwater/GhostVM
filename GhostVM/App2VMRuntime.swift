@@ -117,9 +117,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var portForwardService: PortForwardService?
     private var portForwardingStarted = false
 
-    // Log polling from guest
-    private var logPollingService: LogPollingService?
-    private var logPollingStarting = false
 
     // Helper app that runs the VM
     private var helperBundleManager = VMHelperBundleManager()
@@ -183,10 +180,9 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             self.ghostClient = client
 
             let service = ClipboardSyncService(bundlePath: bundleURL.path)
-            service.syncMode = clipboardSyncMode
+            service.setSyncMode(clipboardSyncMode)
+            service.configure(client: client)
             self.clipboardSyncService = service
-
-            service.start(client: client)
         }
     }
 
@@ -294,40 +290,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
                 return "Port forwarding service is not running"
             }
         }
-    }
-
-    /// Start polling logs from guest VM to host console
-    private func startLogPolling() {
-        guard logPollingService == nil, !logPollingStarting else { return }  // Already started
-        guard let vm = virtualMachine else { return }
-        guard let session = windowlessSession else { return }
-
-        logPollingStarting = true
-
-        Task { @MainActor in
-            // Create GhostClient if not already created
-            if self.ghostClient == nil {
-                self.ghostClient = GhostClient(virtualMachine: vm, vmQueue: session.vmQueue)
-            }
-
-            guard let client = self.ghostClient else {
-                self.logPollingStarting = false
-                return
-            }
-
-            let service = LogPollingService(client: client)
-            self.logPollingService = service
-            self.logPollingStarting = false
-            service.start()
-            print("[App2VMRunSession] Log polling started")
-        }
-    }
-
-    /// Stop log polling
-    private func stopLogPolling() {
-        logPollingStarting = false
-        logPollingService?.stop()
-        logPollingService = nil
     }
 
     // MARK: - Helper App (VM Host with Separate Dock Icon)

@@ -64,50 +64,17 @@ public final class FileTransferService: ObservableObject {
     private var ghostClient: GhostClient?
     private let maxConcurrentTransfers = 3
     private var activeTransferCount = 0
-    private var pollTimer: Timer?
 
     public init() {}
 
-    /// Configure the service with a GhostClient
+    /// Configure the service with a GhostClient (no polling)
     public func configure(client: GhostClient) {
         self.ghostClient = client
-        startPollingGuestQueue()
     }
 
-    /// Start polling guest for queued files
-    private func startPollingGuestQueue() {
-        pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.checkGuestQueue()
-            }
-        }
-    }
-
-    /// Check how many files are queued in the guest and fetch pending URLs
-    private func checkGuestQueue() async {
-        guard let client = ghostClient else { return }
-
-        // Check for queued files
-        do {
-            let files = try await client.listFiles()
-            queuedGuestFileCount = files.count
-        } catch {
-            // Silently fail - guest might not be connected
-        }
-
-        // Check for URLs to open on host
-        do {
-            let urls = try await client.fetchPendingURLs()
-            for urlString in urls {
-                if let url = URL(string: urlString) {
-                    print("[FileTransfer] Opening URL from guest: \(urlString)")
-                    NSWorkspace.shared.open(url)
-                }
-            }
-        } catch {
-            // Silently fail - guest might not be connected
-        }
+    /// Update the queued file list from EventStreamService push events
+    public func updateQueuedFiles(_ files: [String]) {
+        queuedGuestFileCount = files.count
     }
 
     /// Queue of files pending transfer (with relative paths for folder structure)

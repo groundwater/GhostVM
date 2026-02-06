@@ -50,9 +50,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var clipboardSyncService: ClipboardSyncService?
     private var portForwardService: PortForwardService?
     private var fileTransferService: FileTransferService?
-    private var logPollingService: LogPollingService?
-    private var healthCheckTimer: Timer?
+    private var eventStreamService: EventStreamService?
+    private var healthCheckService: HealthCheckService?
     private var fileTransferCancellable: AnyCancellable?
+    private var healthCheckCancellable: AnyCancellable?
+    private var windowFocusObservers: [NSObjectProtocol] = []
 
     // MARK: - App Lifecycle
 
@@ -274,13 +276,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard let syncMode = ClipboardSyncMode(rawValue: mode) else { return }
         clipboardSyncService?.setSyncMode(syncMode)
         helperToolbar?.setClipboardSyncMode(mode)
-
-        // Start service if switching from disabled to an active mode
-        if syncMode != .disabled,
-           let cbService = clipboardSyncService, !cbService.isActive,
-           let client = ghostClient {
-            cbService.start(client: client)
-        }
 
         // Persist per-VM
         let key = "clipboardSyncMode_\(vmBundleURL.path.stableHash)"
@@ -705,14 +700,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let client = GhostClient(virtualMachine: vm, vmQueue: queue)
         self.ghostClient = client
 
-        // 2. Health check timer (3s interval)
-        healthCheckTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            Task { @MainActor in
-                let connected = await client.checkHealth()
-                self.helperToolbar?.setGuestToolsConnected(connected)
+        // 2. Persistent health check (vsock port 5002)
+        let hcService = HealthCheckService()
+        hcService.start(client: client)
+        self.healthCheckService = hcService
+        // Bind isConnected to toolbar
+        healthCheckCancellable = hcService.$isConnected
+            .receive(on: RunLoop.main)
+            .sink { [weak self] connected in
+                self?.helperToolbar?.setGuestToolsConnected(connected)
             }
-        }
 
         // 3. Port forwarding
         let pfService = PortForwardService(vm: vm, queue: queue)
@@ -723,8 +720,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         updateToolbarPortForwards()
 
-        // 4. Clipboard sync
+        // 4. Clipboard sync (event-driven via window focus/blur)
         let cbService = ClipboardSyncService(bundlePath: vmBundleURL.path)
+        cbService.configure(client: client)
         self.clipboardSyncService = cbService
 
         // Load persisted mode
@@ -735,35 +733,59 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             helperToolbar?.setClipboardSyncMode(storedMode)
         }
 
-        if cbService.syncMode != .disabled {
-            cbService.start(client: client)
+        // Observe window focus/blur to trigger clipboard sync
+        if let win = self.window {
+            let becomeKeyObs = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: win,
+                queue: .main
+            ) { [weak self] _ in
+                self?.clipboardSyncService?.windowDidBecomeKey()
+            }
+            let resignKeyObs = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResignKeyNotification,
+                object: win,
+                queue: .main
+            ) { [weak self] _ in
+                self?.clipboardSyncService?.windowDidResignKey()
+            }
+            windowFocusObservers = [becomeKeyObs, resignKeyObs]
         }
 
-        // 5. File transfer
+        // 5. File transfer (no polling — driven by EventStreamService)
         let ftService = FileTransferService()
         ftService.configure(client: client)
         self.fileTransferService = ftService
-        fileTransferCancellable = ftService.$queuedGuestFileCount
-            .receive(on: RunLoop.main)
-            .sink { [weak self] count in
-                self?.helperToolbar?.setQueuedFileCount(count)
-            }
 
-        // 6. Log polling
-        let logService = LogPollingService(client: client)
-        self.logPollingService = logService
-        logService.start()
+        // 6. Event stream (replaces log polling + file queue polling + URL polling)
+        let esService = EventStreamService()
+        esService.start(client: client)
+        self.eventStreamService = esService
+        // Bind queued file count to toolbar
+        fileTransferCancellable = esService.$queuedGuestFiles
+            .receive(on: RunLoop.main)
+            .sink { [weak self] files in
+                self?.fileTransferService?.updateQueuedFiles(files)
+                self?.helperToolbar?.setQueuedFileCount(files.count)
+            }
 
         NSLog("GhostVMHelper: Services started for '\(vmName)'")
     }
 
     private func stopServices() {
-        healthCheckTimer?.invalidate()
-        healthCheckTimer = nil
+        healthCheckCancellable?.cancel()
+        healthCheckCancellable = nil
+        healthCheckService?.stop()
+        healthCheckService = nil
         helperToolbar?.setGuestToolsConnected(false)
 
         portForwardService?.stop()
         portForwardService = nil
+
+        for obs in windowFocusObservers {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        windowFocusObservers = []
 
         clipboardSyncService?.stop()
         clipboardSyncService = nil
@@ -772,8 +794,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         fileTransferCancellable = nil
         fileTransferService = nil
 
-        logPollingService?.stop()
-        logPollingService = nil
+        eventStreamService?.stop()
+        eventStreamService = nil
 
         ghostClient = nil
     }
