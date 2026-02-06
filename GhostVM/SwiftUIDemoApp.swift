@@ -48,10 +48,6 @@ struct GhostVMSwiftUIApp: App {
                 .environmentObject(restoreStore)
         }
 
-        WindowGroup("Market", id: "store") {
-            MarketplaceDemoView()
-        }
-
         // Real VM window shown when pressing Play.
         WindowGroup(id: "vm", for: App2VM.self) { vmBinding in
             if let vm = vmBinding.wrappedValue {
@@ -154,9 +150,6 @@ struct DemoAppCommands: Commands {
             Button("Restore Images") {
                 openWindow(id: "restoreImages")
             }
-            Button("Market") {
-                openWindow(id: "store")
-            }
         }
     }
 
@@ -227,14 +220,6 @@ struct VMListDemoView: View {
                     Label("Create", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-
-                Button {
-                    openWindow(id: "store")
-                } label: {
-                    Label("Market", systemImage: "cart")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
 
                 Spacer()
             }
@@ -2352,107 +2337,6 @@ struct FileTransferProgressView: View {
                 .shadow(radius: 8)
         )
         .frame(maxWidth: 300)
-    }
-}
-
-@available(macOS 13.0, *)
-struct MarketplaceDemoView: View {
-    private struct StoreItem: Identifiable, Hashable {
-        let id = UUID()
-        let name: String
-        let detail: String
-        let price: String
-    }
-
-    @State private var items: [StoreItem] = [
-        StoreItem(name: "Race Car Pack", detail: "High-speed virtual machines with bright racecar artwork.", price: "$4.99"),
-        StoreItem(name: "Unicorn Lab", detail: "Whimsical macOS guests with experimental settings.", price: "$3.99"),
-        StoreItem(name: "Galaxy Bundle", detail: "Starfield-themed VMs for space explorers.", price: "$5.99"),
-        StoreItem(name: "Retro Arcade", detail: "Pixel art desktops and chunky fonts for nostalgia.", price: "$2.99")
-    ]
-    @State private var selectionID: StoreItem.ID?
-    @State private var searchText: String = ""
-
-    private var selection: StoreItem? {
-        guard let selectionID else { return nil }
-        return items.first(where: { $0.id == selectionID })
-    }
-
-    private var filteredItems: [StoreItem] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return items }
-        return items.filter { item in
-            item.name.localizedCaseInsensitiveContains(query) ||
-            item.detail.localizedCaseInsensitiveContains(query)
-        }
-    }
-
-    var body: some View {
-        NavigationSplitView {
-            VStack(spacing: 8) {
-                TextField("Search market", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .padding([.top, .horizontal], 8)
-
-                List(filteredItems, selection: $selectionID) { item in
-                    Text(item.name)
-                        .tag(item.id)
-                }
-            }
-            .navigationTitle("Market")
-        } detail: {
-            if let item = selection {
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(item.name)
-                        .font(.largeTitle.bold())
-
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12)
-                            .fill(Color.secondary.opacity(0.15))
-                        Image(systemName: "shippingbox.fill")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 64, height: 64)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(height: 160)
-
-                    Text(item.detail)
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-
-                    Spacer()
-
-                    HStack {
-                        Spacer()
-                        Button {
-                            // Placeholder purchase action.
-                        } label: {
-                            Text(item.price)
-                                .font(.headline)
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-                }
-                .padding()
-            } else {
-                VStack(spacing: 12) {
-                    Image(systemName: "cart")
-                        .resizable()
-                        .scaledToFit()
-                        .frame(width: 80, height: 80)
-                        .foregroundStyle(.secondary)
-                    Text("Browse whimsical VM packs in the store.")
-                        .font(.title3)
-                    Text("Race cars, unicorns, galaxies, and more — all placeholder content for now.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .frame(minWidth: 640, minHeight: 380)
     }
 }
 
