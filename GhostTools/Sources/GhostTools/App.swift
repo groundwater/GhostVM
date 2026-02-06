@@ -4,7 +4,7 @@ import UserNotifications
 import CoreServices
 
 /// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.37.0"
+let kGhostToolsVersion = "1.38.0"
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
@@ -29,6 +29,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
     private var tunnelServer: TunnelServer?
+    private var healthServer: HealthServer?
     private var isServerRunning = false
 
     /// Files queued for sending to host (accessor for FileService)
@@ -71,6 +72,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerAsDefaultBrowser()
         startServer()
         startTunnelServer()
+        startHealthServer()
+        startEventPushServer()
         startUpdateChecker()
     }
 
@@ -355,6 +358,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         server?.stop()
         tunnelServer?.stop()
+        healthServer?.stop()
+        EventPushServer.shared.stop()
     }
 
     // MARK: - URL Handling
@@ -549,6 +554,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[GhostTools] Tunnel server started successfully")
             } catch {
                 print("[GhostTools] Failed to start tunnel server: \(error)")
+            }
+        }
+    }
+
+    private func startHealthServer() {
+        print("[GhostTools] startHealthServer() called")
+        Task {
+            do {
+                healthServer = HealthServer()
+                print("[GhostTools] Starting health server on vsock port 5002...")
+                try await healthServer?.start()
+                print("[GhostTools] Health server started successfully")
+            } catch {
+                print("[GhostTools] Failed to start health server: \(error)")
+            }
+        }
+    }
+
+    private func startEventPushServer() {
+        print("[GhostTools] startEventPushServer() called")
+        Task {
+            do {
+                print("[GhostTools] Starting event push server on vsock port 5003...")
+                try await EventPushServer.shared.start()
+                print("[GhostTools] Event push server started successfully")
+            } catch {
+                print("[GhostTools] Failed to start event push server: \(error)")
             }
         }
     }

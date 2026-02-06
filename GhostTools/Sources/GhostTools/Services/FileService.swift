@@ -78,13 +78,19 @@ final class FileService {
     func queueOutgoingFile(_ url: URL) {
         if !outgoingFiles.contains(url) {
             outgoingFiles.append(url)
+            EventPushServer.shared.pushEvent(.files(listOutgoingFiles()))
         }
     }
 
     /// Queue multiple files for sending to host
     func queueOutgoingFiles(_ urls: [URL]) {
         for url in urls {
-            queueOutgoingFile(url)
+            if !outgoingFiles.contains(url) {
+                outgoingFiles.append(url)
+            }
+        }
+        if !urls.isEmpty {
+            EventPushServer.shared.pushEvent(.files(listOutgoingFiles()))
         }
     }
 
