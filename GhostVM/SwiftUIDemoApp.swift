@@ -1010,6 +1010,20 @@ struct EditVMView: View {
     @State private var customIcon: NSImage?
     @State private var customIconChanged: Bool = false
     @State private var iconRemoved: Bool = false
+    @State private var selectedPresetIcon: String?
+
+    private static let presetIcons: [(name: String, resource: String)] = [
+        ("Daemon", "icon-daemon"),
+        ("Hipster", "icon-hipster"),
+        ("80s Bro", "icon-80s-bro"),
+        ("Quill", "icon-quill"),
+        ("Terminal", "icon-terminal"),
+        ("Banana", "icon-banana"),
+        ("Typewriter", "icon-typewriter"),
+        ("Nerd", "icon-nerd"),
+        ("Kernel", "icon-kernel"),
+        ("Papaya", "icon-papaya"),
+    ]
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -1026,53 +1040,7 @@ struct EditVMView: View {
                 ProgressView("Loading settings…")
                     .padding(.vertical, 8)
             } else {
-                labeledRow("Icon") {
-                    HStack(spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.secondary.opacity(0.1))
-                                .frame(width: 64, height: 64)
-
-                            if let icon = customIcon {
-                                Image(nsImage: icon)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(width: 56, height: 56)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                            } else {
-                                Image(systemName: "desktopcomputer")
-                                    .font(.system(size: 28))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .frame(width: 64, height: 64)
-                        .onTapGesture {
-                            selectIconFile()
-                        }
-                        .onDrop(of: [UTType.image], isTargeted: nil) { providers in
-                            handleIconDrop(providers)
-                        }
-                        .help("Click to choose an icon, or drag and drop an image")
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Button("Choose Image…") {
-                                selectIconFile()
-                            }
-                            .buttonStyle(.borderless)
-
-                            if customIcon != nil {
-                                Button(role: .destructive) {
-                                    customIcon = nil
-                                    customIconChanged = true
-                                    iconRemoved = true
-                                } label: {
-                                    Label("Remove", systemImage: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                            }
-                        }
-                    }
-                }
+                iconRow
 
                 labeledRow("CPUs") {
                     HStack(spacing: 8) {
@@ -1157,7 +1125,7 @@ struct EditVMView: View {
             }
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
-        .frame(minWidth: 520)
+        .frame(minWidth: 620)
         .onAppear {
             loadCurrentSettings()
         }
@@ -1166,6 +1134,83 @@ struct EditVMView: View {
         } message: {
             Text(errorMessage ?? "An unknown error occurred.")
         }
+    }
+
+    private var iconRow: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text("Icon")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: labelWidth, alignment: .leading)
+                .padding(.top, 4)
+
+            let columns = Array(repeating: GridItem(.fixed(80), spacing: 8), count: 4)
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                // "None" tile
+                iconTile(selected: customIcon == nil && selectedPresetIcon == nil) {
+                    Image(systemName: "desktopcomputer")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                } action: {
+                    customIcon = nil
+                    selectedPresetIcon = nil
+                    customIconChanged = true
+                    iconRemoved = true
+                }
+
+                // Preset icon tiles
+                ForEach(Self.presetIcons, id: \.resource) { preset in
+                    let isSelected = selectedPresetIcon == preset.resource
+                    iconTile(selected: isSelected) {
+                        if let img = NSImage(named: preset.resource) {
+                            Image(nsImage: img)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
+                                .frame(width: 80, height: 80)
+                                .clipped()
+                        }
+                    } action: {
+                        if let img = NSImage(named: preset.resource) {
+                            customIcon = img
+                            selectedPresetIcon = preset.resource
+                            customIconChanged = true
+                            iconRemoved = false
+                        }
+                    }
+                }
+
+                // "Custom..." tile
+                iconTile(selected: customIcon != nil && selectedPresetIcon == nil) {
+                    Image(systemName: "plus.square")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                } action: {
+                    selectIconFile()
+                }
+            }
+        }
+        .onDrop(of: [UTType.image], isTargeted: nil) { providers in
+            handleIconDrop(providers)
+        }
+    }
+
+    private func iconTile<Icon: View>(
+        selected: Bool,
+        @ViewBuilder icon: () -> Icon,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color.secondary.opacity(0.1))
+                    .frame(width: 80, height: 80)
+                icon()
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2)
+            )
+        }
+        .buttonStyle(.plain)
     }
 
     @ViewBuilder
@@ -1278,6 +1323,7 @@ struct EditVMView: View {
         if panel.runModal() == .OK, let url = panel.url,
            let image = NSImage(contentsOf: url) {
             customIcon = image
+            selectedPresetIcon = nil
             customIconChanged = true
             iconRemoved = false
         }
@@ -1291,10 +1337,12 @@ struct EditVMView: View {
                 DispatchQueue.main.async {
                     if let url = item as? URL, let image = NSImage(contentsOf: url) {
                         self.customIcon = image
+                        self.selectedPresetIcon = nil
                         self.customIconChanged = true
                         self.iconRemoved = false
                     } else if let data = item as? Data, let image = NSImage(data: data) {
                         self.customIcon = image
+                        self.selectedPresetIcon = nil
                         self.customIconChanged = true
                         self.iconRemoved = false
                     }
@@ -1751,7 +1799,7 @@ struct VMWindowView: View {
     @EnvironmentObject private var store: App2VMStore
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
-    @StateObject private var connectionMonitor = GuestToolsConnectionMonitor()
+    @StateObject private var healthCheckService = HealthCheckService()
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
     @State private var showPortForwardEditor = false
 
@@ -1876,13 +1924,13 @@ struct VMWindowView: View {
             ToolbarItem(placement: .automatic) {
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(connectionMonitor.isConnected ? Color.green : Color.gray.opacity(0.5))
+                        .fill(healthCheckService.isConnected ? Color.green : Color.gray.opacity(0.5))
                         .frame(width: 8, height: 8)
                     Text("Guest Tools")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
-                .help(connectionMonitor.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
+                .help(healthCheckService.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
             }
             ToolbarItem(placement: .automatic) {
                 Menu {
@@ -1996,13 +2044,13 @@ struct VMWindowView: View {
             if let vm = vm, let queue = session.vmQueue {
                 let client = GhostClient(virtualMachine: vm, vmQueue: queue)
                 fileTransferService.configure(client: client)
-                connectionMonitor.configure(client: client)
+                healthCheckService.start(client: client)
             } else {
-                connectionMonitor.stopMonitoring()
+                healthCheckService.stop()
             }
         }
         .onDisappear {
-            connectionMonitor.stopMonitoring()
+            healthCheckService.stop()
             session.stopIfNeeded()
         }
         .focusedSceneValue(\.vmSession, session)
@@ -2018,7 +2066,6 @@ struct SettingsDemoView: View {
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
     @State private var showRacecarBackground: Bool = true
-    @State private var iconMode: DemoIconMode = .system
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     private let labelWidth: CGFloat = 130
@@ -2094,7 +2141,10 @@ struct SettingsDemoView: View {
             }
 
             labeledRow("App Icon") {
-                Picker("", selection: $iconMode) {
+                Picker("", selection: Binding(
+                    get: { AppIconAdapter.shared.iconMode },
+                    set: { AppIconAdapter.shared.iconMode = $0 }
+                )) {
                     ForEach(DemoIconMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
                     }
@@ -2129,12 +2179,6 @@ struct SettingsDemoView: View {
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 320)
-        .onAppear {
-            AppIconAdapter.updateIcon(for: iconMode)
-        }
-        .onChange(of: iconMode) { _, newValue in
-            AppIconAdapter.updateIcon(for: newValue)
-        }
     }
 
     @ViewBuilder
@@ -2345,49 +2389,4 @@ struct FileTransferProgressView: View {
     }
 }
 
-// MARK: - Guest Tools Connection Monitor
-
-@available(macOS 13.0, *)
-@MainActor
-final class GuestToolsConnectionMonitor: ObservableObject {
-    @Published private(set) var isConnected: Bool = false
-    @Published private(set) var isChecking: Bool = false
-
-    private var client: GhostClient?
-    private var checkTask: Task<Void, Never>?
-    private let checkInterval: TimeInterval = 3.0
-
-    func configure(client: GhostClient) {
-        self.client = client
-        startMonitoring()
-    }
-
-    func startMonitoring() {
-        stopMonitoring()
-        checkTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                await self?.checkConnection()
-                try? await Task.sleep(nanoseconds: UInt64((self?.checkInterval ?? 3.0) * 1_000_000_000))
-            }
-        }
-    }
-
-    func stopMonitoring() {
-        checkTask?.cancel()
-        checkTask = nil
-        isConnected = false
-    }
-
-    private func checkConnection() async {
-        guard let client = client else {
-            isConnected = false
-            return
-        }
-
-        isChecking = true
-        let connected = await client.checkHealth()
-        isConnected = connected
-        isChecking = false
-    }
-}
 

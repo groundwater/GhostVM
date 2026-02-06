@@ -34,6 +34,10 @@ final class App2AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        AppIconAdapter.shared.start()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         // VMs run in independent helper processes — let the main app quit immediately.
         return .terminateNow
