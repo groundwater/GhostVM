@@ -35,18 +35,7 @@ final class App2AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // If there are active VM sessions, suspend them all before quitting
-        guard App2VMSessionRegistry.shared.hasActiveSessions else {
-            return .terminateNow
-        }
-
-        // Suspend all running VMs, then quit
-        App2VMSessionRegistry.shared.suspendAllSessions {
-            DispatchQueue.main.async {
-                NSApplication.shared.reply(toApplicationShouldTerminate: true)
-            }
-        }
-
-        return .terminateLater
+        // VMs run in independent helper processes — let the main app quit immediately.
+        return .terminateNow
     }
 }

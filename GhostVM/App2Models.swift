@@ -185,16 +185,30 @@ final class App2VMStore: ObservableObject {
         }
 
         var discovered: [App2VM] = []
+        var runningVMs: [(App2VM, pid_t)] = []
         for path in stored {
             let url = URL(fileURLWithPath: path).standardizedFileURL
             if fileManager.fileExists(atPath: url.path),
-               let vm = try? loadVM(from: url) {
+               let (vm, pid) = try? loadVMWithPID(from: url) {
                 discovered.append(vm)
+                if let pid = pid {
+                    runningVMs.append((vm, pid))
+                }
             }
         }
 
         discovered.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         vms = discovered
+
+        // Reconnect to helpers that are still running from before the app quit
+        for (vm, pid) in runningVMs {
+            App2VMSessionRegistry.shared.startVM(
+                bundleURL: vm.bundleURL,
+                store: self,
+                vmID: vm.id,
+                runningPID: pid
+            )
+        }
     }
 
     private func persistKnownVMs() {
@@ -203,6 +217,11 @@ final class App2VMStore: ObservableObject {
     }
 
     private func loadVM(from bundleURL: URL) throws -> App2VM {
+        let (vm, _) = try loadVMWithPID(from: bundleURL)
+        return vm
+    }
+
+    private func loadVMWithPID(from bundleURL: URL) throws -> (App2VM, pid_t?) {
         // Use framework's VMController to load entry
         let entry = try controller.loadEntry(for: bundleURL)
 
@@ -217,7 +236,7 @@ final class App2VMStore: ObservableObject {
             osVersion = "Not Installed"
         }
 
-        return App2VM(
+        let vm = App2VM(
             id: UUID(),
             name: entry.name,
             bundlePath: bundleURL.path,
@@ -227,5 +246,6 @@ final class App2VMStore: ObservableObject {
             installerISOPath: entry.installerISOPath,
             installed: entry.installed
         )
+        return (vm, entry.runningPID)
     }
 }

@@ -38,13 +38,14 @@ final class App2VMSessionRegistry {
         session?.terminate()
     }
 
-    /// Starts a VM by launching its helper app. Creates a session if needed.
-    /// This is used when no window is needed in the main app (helper provides the window).
+    /// Starts a VM by launching its helper app, or reconnects to an existing helper.
+    /// Creates a session if needed.
     /// - Parameters:
     ///   - bundleURL: The VM bundle URL
     ///   - store: The VM store to update status in
     ///   - vmID: The VM's ID in the store for status updates
-    func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID) {
+    ///   - runningPID: If non-nil, reconnect to an already-running helper instead of launching a new one
+    func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil) {
         let path = bundleURL.standardizedFileURL.path
         lock.lock()
         var session = sessions[path]
@@ -78,63 +79,13 @@ final class App2VMSessionRegistry {
             }
         }
 
-        session?.startIfNeeded()
-    }
-
-    /// Returns true if there are any active (running) sessions.
-    var hasActiveSessions: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return sessions.values.contains { session in
-            switch session.state {
-            case .running, .starting, .stopping, .suspending:
-                return true
-            default:
-                return false
-            }
+        if let pid = runningPID {
+            session?.reconnectToRunningHelper(pid: pid)
+        } else {
+            session?.startIfNeeded()
         }
     }
 
-    /// Suspends all running sessions. Calls completion when all are done.
-    func suspendAllSessions(completion: @escaping () -> Void) {
-        lock.lock()
-        let runningSessions = sessions.values.filter { session in
-            if case .running = session.state { return true }
-            return false
-        }
-        lock.unlock()
-
-        guard !runningSessions.isEmpty else {
-            completion()
-            return
-        }
-
-        let group = DispatchGroup()
-        var observations: [AnyCancellable] = []
-
-        for session in runningSessions {
-            group.enter()
-            var didLeave = false
-            let observation = session.$state.sink { state in
-                guard !didLeave else { return }
-                switch state {
-                case .stopped, .failed, .idle:
-                    didLeave = true
-                    group.leave()
-                default:
-                    break
-                }
-            }
-            observations.append(observation)
-            session.suspend()
-        }
-
-        group.notify(queue: .main) {
-            // Cancel observations after completion
-            observations.forEach { $0.cancel() }
-            completion()
-        }
-    }
 }
 
 // Minimal runtime controller for a single VM bundle.
@@ -512,6 +463,37 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         }
         helperProcess = nil
         App2VMSessionRegistry.shared.unregister(self)
+    }
+
+    /// Reconnect to an already-running helper process (e.g. after main app relaunch).
+    /// Registers for state notifications and finds the running process by PID.
+    func reconnectToRunningHelper(pid: pid_t) {
+        guard case .idle = state else { return }  // Only reconnect from idle state
+
+        // Find the running application by PID
+        let runningApp = NSWorkspace.shared.runningApplications.first {
+            $0.processIdentifier == pid
+        }
+        guard let app = runningApp, !app.isTerminated else {
+            print("[App2VMRunSession] Helper process \(pid) not found or already terminated for '\(vmName)'")
+            return
+        }
+
+        // Register for state change notifications from helper
+        let standardizedPath = bundleURL.standardizedFileURL.path
+        let bundlePathHash = standardizedPath.stableHash
+        print("[App2VMRunSession] Reconnecting to helper (PID \(pid)) for '\(vmName)'")
+        helperStateObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleHelperStateChange(notification)
+        }
+
+        helperProcess = app
+        App2VMSessionRegistry.shared.register(self)
+        transition(to: .running, message: "Running")
     }
 
     func startIfNeeded() {
