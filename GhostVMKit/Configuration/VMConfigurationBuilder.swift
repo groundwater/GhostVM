@@ -2,16 +2,6 @@ import Foundation
 import AppKit
 import Virtualization
 
-/// Result of building a VM configuration, including network filter state.
-public struct VMConfigurationResult {
-    public let configuration: VZVirtualMachineConfiguration
-    /// Host-side FD of the socketpair for network filtering.
-    /// Always present — the socketpair is always created so policy can be switched at runtime.
-    /// The caller is responsible for closing this FD when done.
-    public let networkFilterFD: Int32
-    public let networkPolicy: NetworkAccessPolicy
-}
-
 /// Builds VZVirtualMachineConfiguration from stored config and layout.
 public final class VMConfigurationBuilder {
     public let layout: VMFileLayout
@@ -22,7 +12,7 @@ public final class VMConfigurationBuilder {
         self.storedConfig = storedConfig
     }
 
-    public func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VMConfigurationResult {
+    public func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VZVirtualMachineConfiguration {
         let config = VZVirtualMachineConfiguration()
         let isLinux = storedConfig.guestOSType == "Linux"
 
@@ -77,21 +67,8 @@ public final class VMConfigurationBuilder {
 
         config.storageDevices = storageDevices
 
-        // Network device — always use socketpair so policy can be switched at runtime
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        let networkPolicy = storedConfig.networkAccessPolicy
-
-        // Create a socketpair: VM end gets a FileHandle attachment, host end
-        // goes to NetworkFilterService for inspection/forwarding.
-        var fds: [Int32] = [0, 0]
-        guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &fds) == 0 else {
-            throw VMError.message("Failed to create socketpair for network filtering: \(String(cString: strerror(errno)))")
-        }
-        let vmFD = fds[0]
-        let hostFD = fds[1]
-
-        let vmFileHandle = FileHandle(fileDescriptor: vmFD, closeOnDealloc: true)
-        networkDevice.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: vmFileHandle)
+        networkDevice.attachment = VZNATNetworkDeviceAttachment()
 
         // Use persistent MAC address from config to ensure suspend/resume consistency.
         if let macAddressString = storedConfig.macAddress,
@@ -185,7 +162,7 @@ public final class VMConfigurationBuilder {
         } catch {
             throw VMError.message("Invalid VM configuration: \(error.localizedDescription)")
         }
-        return VMConfigurationResult(configuration: config, networkFilterFD: hostFD, networkPolicy: networkPolicy)
+        return config
     }
 
     /// Finds GhostTools.dmg in the app bundle or build output directory.

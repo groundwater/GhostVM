@@ -51,11 +51,9 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
         self.bundlePath = bundleURL.path
         self.layout = layout
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
-        let result = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
-        // Close network filter FD — WindowlessVMSession doesn't support filtering
-        close(result.networkFilterFD)
+        let configuration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
         self.vmQueue = DispatchQueue(label: "vmctl.windowless.\(name)")
-        self._virtualMachine = VZVirtualMachine(configuration: result.configuration, queue: vmQueue)
+        self._virtualMachine = VZVirtualMachine(configuration: configuration, queue: vmQueue)
         super.init()
 
         self._virtualMachine.delegate = self

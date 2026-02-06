@@ -46,8 +46,6 @@ public struct VMStoredConfig: Codable {
     public var guestToolsInstalled: Bool
     // Port forwarding configuration
     public var portForwards: [PortForwardConfig]
-    // Network access policy
-    public var networkAccessPolicy: NetworkAccessPolicy
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -76,7 +74,6 @@ public struct VMStoredConfig: Codable {
         case installerISOPath
         case guestToolsInstalled
         case portForwards
-        case networkAccessPolicy
     }
 
     public init(
@@ -105,8 +102,7 @@ public struct VMStoredConfig: Codable {
         efiVariableStorePath: String? = nil,
         installerISOPath: String? = nil,
         guestToolsInstalled: Bool = false,
-        portForwards: [PortForwardConfig] = [],
-        networkAccessPolicy: NetworkAccessPolicy = .fullAccess
+        portForwards: [PortForwardConfig] = []
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -134,7 +130,6 @@ public struct VMStoredConfig: Codable {
         self.installerISOPath = installerISOPath
         self.guestToolsInstalled = guestToolsInstalled
         self.portForwards = portForwards
-        self.networkAccessPolicy = networkAccessPolicy
     }
 
     public init(from decoder: Decoder) throws {
@@ -168,16 +163,6 @@ public struct VMStoredConfig: Codable {
         guestToolsInstalled = try container.decodeIfPresent(Bool.self, forKey: .guestToolsInstalled) ?? false
         // Port forwards - defaults to empty for backwards compatibility
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
-        // Decode network access policy with migration from old case names
-        if let rawPolicy = try container.decodeIfPresent(String.self, forKey: .networkAccessPolicy) {
-            switch rawPolicy {
-            case "noLocalNetwork": networkAccessPolicy = .internetOnly
-            case "noInternet", "isolated": networkAccessPolicy = .disableNetwork
-            default: networkAccessPolicy = NetworkAccessPolicy(rawValue: rawPolicy) ?? .fullAccess
-            }
-        } else {
-            networkAccessPolicy = .fullAccess
-        }
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {

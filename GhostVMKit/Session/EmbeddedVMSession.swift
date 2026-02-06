@@ -50,11 +50,9 @@ public final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachi
         self.bundlePath = bundleURL.path
         self.layout = layout
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
-        let result = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
-        // Close network filter FD — EmbeddedVMSession doesn't support filtering
-        close(result.networkFilterFD)
+        let configuration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
         self.vmQueue = DispatchQueue(label: "vmctl.embedded.\(name)")
-        self.virtualMachine = VZVirtualMachine(configuration: result.configuration, queue: vmQueue)
+        self.virtualMachine = VZVirtualMachine(configuration: configuration, queue: vmQueue)
         let ui = EmbeddedVMSession.makeWindowAndView(name: name)
         self.window = ui.window
         self.vmView = ui.view

@@ -686,11 +686,10 @@ public final class VMController {
         let restoreImage = try loadRestoreImage(from: restoreImageURL)
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let configResult = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: true, runtimeSharedFolder: nil)
-        close(configResult.networkFilterFD)
+        let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: true, runtimeSharedFolder: nil)
 
         let vmQueue = DispatchQueue(label: "vmctl.install.\(vmName)")
-        let virtualMachine = VZVirtualMachine(configuration: configResult.configuration, queue: vmQueue)
+        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
 
         let installer: VZMacOSInstaller = vmQueue.sync {
             VZMacOSInstaller(virtualMachine: virtualMachine, restoringFromImageAt: restoreImageURL)
@@ -756,11 +755,10 @@ public final class VMController {
         let restoreImage = try loadRestoreImage(from: restoreImageURL)
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let configResult = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
-        close(configResult.networkFilterFD)
+        let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
 
         let vmQueue = DispatchQueue(label: "ghostvm.install.\(vmName)")
-        let virtualMachine = VZVirtualMachine(configuration: configResult.configuration, queue: vmQueue)
+        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
 
         let installer: VZMacOSInstaller = vmQueue.sync {
             VZMacOSInstaller(virtualMachine: virtualMachine, restoringFromImageAt: restoreImageURL)
@@ -836,10 +834,9 @@ public final class VMController {
         }
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let configResult = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
-        close(configResult.networkFilterFD)
+        let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
         let vmQueue = DispatchQueue(label: "vmctl.run.\(vmName)")
-        let virtualMachine = VZVirtualMachine(configuration: configResult.configuration, queue: vmQueue)
+        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
         let pid = getpid()
         try writeVMLockOwner(.cli(pid), to: layout.pidFileURL)
 
@@ -1355,10 +1352,9 @@ public final class VMController {
         }
 
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let configResult = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
-        close(configResult.networkFilterFD)
+        let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
         let vmQueue = DispatchQueue(label: "vmctl.resume.\(vmName)")
-        let virtualMachine = VZVirtualMachine(configuration: configResult.configuration, queue: vmQueue)
+        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
         let pid = getpid()
         try writeVMLockOwner(.cli(pid), to: layout.pidFileURL)
 
