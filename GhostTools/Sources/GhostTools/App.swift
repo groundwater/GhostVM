@@ -4,7 +4,7 @@ import UserNotifications
 import CoreServices
 
 /// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.35.0"
+let kGhostToolsVersion = "1.37.0"
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
@@ -470,6 +470,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.canChooseFiles = true
         panel.message = "Select files to send to host"
         panel.prompt = "Send"
+
+        // Force the panel above all other windows (GhostTools is a menu bar
+        // app with no key window, so the panel would otherwise appear behind
+        // the frontmost app).
+        panel.level = .floating
+        NSApp.activate(ignoringOtherApps: true)
 
         panel.begin { [weak self] response in
             guard response == .OK else { return }

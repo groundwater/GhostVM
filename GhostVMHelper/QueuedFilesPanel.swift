@@ -6,10 +6,11 @@ protocol QueuedFilesPanelDelegate: AnyObject {
     func queuedFilesPanelDidDeny(_ panel: QueuedFilesPanel)
 }
 
-/// NSPopover-based panel showing queued guest files with Allow/Deny actions
-final class QueuedFilesPanel: NSObject {
+/// NSPopover-based panel showing queued guest files with Save/Decline actions
+final class QueuedFilesPanel: NSObject, NSPopoverDelegate {
 
     weak var delegate: QueuedFilesPanelDelegate?
+    var onClose: (() -> Void)?
 
     private var popover: NSPopover?
     private var fileNames: [String] = []
@@ -17,8 +18,8 @@ final class QueuedFilesPanel: NSObject {
 
     func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
         let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentSize = NSSize(width: 280, height: 160)
+        popover.behavior = .applicationDefined
+        popover.delegate = self
 
         let vc = QueuedFilesContentViewController()
         vc.delegate = self
@@ -32,12 +33,19 @@ final class QueuedFilesPanel: NSObject {
 
     func close() {
         popover?.close()
-        popover = nil
     }
 
     func setFileNames(_ names: [String]) {
         fileNames = names
         contentViewController?.setFileNames(names)
+    }
+
+    // MARK: - NSPopoverDelegate
+
+    func popoverDidClose(_ notification: Notification) {
+        popover = nil
+        contentViewController = nil
+        onClose?()
     }
 }
 
@@ -63,70 +71,92 @@ final class QueuedFilesContentViewController: NSViewController {
     weak var delegate: QueuedFilesContentViewControllerDelegate?
 
     private var fileNames: [String] = []
-    private var stackView: NSStackView!
+    private var fileListStack: NSStackView!
+    private var subtitleLabel: NSTextField!
 
     override func loadView() {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 280, height: 160))
-        container.translatesAutoresizingMaskIntoConstraints = false
+        let container = NSView()
 
         // Title
         let titleLabel = NSTextField(labelWithString: "Files from Guest")
-        titleLabel.font = .boldSystemFont(ofSize: 13)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(titleLabel)
 
-        // Scroll view with file name stack
+        // Subtitle
+        subtitleLabel = NSTextField(labelWithString: subtitleText())
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(subtitleLabel)
+
+        // File list in scroll view
         let scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
 
-        stackView = NSStackView()
-        stackView.orientation = .vertical
-        stackView.alignment = .leading
-        stackView.spacing = 2
-        stackView.translatesAutoresizingMaskIntoConstraints = false
+        fileListStack = NSStackView()
+        fileListStack.orientation = .vertical
+        fileListStack.alignment = .leading
+        fileListStack.spacing = 4
+        fileListStack.translatesAutoresizingMaskIntoConstraints = false
 
         let clipView = NSClipView()
-        clipView.documentView = stackView
+        clipView.documentView = fileListStack
         clipView.drawsBackground = false
         scrollView.contentView = clipView
-
-        // Pin stackView width to clipView
-        stackView.widthAnchor.constraint(equalTo: clipView.widthAnchor).isActive = true
+        fileListStack.widthAnchor.constraint(equalTo: clipView.widthAnchor).isActive = true
 
         container.addSubview(scrollView)
 
-        // Button row
-        let denyButton = NSButton(title: "Deny", target: self, action: #selector(denyClicked))
-        denyButton.translatesAutoresizingMaskIntoConstraints = false
-        denyButton.bezelStyle = .rounded
-        container.addSubview(denyButton)
+        // Info label
+        let infoLabel = NSTextField(labelWithString: "Saved to ~/Downloads")
+        infoLabel.font = .systemFont(ofSize: 11)
+        infoLabel.textColor = .tertiaryLabelColor
+        infoLabel.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(infoLabel)
 
-        let allowButton = NSButton(title: "Allow", target: self, action: #selector(allowClicked))
-        allowButton.translatesAutoresizingMaskIntoConstraints = false
-        allowButton.bezelStyle = .rounded
-        allowButton.keyEquivalent = "\r"
-        container.addSubview(allowButton)
+        // Buttons
+        let declineButton = NSButton(title: "Decline", target: self, action: #selector(denyClicked))
+        declineButton.bezelStyle = .rounded
+        declineButton.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(declineButton)
+
+        let saveButton = NSButton(title: "Save", target: self, action: #selector(allowClicked))
+        saveButton.bezelStyle = .rounded
+        saveButton.keyEquivalent = "\r"
+        saveButton.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(saveButton)
 
         // Layout
+        let padding: CGFloat = 16
+
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
+            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
+            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
 
-            scrollView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8),
-            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 12),
-            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
+            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
 
-            allowButton.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 12),
-            allowButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -12),
-            allowButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
+            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 110),
 
-            denyButton.centerYAnchor.constraint(equalTo: allowButton.centerYAnchor),
-            denyButton.trailingAnchor.constraint(equalTo: allowButton.leadingAnchor, constant: -8),
+            infoLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 10),
+            infoLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
 
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 40),
+            saveButton.topAnchor.constraint(equalTo: infoLabel.bottomAnchor, constant: 12),
+            saveButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
+            saveButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+
+            declineButton.centerYAnchor.constraint(equalTo: saveButton.centerYAnchor),
+            declineButton.trailingAnchor.constraint(equalTo: saveButton.leadingAnchor, constant: -8),
+
+            container.widthAnchor.constraint(equalToConstant: 300),
         ])
 
         rebuildFileList()
@@ -135,23 +165,45 @@ final class QueuedFilesContentViewController: NSViewController {
 
     func setFileNames(_ names: [String]) {
         fileNames = names
+        subtitleLabel?.stringValue = subtitleText()
         rebuildFileList()
     }
 
-    private func rebuildFileList() {
-        guard let stackView = stackView else { return }
+    private func subtitleText() -> String {
+        let count = fileNames.count
+        if count == 1 { return "1 file ready to download" }
+        return "\(count) files ready to download"
+    }
 
-        // Remove existing labels
-        for view in stackView.arrangedSubviews {
-            stackView.removeArrangedSubview(view)
+    private func rebuildFileList() {
+        guard let fileListStack = fileListStack else { return }
+
+        for view in fileListStack.arrangedSubviews {
+            fileListStack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
 
         for name in fileNames {
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.spacing = 6
+            row.alignment = .centerY
+
+            if let docImage = NSImage(systemSymbolName: "doc", accessibilityDescription: "File") {
+                let icon = NSImageView(image: docImage)
+                icon.contentTintColor = .secondaryLabelColor
+                icon.translatesAutoresizingMaskIntoConstraints = false
+                icon.widthAnchor.constraint(equalToConstant: 14).isActive = true
+                icon.heightAnchor.constraint(equalToConstant: 14).isActive = true
+                row.addArrangedSubview(icon)
+            }
+
             let label = NSTextField(labelWithString: name)
             label.font = .systemFont(ofSize: 12)
             label.lineBreakMode = .byTruncatingMiddle
-            stackView.addArrangedSubview(label)
+            row.addArrangedSubview(label)
+
+            fileListStack.addArrangedSubview(row)
         }
     }
 

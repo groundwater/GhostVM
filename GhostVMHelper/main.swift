@@ -103,6 +103,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+        helperToolbar?.showQueuedFilesPopoverIfNeeded()
         return true
     }
 
@@ -324,11 +325,20 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar) {
+        window?.level = .normal
         fileTransferService?.fetchAllGuestFiles()
+        restoreVMViewFocus()
     }
 
     func toolbarDidRequestDenyFiles(_ toolbar: HelperToolbar) {
+        window?.level = .normal
         fileTransferService?.clearGuestFileQueue()
+        restoreVMViewFocus()
+    }
+
+    func toolbarQueuedFilesPanelDidClose(_ toolbar: HelperToolbar) {
+        window?.level = .normal
+        restoreVMViewFocus()
     }
 
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
@@ -336,6 +346,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             let files = (try? await fileTransferService?.listGuestFiles()) ?? []
             let names = files.map { URL(fileURLWithPath: $0).lastPathComponent }
             helperToolbar?.setQueuedFileNames(names)
+
+            // Float the window above ALL other apps — this is the only
+            // reliable way to appear in front on macOS 14+.
+            window?.level = .floating
+            window?.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.requestUserAttention(.criticalRequest)
+
+            try? await Task.sleep(for: .milliseconds(200))
+
             helperToolbar?.showQueuedFilesPopover()
         }
     }
@@ -353,6 +373,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func fileTransfer(didReceiveFiles files: [FileWithRelativePath]) {
         NSLog("GhostVMHelper: Sending \(files.count) file(s) to guest")
         fileTransferService?.sendFiles(files)
+    }
+
+    private func restoreVMViewFocus() {
+        if let vmView = vmView {
+            window?.makeFirstResponder(vmView)
+        }
     }
 
     // MARK: - Notifications

@@ -25,6 +25,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var portForwardCount = 0
     private var clipboardSyncMode = "disabled"
     private var queuedFileCount = 0
+    private var queuedFileNames: [String] = []
 
     private var guestToolsItem: NSToolbarItem?
     private var portForwardsItem: NSMenuToolbarItem?
@@ -358,7 +359,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     }
 
     func setQueuedFileNames(_ names: [String]) {
+        queuedFileNames = names
         queuedFilesPanel?.setFileNames(names)
+    }
+
+    func showQueuedFilesPopoverIfNeeded() {
+        guard queuedFileCount > 0, queuedFilesPanel == nil else { return }
+        showQueuedFilesPopover()
     }
 
     func showQueuedFilesPopover() {
@@ -368,6 +375,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
         let panel = QueuedFilesPanel()
         panel.delegate = self
+        panel.setFileNames(queuedFileNames)
+        panel.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.queuedFilesPanel = nil
+            self.delegate?.toolbarQueuedFilesPanelDidClose(self)
+        }
         panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         queuedFilesPanel = panel
     }
@@ -395,12 +408,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     func queuedFilesPanelDidAllow(_ panel: QueuedFilesPanel) {
         panel.close()
         queuedFilesPanel = nil
+        queuedFileNames = []
         delegate?.toolbarDidRequestReceiveFiles(self)
     }
 
     func queuedFilesPanelDidDeny(_ panel: QueuedFilesPanel) {
         panel.close()
         queuedFilesPanel = nil
+        queuedFileNames = []
         delegate?.toolbarDidRequestDenyFiles(self)
     }
 }
@@ -417,4 +432,5 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar)
     func toolbarDidRequestShutDown(_ toolbar: HelperToolbar)
     func toolbarDidRequestTerminate(_ toolbar: HelperToolbar)
+    func toolbarQueuedFilesPanelDidClose(_ toolbar: HelperToolbar)
 }
