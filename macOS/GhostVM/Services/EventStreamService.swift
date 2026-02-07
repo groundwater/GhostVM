@@ -36,22 +36,27 @@ public final class EventStreamService: ObservableObject {
         while !Task.isCancelled {
             guard let client = client else { break }
 
+            NSLog("EventStream: connecting to port %u...", port)
+
             do {
                 // IMPORTANT: Hold `connection` alive — dropping it closes the fd.
                 let connection = try await client.connectRaw(port: port)
                 let fd = connection.fileDescriptor
+
+                NSLog("EventStream: connected (fd=%d), reading NDJSON lines...", fd)
 
                 // Read NDJSON lines on background queue.
                 // `connection` is captured to keep it alive.
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     DispatchQueue.global(qos: .utility).async { [weak self] in
                         self?.readLines(fd: fd)
+                        NSLog("EventStream: connection lost (EOF)")
                         connection.close()
                         continuation.resume()
                     }
                 }
             } catch {
-                // Connection failed - guest not ready
+                NSLog("EventStream: connection failed: %@", error.localizedDescription)
             }
 
             // Wait before retrying

@@ -1,78 +1,11 @@
 import Foundation
 import Virtualization
-
-/// Errors that can occur when communicating with the guest
-public enum GhostClientError: Error, LocalizedError {
-    case notConnected
-    case noContent
-    case invalidResponse(Int)
-    case encodingError
-    case decodingError
-    case connectionFailed(String)
-    case timeout
-
-    public var errorDescription: String? {
-        switch self {
-        case .notConnected:
-            return "Not connected to guest"
-        case .noContent:
-            return "No content available"
-        case .invalidResponse(let code):
-            return "Invalid response from guest (status \(code))"
-        case .encodingError:
-            return "Failed to encode request"
-        case .decodingError:
-            return "Failed to decode response"
-        case .connectionFailed(let reason):
-            return "Connection failed: \(reason)"
-        case .timeout:
-            return "Connection timed out"
-        }
-    }
-}
-
-/// Response from GET /clipboard endpoint
-public struct ClipboardGetResponse: Codable {
-    public let content: String?
-    public let type: String?
-    public let changeCount: Int?
-}
-
-/// Response from POST /files/receive endpoint
-public struct FileReceiveResponse: Codable {
-    public let path: String
-}
-
-/// Response from GET /files endpoint
-public struct FileListResponse: Codable {
-    public let files: [String]
-}
-
-/// Response from GET /urls endpoint
-public struct URLListResponse: Codable {
-    public let urls: [String]
-}
-
-/// Response from GET /logs endpoint
-public struct LogListResponse: Codable {
-    public let logs: [String]
-}
-
-/// Request body for POST /clipboard endpoint
-public struct ClipboardPostRequest: Codable {
-    public let content: String
-    public let type: String
-
-    public init(content: String, type: String = "public.utf8-plain-text") {
-        self.content = content
-        self.type = type
-    }
-}
+import GhostVMKit
 
 /// HTTP client for communicating with GhostTools running in the guest VM
 /// Supports both vsock (production) and TCP (development) connections
 @MainActor
-public final class GhostClient {
+public final class GhostClient: GhostClientProtocol {
     private nonisolated(unsafe) let virtualMachine: VZVirtualMachine?
     private nonisolated(unsafe) let vmQueue: DispatchQueue?
     private let vsockPort: UInt32 = 5000
@@ -318,20 +251,27 @@ public final class GhostClient {
     /// - Returns: The connection (use `.fileDescriptor` for I/O)
     public func connectRaw(port: UInt32) async throws -> VZVirtioSocketConnection {
         guard let vm = virtualMachine, let queue = vmQueue else {
+            NSLog("connectRaw: not connected (no VM or queue) for port %u", port)
             throw GhostClientError.notConnected
         }
+
+        NSLog("connectRaw: dispatching to vmQueue for port %u", port)
 
         let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
+                    NSLog("connectRaw: no socket device for port %u", port)
                     continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
                     return
                 }
+                NSLog("connectRaw: calling socketDevice.connect(toPort: %u)", port)
                 socketDevice.connect(toPort: port) { result in
                     switch result {
                     case .success(let conn):
+                        NSLog("connectRaw: connected to port %u (fd=%d)", port, conn.fileDescriptor)
                         continuation.resume(returning: conn)
                     case .failure(let error):
+                        NSLog("connectRaw: failed to connect to port %u: %@", port, error.localizedDescription)
                         continuation.resume(throwing: error)
                     }
                 }
@@ -559,7 +499,7 @@ public final class GhostClient {
         )
 
         // Parse HTTP response
-        let (statusCode, body) = try parseHTTPResponse(responseData)
+        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
 
         if statusCode == 204 {
             throw GhostClientError.noContent
@@ -595,7 +535,7 @@ public final class GhostClient {
             contentType: "application/json"
         )
 
-        let (statusCode, _) = try parseHTTPResponse(responseData)
+        let (statusCode, _) = try HTTPResponseParser.parse(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -699,7 +639,7 @@ public final class GhostClient {
 
         connection.close()
 
-        let (statusCode, responseBody) = try parseHTTPResponse(responseData)
+        let (statusCode, responseBody) = try HTTPResponseParser.parse(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -727,7 +667,7 @@ public final class GhostClient {
             body: nil
         )
 
-        let (statusCode, body) = try parseHTTPResponseBinary(responseData)
+        let (statusCode, body) = try HTTPResponseParser.parseBinary(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -749,7 +689,7 @@ public final class GhostClient {
             body: nil
         )
 
-        let (statusCode, body) = try parseHTTPResponse(responseData)
+        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -772,7 +712,7 @@ public final class GhostClient {
             body: nil
         )
 
-        let (statusCode, _) = try parseHTTPResponse(responseData)
+        let (statusCode, _) = try HTTPResponseParser.parse(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -787,7 +727,7 @@ public final class GhostClient {
             body: nil
         )
 
-        let (statusCode, body) = try parseHTTPResponse(responseData)
+        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -810,7 +750,7 @@ public final class GhostClient {
             body: nil
         )
 
-        let (statusCode, body) = try parseHTTPResponse(responseData)
+        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -944,84 +884,6 @@ public final class GhostClient {
             result.append(chunk)
         }
         return result
-    }
-
-    private nonisolated func parseHTTPResponse(_ data: Data) throws -> (statusCode: Int, body: Data?) {
-        guard let responseString = String(data: data, encoding: .utf8) else {
-            throw GhostClientError.decodingError
-        }
-
-        // Split headers and body
-        let parts = responseString.components(separatedBy: "\r\n\r\n")
-        guard parts.count >= 1 else {
-            throw GhostClientError.decodingError
-        }
-
-        let headerSection = parts[0]
-        let bodyString = parts.count > 1 ? parts[1] : nil
-
-        // Parse status line
-        let headerLines = headerSection.components(separatedBy: "\r\n")
-        guard let statusLine = headerLines.first else {
-            throw GhostClientError.decodingError
-        }
-
-        // Parse status code from "HTTP/1.1 200 OK"
-        let statusParts = statusLine.components(separatedBy: " ")
-        guard statusParts.count >= 2,
-              let statusCode = Int(statusParts[1]) else {
-            throw GhostClientError.decodingError
-        }
-
-        let body = bodyString?.data(using: .utf8)
-
-        return (statusCode, body)
-    }
-
-    /// Parse HTTP response preserving binary body data
-    private func parseHTTPResponseBinary(_ data: Data) throws -> (statusCode: Int, body: Data?) {
-        // Find the header/body separator (CRLFCRLF)
-        let separator = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
-        guard let separatorRange = data.range(of: separator) else {
-            // No body, try parsing header only
-            guard let responseString = String(data: data, encoding: .utf8) else {
-                throw GhostClientError.decodingError
-            }
-
-            let headerLines = responseString.components(separatedBy: "\r\n")
-            guard let statusLine = headerLines.first else {
-                throw GhostClientError.decodingError
-            }
-
-            let statusParts = statusLine.components(separatedBy: " ")
-            guard statusParts.count >= 2,
-                  let statusCode = Int(statusParts[1]) else {
-                throw GhostClientError.decodingError
-            }
-
-            return (statusCode, nil)
-        }
-
-        // Parse header section
-        let headerData = data[..<separatorRange.lowerBound]
-        guard let headerString = String(data: headerData, encoding: .utf8) else {
-            throw GhostClientError.decodingError
-        }
-
-        let headerLines = headerString.components(separatedBy: "\r\n")
-        guard let statusLine = headerLines.first else {
-            throw GhostClientError.decodingError
-        }
-
-        let statusParts = statusLine.components(separatedBy: " ")
-        guard statusParts.count >= 2,
-              let statusCode = Int(statusParts[1]) else {
-            throw GhostClientError.decodingError
-        }
-
-        // Extract binary body
-        let bodyData = data[separatorRange.upperBound...]
-        return (statusCode, bodyData.isEmpty ? nil : Data(bodyData))
     }
 
     private func withTimeout<T>(seconds: Double, operation: @escaping () -> T) async throws -> T {

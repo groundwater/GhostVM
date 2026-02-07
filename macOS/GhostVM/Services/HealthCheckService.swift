@@ -34,21 +34,27 @@ public final class HealthCheckService: ObservableObject {
         while !Task.isCancelled {
             guard let client = client else { break }
 
+            NSLog("HealthCheck: connecting to port %u...", port)
+
             do {
                 // IMPORTANT: Hold `connection` alive — dropping it closes the fd.
                 let connection = try await client.connectRaw(port: port)
                 let fd = connection.fileDescriptor
+
+                NSLog("HealthCheck: connected, reading version (fd=%d)...", fd)
 
                 // Read version line on a background queue
                 let versionOK: Bool = await withCheckedContinuation { continuation in
                     DispatchQueue.global(qos: .utility).async {
                         var buffer = [UInt8](repeating: 0, count: 512)
                         let n = Darwin.read(fd, &buffer, buffer.count - 1)
+                        NSLog("HealthCheck: version read n=%d", n)
                         continuation.resume(returning: n > 0)
                     }
                 }
 
                 if versionOK {
+                    NSLog("HealthCheck: CONNECTED")
                     isConnected = true
 
                     // Block on read until EOF (guest disconnects or dies).
@@ -60,15 +66,17 @@ public final class HealthCheckService: ObservableObject {
                                 let n = Darwin.read(fd, &buf, 1)
                                 if n <= 0 { break }
                             }
+                            NSLog("HealthCheck: connection lost (EOF)")
                             connection.close()
                             continuation.resume()
                         }
                     }
                 } else {
+                    NSLog("HealthCheck: version read failed, closing")
                     connection.close()
                 }
             } catch {
-                // Connection failed - guest not ready
+                NSLog("HealthCheck: connection failed: %@", error.localizedDescription)
             }
 
             isConnected = false

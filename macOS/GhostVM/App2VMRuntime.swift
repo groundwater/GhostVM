@@ -122,6 +122,11 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private var helperBundleManager = VMHelperBundleManager()
     private var helperProcess: NSRunningApplication?
 
+    /// Activate the helper process (bring its window to front).
+    func activateHelper() {
+        helperProcess?.activate()
+    }
+
     let bundleURL: URL
 
     /// VM name derived from bundle filename

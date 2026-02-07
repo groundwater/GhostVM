@@ -44,7 +44,6 @@ final class EventPushServer: @unchecked Sendable {
     private let port: UInt32 = 5003
     private var serverSocket: Int32 = -1
     private var isRunning = false
-    private var acceptSource: DispatchSourceRead?
 
     /// Current connected client fd (-1 if none)
     private var clientFd: Int32 = -1
@@ -84,23 +83,57 @@ final class EventPushServer: @unchecked Sendable {
             throw VsockServerError.listenFailed(errno)
         }
 
-        var flags = fcntl(serverSocket, F_GETFL, 0)
-        _ = fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK)
-
+        // Keep socket BLOCKING — kqueue/poll don't fire for AF_VSOCK on macOS guests
         isRunning = true
         print("[EventPushServer] Listening on vsock port \(port)")
 
-        acceptSource = DispatchSource.makeReadSource(fileDescriptor: serverSocket, queue: .global(qos: .utility))
-        acceptSource?.setEventHandler { [weak self] in
-            self?.acceptConnection()
-        }
-        acceptSource?.setCancelHandler { [weak self] in
-            if let fd = self?.serverSocket, fd >= 0 {
-                close(fd)
-                self?.serverSocket = -1
+        // Blocking accept loop on dedicated thread
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            while self?.isRunning == true {
+                var clientAddr = sockaddr_vm(port: 0)
+                var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
+
+                let newFd = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
+                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        Darwin.accept(self?.serverSocket ?? -1, sockaddrPtr, &addrLen)
+                    }
+                }
+
+                if newFd < 0 {
+                    if errno == EINTR { continue }
+                    break // socket closed by stop()
+                }
+
+                // Close any existing client
+                self?.clientLock.lock()
+                let oldFd = self?.clientFd ?? -1
+                self?.clientFd = newFd
+                self?.clientLock.unlock()
+                if oldFd >= 0 {
+                    close(oldFd)
+                }
+
+                print("[EventPushServer] Client connected, fd=\(newFd)")
+
+                // Block on read until host disconnects (on background thread)
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    var buf = [UInt8](repeating: 0, count: 1)
+                    while true {
+                        let n = Darwin.read(newFd, &buf, 1)
+                        if n <= 0 { break }
+                    }
+
+                    // Client disconnected — clear if still current
+                    self?.clientLock.lock()
+                    if self?.clientFd == newFd {
+                        self?.clientFd = -1
+                    }
+                    self?.clientLock.unlock()
+                    close(newFd)
+                    print("[EventPushServer] Client disconnected")
+                }
             }
         }
-        acceptSource?.resume()
     }
 
     /// Push an event to the connected host. No-op if no client connected.
@@ -117,62 +150,8 @@ final class EventPushServer: @unchecked Sendable {
         }
     }
 
-    private func acceptConnection() {
-        while isRunning {
-            var clientAddr = sockaddr_vm(port: 0)
-            var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
-
-            let newFd = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
-                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.accept(serverSocket, sockaddrPtr, &addrLen)
-                }
-            }
-
-            if newFd < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK { return }
-                if err == EINTR { continue }
-                if isRunning {
-                    print("[EventPushServer] accept() failed: errno=\(err)")
-                }
-                return
-            }
-
-            // Close any existing client
-            clientLock.lock()
-            let oldFd = clientFd
-            clientFd = newFd
-            clientLock.unlock()
-            if oldFd >= 0 {
-                close(oldFd)
-            }
-
-            print("[EventPushServer] Client connected, fd=\(newFd)")
-
-            // Block on read until host disconnects (on background thread)
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                var buf = [UInt8](repeating: 0, count: 1)
-                while true {
-                    let n = Darwin.read(newFd, &buf, 1)
-                    if n <= 0 { break }
-                }
-
-                // Client disconnected — clear if still current
-                self?.clientLock.lock()
-                if self?.clientFd == newFd {
-                    self?.clientFd = -1
-                }
-                self?.clientLock.unlock()
-                close(newFd)
-                print("[EventPushServer] Client disconnected")
-            }
-        }
-    }
-
     func stop() {
         isRunning = false
-        acceptSource?.cancel()
-        acceptSource = nil
 
         clientLock.lock()
         let fd = clientFd

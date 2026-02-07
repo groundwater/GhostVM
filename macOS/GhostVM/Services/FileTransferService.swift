@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Combine
+import GhostVMKit
 
 /// Represents the state of a file transfer
 public enum FileTransferState: Equatable {
@@ -61,14 +62,14 @@ public final class FileTransferService: ObservableObject {
     /// Number of files queued in guest waiting to be fetched
     @Published public private(set) var queuedGuestFileCount: Int = 0
 
-    private var ghostClient: GhostClient?
+    private var ghostClient: (any GhostClientProtocol)?
     private let maxConcurrentTransfers = 3
     private var activeTransferCount = 0
 
     public init() {}
 
     /// Configure the service with a GhostClient (no polling)
-    public func configure(client: GhostClient) {
+    public func configure(client: any GhostClientProtocol) {
         self.ghostClient = client
     }
 
@@ -124,7 +125,7 @@ public final class FileTransferService: ObservableObject {
     ///   - relativePath: The relative path to preserve folder structure (e.g., "folder/file.txt")
     ///   - client: The GhostClient to use for transfer
     ///   - completion: Callback when transfer completes
-    private func sendFile(_ url: URL, relativePath: String, client: GhostClient, completion: (() -> Void)? = nil) {
+    private func sendFile(_ url: URL, relativePath: String, client: any GhostClientProtocol, completion: (() -> Void)? = nil) {
         let displayName = relativePath
 
         // Get file size

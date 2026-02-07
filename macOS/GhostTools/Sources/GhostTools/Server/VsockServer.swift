@@ -106,39 +106,32 @@ final class VsockServer: @unchecked Sendable {
             throw VsockServerError.listenFailed(errno)
         }
 
+        // Keep socket BLOCKING — kqueue/poll don't fire for AF_VSOCK on macOS guests
         isRunning = true
         onStatusChange?(true)
         print("VsockServer listening on port \(port)")
 
-        // Accept loop
-        await acceptLoop()
-    }
+        // Blocking accept loop on dedicated GCD thread (not async Task — would block cooperative pool)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            while self?.isRunning == true {
+                var clientAddr = sockaddr_vm(port: 0)
+                var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
 
-    /// Main accept loop - runs until stopped
-    private func acceptLoop() async {
-        while isRunning {
-            var clientAddr = sockaddr_vm(port: 0)
-            var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
-
-            let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
-                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.accept(serverSocket, sockaddrPtr, &addrLen)
+                let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
+                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        Darwin.accept(self?.serverSocket ?? -1, sockaddrPtr, &addrLen)
+                    }
                 }
-            }
 
-            if clientSocket < 0 {
-                if errno == EINTR {
-                    continue
+                if clientSocket < 0 {
+                    if errno == EINTR { continue }
+                    break // socket closed by stop()
                 }
-                if isRunning {
-                    print("Accept failed: errno \(errno)")
-                }
-                break
-            }
 
-            // Handle connection in a task
-            Task {
-                await handleConnection(clientSocket)
+                // Handle connection in a task
+                Task {
+                    await self?.handleConnection(clientSocket)
+                }
             }
         }
     }

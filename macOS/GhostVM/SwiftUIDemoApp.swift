@@ -33,6 +33,11 @@ struct GhostVMSwiftUIApp: App {
             VMListDemoView()
                 .environmentObject(store)
                 .environmentObject(restoreStore)
+                .onOpenURL { url in
+                    NSLog("[GhostVM] onOpenURL: \(url.path)")
+                    store.addBundles(from: [url])
+                    App2AppDelegate.handleOpenURLs([url], store: store)
+                }
         }
         .commands {
             DemoAppCommands(store: store, restoreStore: restoreStore)
@@ -839,15 +844,15 @@ struct VMRowView: View {
                 if let icon = vmIcon {
                     Image(nsImage: icon)
                         .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                        .aspectRatio(contentMode: .fill)
+                        .clipShape(RoundedRectangle(cornerRadius: 64 * 185.4 / 1024, style: .continuous))
                 } else {
                     Image(systemName: "desktopcomputer")
-                        .font(.system(size: 18))
+                        .font(.system(size: 32))
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(width: 32, height: 32)
+            .frame(width: 64, height: 64)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(vm.name)
@@ -1160,13 +1165,13 @@ struct EditVMView: View {
                 // Preset icon tiles
                 ForEach(Self.presetIcons, id: \.resource) { preset in
                     let isSelected = selectedPresetIcon == preset.resource
-                    iconTile(selected: isSelected) {
+                    iconTile(selected: isSelected, showBackground: false) {
                         if let img = NSImage(named: preset.resource) {
                             Image(nsImage: img)
                                 .resizable()
                                 .aspectRatio(contentMode: .fill)
                                 .frame(width: 80, height: 80)
-                                .clipped()
+                                .clipShape(RoundedRectangle(cornerRadius: 80 * 185.4 / 1024, style: .continuous))
                         }
                     } action: {
                         if let img = NSImage(named: preset.resource) {
@@ -1195,18 +1200,22 @@ struct EditVMView: View {
 
     private func iconTile<Icon: View>(
         selected: Bool,
+        showBackground: Bool = true,
         @ViewBuilder icon: () -> Icon,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        let cornerRadius = 80 * 185.4 / 1024
+        return Button(action: action) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.secondary.opacity(0.1))
-                    .frame(width: 80, height: 80)
+                if showBackground {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color.secondary.opacity(0.1))
+                        .frame(width: 80, height: 80)
+                }
                 icon()
             }
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .strokeBorder(selected ? Color.accentColor : Color.clear, lineWidth: 2)
             )
         }
@@ -1290,11 +1299,13 @@ struct EditVMView: View {
                 if customIconChanged {
                     if iconRemoved {
                         try? FileManager.default.removeItem(at: layout.customIconURL)
+                        NSWorkspace.shared.setIcon(nil, forFile: vm.bundleURL.path, options: [])
                     } else if let icon = customIcon,
                               let tiff = icon.tiffRepresentation,
                               let bitmap = NSBitmapImageRep(data: tiff),
                               let pngData = bitmap.representation(using: .png, properties: [:]) {
                         try pngData.write(to: layout.customIconURL)
+                        NSWorkspace.shared.setIcon(icon, forFile: vm.bundleURL.path, options: [])
                     }
                 }
 

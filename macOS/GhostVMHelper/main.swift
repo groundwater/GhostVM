@@ -49,6 +49,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var ghostClient: GhostClient?
     private var clipboardSyncService: ClipboardSyncService?
     private var portForwardService: PortForwardService?
+    private var folderShareService: FolderShareService?
     private var fileTransferService: FileTransferService?
     private var eventStreamService: EventStreamService?
     private var healthCheckService: HealthCheckService?
@@ -61,14 +62,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Parse command line arguments
         let args = ProcessInfo.processInfo.arguments
-        guard let bundleIndex = args.firstIndex(of: "--vm-bundle"), bundleIndex + 1 < args.count else {
-            NSLog("GhostVMHelper: Missing --vm-bundle argument")
-            showErrorAndQuit("Missing --vm-bundle argument")
-            return
+        if let bundleIndex = args.firstIndex(of: "--vm-bundle"), bundleIndex + 1 < args.count {
+            vmBundleURL = URL(fileURLWithPath: args[bundleIndex + 1]).standardizedFileURL
+        } else {
+            // Infer from helper location: {VM}.ghostvm/Helper/{Name}.app
+            vmBundleURL = Bundle.main.bundleURL
+                .deletingLastPathComponent()  // Helper/
+                .deletingLastPathComponent()  // {VM}.ghostvm
+                .standardizedFileURL
         }
-
-        let bundlePath = args[bundleIndex + 1]
-        vmBundleURL = URL(fileURLWithPath: bundlePath).standardizedFileURL
         vmName = vmBundleURL.deletingPathExtension().lastPathComponent
         ProcessInfo.processInfo.processName = vmName
 
@@ -114,18 +116,108 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private func loadCustomIcon() {
         let iconURL = vmBundleURL.appendingPathComponent("icon.png")
 
-        if fileManager.fileExists(atPath: iconURL.path),
-           let image = NSImage(contentsOf: iconURL) {
-            // Set custom Dock icon
-            let imageView = NSImageView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
-            imageView.image = image
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            NSApp.dockTile.contentView = imageView
-            NSApp.dockTile.display()
-            NSLog("GhostVMHelper: Loaded custom icon from \(iconURL.path)")
-        } else {
-            NSLog("GhostVMHelper: No custom icon found at \(iconURL.path)")
+        guard fileManager.fileExists(atPath: iconURL.path),
+              let image = NSImage(contentsOf: iconURL),
+              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+            NSLog("GhostVMHelper: No custom icon found")
+            return
         }
+
+        // The VM bundle may have an old icon with large transparent margins.
+        // Crop to content and resize to 1024x1024 (Apple's standard icon canvas).
+        let targetSize = 1024
+
+        // Step 1: Find content bounding box
+        let srcW = cgImage.width
+        let srcH = cgImage.height
+        guard let data = cgImage.dataProvider?.data,
+              let ptr = CFDataGetBytePtr(data) else {
+            NSApp.applicationIconImage = image
+            return
+        }
+
+        let bpp = cgImage.bitsPerPixel / 8
+        let bpr = cgImage.bytesPerRow
+        let alphaFirst = cgImage.alphaInfo == .premultipliedFirst || cgImage.alphaInfo == .first
+                         || cgImage.alphaInfo == .noneSkipFirst
+        let alphaOffset = alphaFirst ? 0 : (bpp - 1)
+
+        var minX = srcW, minY = srcH, maxX = 0, maxY = 0
+        for y in 0..<srcH {
+            for x in 0..<srcW {
+                let off = y * bpr + x * bpp + alphaOffset
+                if ptr[off] > 10 {
+                    if x < minX { minX = x }
+                    if x > maxX { maxX = x }
+                    if y < minY { minY = y }
+                    if y > maxY { maxY = y }
+                }
+            }
+        }
+
+        guard maxX > minX, maxY > minY else {
+            NSApp.applicationIconImage = image
+            return
+        }
+
+        // Make a square crop centered on the IMAGE center (where the squircle sits).
+        // This handles icons with asymmetric overflow (e.g. claw arm extending upward).
+        let contentW = maxX - minX + 1
+        let contentH = maxY - minY + 1
+        let side = max(contentW, contentH)
+        let centerX = srcW / 2
+        let centerY = srcH / 2
+        let cropX = max(0, centerX - side / 2)
+        let cropY = max(0, centerY - side / 2)
+        let cropW = min(side, srcW - cropX)
+        let cropH = min(side, srcH - cropY)
+
+        guard let cropped = cgImage.cropping(to: CGRect(x: cropX, y: cropY,
+                                                        width: cropW, height: cropH)) else {
+            NSApp.applicationIconImage = image
+            return
+        }
+
+        // Step 2: Draw cropped content to fill 1024x1024
+        guard let ctx = CGContext(
+            data: nil,
+            width: targetSize, height: targetSize,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            NSApp.applicationIconImage = image
+            return
+        }
+
+        ctx.interpolationQuality = .high
+        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: targetSize, height: targetSize))
+
+        guard let result = ctx.makeImage() else {
+            NSApp.applicationIconImage = image
+            return
+        }
+
+        // Save to temp PNG and reload so NSImage matches file-loaded behavior
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostvm-dock-\(ProcessInfo.processInfo.processIdentifier).png")
+        if let dest = CGImageDestinationCreateWithURL(tempURL as CFURL, "public.png" as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, result, nil)
+            CGImageDestinationFinalize(dest)
+            if let reloaded = NSImage(contentsOf: tempURL) {
+                NSApp.applicationIconImage = reloaded
+                NSWorkspace.shared.setIcon(reloaded, forFile: vmBundleURL.path, options: [])
+                NSWorkspace.shared.setIcon(reloaded, forFile: Bundle.main.bundlePath, options: [])
+                try? FileManager.default.removeItem(at: tempURL)
+                NSLog("GhostVMHelper: Loaded custom icon from \(iconURL.path)")
+                return
+            }
+        }
+
+        NSApp.applicationIconImage = image
+        NSWorkspace.shared.setIcon(image, forFile: vmBundleURL.path, options: [])
+        NSWorkspace.shared.setIcon(image, forFile: Bundle.main.bundlePath, options: [])
+        NSLog("GhostVMHelper: Loaded custom icon from \(iconURL.path)")
     }
 
     // MARK: - Menu Bar
@@ -285,6 +377,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     // MARK: - HelperToolbarDelegate
 
+    func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool) {
+        vmView?.capturesSystemKeys = enabled
+
+        // Persist per-VM
+        let key = "captureSystemKeys_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(enabled, forKey: key)
+        NSLog("GhostVMHelper: Capture system keys changed to \(enabled)")
+    }
+
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String) {
         guard let syncMode = ClipboardSyncMode(rawValue: mode) else { return }
         clipboardSyncService?.setSyncMode(syncMode)
@@ -296,15 +397,22 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         NSLog("GhostVMHelper: Clipboard sync mode changed to \(mode)")
     }
 
-    func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) {
+    @discardableResult
+    func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) -> String? {
+        guard let service = portForwardService else {
+            NSLog("GhostVMHelper: Port forwarding not available")
+            return "Port forwarding not available"
+        }
         let config = PortForwardConfig(hostPort: hostPort, guestPort: guestPort, enabled: true)
         do {
-            try portForwardService?.addForward(config)
+            try service.addForward(config)
             updateToolbarPortForwards()
             persistPortForwards()
             NSLog("GhostVMHelper: Added port forward \(hostPort) -> \(guestPort)")
+            return nil
         } catch {
             NSLog("GhostVMHelper: Failed to add port forward: \(error)")
+            return error.localizedDescription
         }
     }
 
@@ -313,6 +421,21 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         updateToolbarPortForwards()
         persistPortForwards()
         NSLog("GhostVMHelper: Removed port forward with host port \(hostPort)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didAddSharedFolder path: String, readOnly: Bool) {
+        let config = SharedFolderConfig(path: path, readOnly: readOnly)
+        folderShareService?.addFolder(config)
+        updateToolbarSharedFolders()
+        persistSharedFolders()
+        NSLog("GhostVMHelper: Added shared folder \(path)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didRemoveSharedFolderWithID id: UUID) {
+        folderShareService?.removeFolder(id: id)
+        updateToolbarSharedFolders()
+        persistSharedFolders()
+        NSLog("GhostVMHelper: Removed shared folder with id \(id)")
     }
 
     func toolbarDidRequestPortForwardEditor(_ toolbar: HelperToolbar) {
@@ -410,6 +533,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func postStateChange() {
+        guard let vmBundleURL = vmBundleURL else { return }
         let bundlePathHash = vmBundleURL.path.stableHash
         NSLog("GhostVMHelper: Posting state '\(state.rawValue)' for hash \(bundlePathHash)")
         NSLog("GhostVMHelper: Bundle path: \(vmBundleURL.path)")
@@ -733,6 +857,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         updateToolbarPortForwards()
 
+        // 3b. Shared folder management
+        let fsService = FolderShareService(vm: vm, queue: queue)
+        self.folderShareService = fsService
+        let folders = loadSharedFolders()
+        fsService.start(folders: folders)
+        updateToolbarSharedFolders()
+
         // 4. Clipboard sync (event-driven via window focus/blur)
         let cbService = ClipboardSyncService(bundlePath: vmBundleURL.path)
         cbService.configure(client: client)
@@ -794,6 +925,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         portForwardService?.stop()
         portForwardService = nil
+
+        folderShareService?.stop()
+        folderShareService = nil
 
         for obs in windowFocusObservers {
             NotificationCenter.default.removeObserver(obs)
@@ -857,6 +991,60 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
+    // MARK: - Shared Folder Persistence
+
+    private func loadSharedFolders() -> [SharedFolderConfig] {
+        guard let layout = layout else { return [] }
+        do {
+            let store = VMConfigStore(layout: layout)
+            let config = try store.load()
+            // Prefer sharedFolders array; fall back to legacy sharedFolderPath
+            if !config.sharedFolders.isEmpty {
+                return config.sharedFolders
+            }
+            if let legacyPath = config.sharedFolderPath, !legacyPath.isEmpty {
+                return [SharedFolderConfig(path: legacyPath, readOnly: config.sharedFolderReadOnly)]
+            }
+            return []
+        } catch {
+            NSLog("GhostVMHelper: Failed to load shared folders: \(error)")
+            return []
+        }
+    }
+
+    private func updateToolbarSharedFolders() {
+        guard let service = folderShareService else {
+            helperToolbar?.setSharedFolderEntries([])
+            return
+        }
+        let entries = service.activeFolders.map { folder in
+            SharedFolderEntry(id: folder.id, path: folder.path, readOnly: folder.readOnly)
+        }
+        helperToolbar?.setSharedFolderEntries(entries)
+    }
+
+    private func persistSharedFolders() {
+        guard let service = folderShareService else { return }
+        let activeFolders = service.activeFolders
+        let bundleURL = self.vmBundleURL!
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let layout = VMFileLayout(bundleURL: bundleURL)
+                let store = VMConfigStore(layout: layout)
+                var config = try store.load()
+                config.sharedFolders = activeFolders
+                // Clear legacy fields when using the new array
+                config.sharedFolderPath = nil
+                config.sharedFolderReadOnly = false
+                try store.save(config)
+                NSLog("GhostVMHelper: Persisted \(activeFolders.count) shared folder(s)")
+            } catch {
+                NSLog("GhostVMHelper: Failed to persist shared folders: \(error)")
+            }
+        }
+    }
+
     // MARK: - Window
 
     private func createWindow() {
@@ -891,6 +1079,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         vmView.translatesAutoresizingMaskIntoConstraints = false
         vmView.virtualMachine = virtualMachine
+
+        // Set initial capture system keys preference (default: true)
+        let captureKeysKey = "captureSystemKeys_\(vmBundleURL.path.stableHash)"
+        let captureKeys = UserDefaults.standard.object(forKey: captureKeysKey) as? Bool ?? true
+        vmView.capturesSystemKeys = captureKeys
+        toolbar.setCaptureSystemKeys(captureKeys)
+
         containerView.addSubview(vmView)
 
         // Create status overlay (on top of VM view)

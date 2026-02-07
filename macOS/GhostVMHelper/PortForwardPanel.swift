@@ -49,6 +49,10 @@ final class PortForwardPanel: NSObject {
         entries = newEntries
         contentViewController?.setEntries(entries)
     }
+
+    func showError(_ message: String) {
+        contentViewController?.showError(message)
+    }
 }
 
 extension PortForwardPanel: PortForwardContentViewControllerDelegate {
@@ -265,6 +269,12 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
             return
         }
 
+        // Validate ports are non-zero
+        if hostPort == 0 || guestPort == 0 {
+            showError("Port must be greater than 0")
+            return
+        }
+
         // Check for duplicates
         if entries.contains(where: { $0.hostPort == hostPort }) {
             showError("Host port \(hostPort) already in use")
@@ -289,7 +299,7 @@ final class PortForwardContentViewController: NSViewController, NSTableViewDataS
         delegate?.contentViewController(self, didRemoveForwardWithHostPort: entry.hostPort)
     }
 
-    private func showError(_ message: String) {
+    func showError(_ message: String) {
         errorLabel.stringValue = message
         errorLabel.isHidden = false
     }

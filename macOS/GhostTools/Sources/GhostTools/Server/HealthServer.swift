@@ -13,7 +13,6 @@ final class HealthServer: @unchecked Sendable {
     private let port: UInt32 = 5002
     private var serverSocket: Int32 = -1
     private var isRunning = false
-    private var acceptSource: DispatchSourceRead?
 
     init() {}
 
@@ -49,50 +48,31 @@ final class HealthServer: @unchecked Sendable {
             throw VsockServerError.listenFailed(errno)
         }
 
-        // Set non-blocking for accept loop
-        var flags = fcntl(serverSocket, F_GETFL, 0)
-        _ = fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK)
-
+        // Keep socket BLOCKING — kqueue/poll don't fire for AF_VSOCK on macOS guests
         isRunning = true
         print("[HealthServer] Listening on vsock port \(port)")
 
-        acceptSource = DispatchSource.makeReadSource(fileDescriptor: serverSocket, queue: .global(qos: .utility))
-        acceptSource?.setEventHandler { [weak self] in
-            self?.acceptConnection()
-        }
-        acceptSource?.setCancelHandler { [weak self] in
-            if let fd = self?.serverSocket, fd >= 0 {
-                close(fd)
-                self?.serverSocket = -1
-            }
-        }
-        acceptSource?.resume()
-    }
+        // Blocking accept loop on dedicated thread
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            while self?.isRunning == true {
+                var clientAddr = sockaddr_vm(port: 0)
+                var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
 
-    private func acceptConnection() {
-        while isRunning {
-            var clientAddr = sockaddr_vm(port: 0)
-            var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
-
-            let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
-                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.accept(serverSocket, sockaddrPtr, &addrLen)
+                let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
+                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        Darwin.accept(self?.serverSocket ?? -1, sockaddrPtr, &addrLen)
+                    }
                 }
-            }
 
-            if clientSocket < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK { return }
-                if err == EINTR { continue }
-                if isRunning {
-                    print("[HealthServer] accept() failed: errno=\(err)")
+                if clientSocket < 0 {
+                    if errno == EINTR { continue }
+                    break // socket closed by stop()
                 }
-                return
-            }
 
-            // Handle on background thread (blocks until disconnect)
-            DispatchQueue.global(qos: .utility).async {
-                self.handleConnection(clientSocket)
+                // Handle on background thread (blocks until disconnect)
+                DispatchQueue.global(qos: .utility).async {
+                    self?.handleConnection(clientSocket)
+                }
             }
         }
     }
@@ -118,8 +98,6 @@ final class HealthServer: @unchecked Sendable {
 
     func stop() {
         isRunning = false
-        acceptSource?.cancel()
-        acceptSource = nil
         if serverSocket >= 0 {
             close(serverSocket)
             serverSocket = -1

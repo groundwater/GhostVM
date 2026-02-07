@@ -12,7 +12,6 @@ final class TunnelServer: @unchecked Sendable {
     private let port: UInt32 = 5001
     private var serverSocket: Int32 = -1
     private var isRunning = false
-    private var acceptSource: DispatchSourceRead?
 
     /// Status callback for connection state changes
     var onStatusChange: ((Bool) -> Void)?
@@ -57,58 +56,32 @@ final class TunnelServer: @unchecked Sendable {
             throw VsockServerError.listenFailed(errno)
         }
 
-        // Set non-blocking for the server socket
-        var flags = fcntl(serverSocket, F_GETFL, 0)
-        _ = fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK)
-
+        // Keep socket BLOCKING — kqueue/poll don't fire for AF_VSOCK on macOS guests
         isRunning = true
         onStatusChange?(true)
         print("[TunnelServer] Listening on vsock port \(port)")
 
-        // Use DispatchSource for non-blocking accept
-        acceptSource = DispatchSource.makeReadSource(fileDescriptor: serverSocket, queue: .global(qos: .userInitiated))
-        acceptSource?.setEventHandler { [weak self] in
-            self?.acceptConnection()
-        }
-        acceptSource?.setCancelHandler { [weak self] in
-            if let fd = self?.serverSocket, fd >= 0 {
-                close(fd)
-                self?.serverSocket = -1
-            }
-        }
-        acceptSource?.resume()
-    }
+        // Blocking accept loop on dedicated thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            while self?.isRunning == true {
+                var clientAddr = sockaddr_vm(port: 0)
+                var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
 
-    /// Accept incoming connections (called from DispatchSource)
-    private func acceptConnection() {
-        while isRunning {
-            var clientAddr = sockaddr_vm(port: 0)
-            var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
+                let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
+                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                        Darwin.accept(self?.serverSocket ?? -1, sockaddrPtr, &addrLen)
+                    }
+                }
 
-            let clientSocket = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
-                addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.accept(serverSocket, sockaddrPtr, &addrLen)
+                if clientSocket < 0 {
+                    if errno == EINTR { continue }
+                    break // socket closed by stop()
                 }
-            }
 
-            if clientSocket < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK {
-                    // No more connections to accept
-                    return
+                // Handle connection on a background GCD queue
+                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                    self?.handleConnection(clientSocket)
                 }
-                if err == EINTR {
-                    continue
-                }
-                if isRunning {
-                    fatalError("[TunnelServer] accept() failed: errno=\(err) \(String(cString: strerror(err)))")
-                }
-                return
-            }
-
-            // Handle connection on a background GCD queue (not Swift concurrency)
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.handleConnection(clientSocket)
             }
         }
     }
@@ -371,8 +344,6 @@ final class TunnelServer: @unchecked Sendable {
     /// Stops the server
     func stop() {
         isRunning = false
-        acceptSource?.cancel()
-        acceptSource = nil
         if serverSocket >= 0 {
             close(serverSocket)
             serverSocket = -1

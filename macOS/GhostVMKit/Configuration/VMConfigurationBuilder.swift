@@ -126,31 +126,36 @@ public final class VMConfigurationBuilder {
             sharedFolders = [SharedFolderConfig(path: storedPath, readOnly: storedConfig.sharedFolderReadOnly)]
         }
 
-        var directorySharingDevices: [VZDirectorySharingDeviceConfiguration] = []
+        // Build a VZMultipleDirectoryShare with all folders mapped by leaf name.
+        // Always create exactly one VZVirtioFileSystemDeviceConfiguration so that
+        // FolderShareService can find and update it at runtime.
+        var directories: [String: VZSharedDirectory] = [:]
+        var usedNames: [String: Int] = [:]
 
-        for (index, folder) in sharedFolders.enumerated() {
+        for folder in sharedFolders {
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
                 throw VMError.message("Shared folder path \(folder.path) does not exist or is not a directory.")
             }
             let url = URL(fileURLWithPath: folder.path)
             let sharedDirectory = VZSharedDirectory(url: url, readOnly: folder.readOnly)
-            let singleShare = VZSingleDirectoryShare(directory: sharedDirectory)
 
-            // First folder uses macOS automount tag, subsequent folders use custom tags
-            let tag: String
-            if index == 0 {
-                tag = VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
+            // Use last path component as share name; disambiguate duplicates
+            var name = url.lastPathComponent
+            if let count = usedNames[name] {
+                usedNames[name] = count + 1
+                name = "\(name)-\(count + 1)"
             } else {
-                tag = "ghostvm-share-\(index)"
+                usedNames[name] = 1
             }
-
-            let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: tag)
-            shareDevice.share = singleShare
-            directorySharingDevices.append(shareDevice)
+            directories[name] = sharedDirectory
         }
 
-        config.directorySharingDevices = directorySharingDevices
+        let multiShare = VZMultipleDirectoryShare(directories: directories)
+        let tag = isLinux ? "ghostvm-shares" : VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
+        let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: tag)
+        shareDevice.share = multiShare
+        config.directorySharingDevices = [shareDevice]
 
         // Add vsock device for host-guest communication
         // This enables direct socket communication between host and guest without going through the network stack

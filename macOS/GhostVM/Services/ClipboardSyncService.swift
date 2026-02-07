@@ -1,54 +1,7 @@
 import Foundation
 import AppKit
 import Combine
-
-/// Clipboard synchronization modes between host and guest
-public enum ClipboardSyncMode: String, CaseIterable, Codable, Identifiable {
-    case bidirectional
-    case hostToGuest
-    case guestToHost
-    case disabled
-
-    public var id: String { rawValue }
-
-    public var displayName: String {
-        switch self {
-        case .bidirectional: return "Bidirectional"
-        case .hostToGuest: return "Host to Guest"
-        case .guestToHost: return "Guest to Host"
-        case .disabled: return "Disabled"
-        }
-    }
-
-    public var description: String {
-        switch self {
-        case .bidirectional: return "Full sync both directions"
-        case .hostToGuest: return "Can paste into VM, cannot copy out"
-        case .guestToHost: return "Can copy out of VM, cannot paste in"
-        case .disabled: return "No clipboard access"
-        }
-    }
-
-    /// Whether this mode allows sending host clipboard to guest
-    public var allowsHostToGuest: Bool {
-        switch self {
-        case .bidirectional, .hostToGuest:
-            return true
-        case .guestToHost, .disabled:
-            return false
-        }
-    }
-
-    /// Whether this mode allows receiving guest clipboard on host
-    public var allowsGuestToHost: Bool {
-        switch self {
-        case .bidirectional, .guestToHost:
-            return true
-        case .hostToGuest, .disabled:
-            return false
-        }
-    }
-}
+import GhostVMKit
 
 /// Service for synchronizing clipboard between host and guest VM.
 /// Event-driven: syncs on window focus/blur instead of polling.
@@ -67,7 +20,7 @@ public final class ClipboardSyncService: ObservableObject {
     private var lastHostChangeCount: Int = 0
     private var lastGuestContent: String?
 
-    private var guestClient: GhostClient?
+    private var guestClient: (any GhostClientProtocol)?
     private let bundlePath: String
 
     public init(bundlePath: String) {
@@ -76,7 +29,7 @@ public final class ClipboardSyncService: ObservableObject {
     }
 
     /// Configure the service with a GhostClient (no polling started)
-    public func configure(client: GhostClient) {
+    public func configure(client: any GhostClientProtocol) {
         self.guestClient = client
     }
 
@@ -126,7 +79,7 @@ public final class ClipboardSyncService: ObservableObject {
 
     // MARK: - Private
 
-    private func pushHostToGuest(client: GhostClient) async {
+    private func pushHostToGuest(client: any GhostClientProtocol) async {
         let currentCount = hostPasteboard.changeCount
         guard currentCount != lastHostChangeCount else { return }
 
@@ -138,7 +91,7 @@ public final class ClipboardSyncService: ObservableObject {
         if content == lastGuestContent { return }
 
         do {
-            try await client.setClipboard(content: content)
+            try await client.setClipboard(content: content, type: "public.utf8-plain-text")
             isConnected = true
             lastError = nil
         } catch {
@@ -147,7 +100,7 @@ public final class ClipboardSyncService: ObservableObject {
         }
     }
 
-    private func pullGuestToHost(client: GhostClient) async {
+    private func pullGuestToHost(client: any GhostClientProtocol) async {
         do {
             let response = try await client.getClipboard()
             isConnected = true

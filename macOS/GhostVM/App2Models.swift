@@ -38,7 +38,11 @@ final class App2VMStore: ObservableObject {
     private let controller = VMController()
 
     init() {
-        loadKnownVMs()
+        if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+            vms = []
+        } else {
+            loadKnownVMs()
+        }
     }
 
     func reloadDefaultDirectory() {

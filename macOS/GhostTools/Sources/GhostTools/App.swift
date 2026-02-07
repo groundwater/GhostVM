@@ -4,7 +4,7 @@ import UserNotifications
 import CoreServices
 
 /// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.38.0"
+let kGhostToolsVersion = "1.40.0"
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
