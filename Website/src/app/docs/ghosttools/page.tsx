@@ -72,17 +72,34 @@ export default function GhostTools() {
           log entries) on port 5003
         </li>
         <li>
-          <strong>Port Discovery</strong> — report listening TCP ports to enable
-          auto port mapping
+          <strong>Port Discovery</strong> — report listening TCP ports with
+          process names to enable auto port detection
+        </li>
+        <li>
+          <strong>Foreground App Tracking</strong> — report the current
+          foreground app to help the host identify workspace context
         </li>
       </ul>
 
       <h2>Status Indicator</h2>
       <p>
-        When GhostTools is connected, the VM toolbar shows a green dot next to
-        &ldquo;Guest Tools&rdquo;. If GhostTools is not running or not
-        connected, the dot is gray.
+        The VM toolbar shows a three-state Guest Tools indicator with a
+        scramble-decode animation:
       </p>
+      <ul>
+        <li>
+          <strong>Connecting</strong> — amber dot, the host is attempting to
+          reach GhostTools
+        </li>
+        <li>
+          <strong>Connected</strong> — green dot, GhostTools is active and all
+          services are available
+        </li>
+        <li>
+          <strong>Not Found</strong> — gray dot, GhostTools is not running or
+          unreachable
+        </li>
+      </ul>
 
       <PrevNextNav currentHref="/docs/ghosttools" />
     </>

@@ -115,9 +115,9 @@ export default function VMIconShowcase() {
           Every workspace gets its own Dock icon
         </h2>
         <p className="text-gray-600 dark:text-gray-400 mb-10 max-w-xl mx-auto">
-          Each running workspace appears in the macOS Dock as its own app
-          &mdash; with a custom icon you pick. Instantly spot and switch
-          between workspaces just like any native app.
+          Each running workspace appears in the macOS Dock as its own app.
+          Pick from presets or use the toolbar icon chooser to switch between
+          Generic, App, Stack, and Custom modes on the fly.
         </p>
 
         {/* Faux Desktop */}

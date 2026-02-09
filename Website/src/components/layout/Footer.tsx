@@ -1,4 +1,4 @@
-import Link from "next/link";
+import Link from "next/link"
 
 export default function Footer() {
   return (
@@ -75,10 +75,10 @@ export default function Footer() {
         <div className="mt-8 pt-8 border-t border-gray-200 dark:border-gray-800 text-center text-sm text-gray-500 space-y-1">
           <p>GhostVM &mdash; Native macOS Virtual Machines for Apple Silicon</p>
           <p className="text-gray-400 dark:text-gray-600">
-            Designed by Humans in California. Assembled by AI on NVIDIA H100s.
+            Designed by Humans in California. Assembled by AI.
           </p>
         </div>
       </div>
     </footer>
-  );
+  )
 }

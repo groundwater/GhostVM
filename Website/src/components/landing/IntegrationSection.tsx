@@ -6,19 +6,19 @@ const spotlights = [
     icon: Clipboard,
     title: "Clipboard Sync",
     description:
-      "Copy from your Mac, paste in the workspace — and vice versa. No friction.",
+      "Copy from your Mac, paste in the workspace — and vice versa. A permission panel lets you deny, allow once, or always allow each sync.",
   },
   {
     icon: Network,
     title: "Port Forwarding",
     description:
-      "Access services running in the workspace from localhost. Web servers, APIs, databases — all reachable.",
+      "Auto-detect listening ports inside the workspace — with process names like node, python, or postgres shown for each. Block, unblock, or copy URLs from the management panel.",
   },
   {
     icon: FileUp,
     title: "File Transfer",
     description:
-      "Drag and drop files into the workspace window. Pull files back out with a click.",
+      "Drag and drop files into the workspace window. Pull files back out with a click. Received files are automatically quarantined so Gatekeeper can verify them.",
   },
   {
     icon: FolderOpen,
@@ -71,7 +71,7 @@ export default function IntegrationSection() {
               />
             </div>
             <p className="text-sm text-gray-600 dark:text-gray-400 mt-3 text-center">
-              Configure port forwards, shared folders, and more from a single panel.
+              Configure port forwards, shared folders, and more — auto-detected ports appear with process names.
             </p>
           </div>
 

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
@@ -81,13 +82,13 @@ vmctl start ~/VMs/sandbox.GhostVM`}
       <h2>Next steps</h2>
       <ul>
         <li>
-          Learn about the <a href="/docs/gui-app">GUI App</a> features
+          Learn about the <Link href="/docs/gui-app">GUI App</Link> features
         </li>
         <li>
-          Explore the <a href="/docs/cli">CLI Reference</a>
+          Explore the <Link href="/docs/cli">CLI Reference</Link>
         </li>
         <li>
-          Set up <a href="/docs/services">host-guest services</a> like clipboard
+          Set up <Link href="/docs/services">host-guest services</Link> like clipboard
           sync and file transfer
         </li>
       </ul>

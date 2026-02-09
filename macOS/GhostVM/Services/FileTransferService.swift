@@ -62,6 +62,9 @@ public final class FileTransferService: ObservableObject {
     /// Number of files queued in guest waiting to be fetched
     @Published public private(set) var queuedGuestFileCount: Int = 0
 
+    /// Full paths of files queued in guest (from event stream)
+    public private(set) var queuedGuestFilePaths: [String] = []
+
     private var ghostClient: (any GhostClientProtocol)?
     private let maxConcurrentTransfers = 3
     private var activeTransferCount = 0
@@ -75,6 +78,7 @@ public final class FileTransferService: ObservableObject {
 
     /// Update the queued file list from EventStreamService push events
     public func updateQueuedFiles(_ files: [String]) {
+        queuedGuestFilePaths = files
         queuedGuestFileCount = files.count
     }
 
@@ -267,57 +271,70 @@ public final class FileTransferService: ObservableObject {
 
     /// Fetch all queued files from the guest and save to Downloads
     public func fetchAllGuestFiles() {
+        NSLog("[FileTransfer] fetchAllGuestFiles called, ghostClient=%@, queuedPaths=%d",
+              ghostClient != nil ? "present" : "NIL", queuedGuestFilePaths.count)
         guard let client = ghostClient else {
+            NSLog("[FileTransfer] ERROR: ghostClient is nil — cannot fetch files")
             lastError = "Not connected to guest"
             return
         }
 
+        // Use the file paths we already have from the event stream
+        // instead of making a redundant HTTP round-trip via listGuestFiles()
+        let files = queuedGuestFilePaths
+        NSLog("[FileTransfer] Using %d file path(s) from event stream: %@", files.count, files.description)
+
+        guard !files.isEmpty else {
+            NSLog("[FileTransfer] No files to fetch — clearing stale toolbar state")
+            queuedGuestFilePaths = []
+            queuedGuestFileCount = 0
+            return
+        }
+
         Task {
-            do {
-                let files = try await listGuestFiles()
-                print("[FileTransfer] Found \(files.count) file(s) queued on guest")
+            var savedURLs: [URL] = []
+            var failedPaths: [String] = []
+            let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
 
-                var savedURLs: [URL] = []
-                var failedPaths: [String] = []
-                let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+            for guestPath in files {
+                do {
+                    NSLog("[FileTransfer] Fetching: %@", guestPath)
+                    let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
+                    let saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
+                    try data.write(to: saveURL)
+                    Self.applyQuarantine(to: saveURL)
 
-                for guestPath in files {
-                    do {
-                        let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
-                        let saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
-                        try data.write(to: saveURL)
-                        Self.applyQuarantine(to: saveURL)
-
-                        if let permissions = permissions {
-                            try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: saveURL.path)
-                        }
-
-                        savedURLs.append(saveURL)
-                        print("[FileTransfer] Fetched: \(fetchedFilename)")
-                    } catch {
-                        print("[FileTransfer] Failed to fetch \(guestPath): \(error)")
-                        failedPaths.append(URL(fileURLWithPath: guestPath).lastPathComponent)
+                    if let permissions = permissions {
+                        try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: saveURL.path)
                     }
-                }
 
-                // Reveal all files in Finder at once
-                if !savedURLs.isEmpty {
-                    NSWorkspace.shared.activateFileViewerSelecting(savedURLs)
+                    savedURLs.append(saveURL)
+                    NSLog("[FileTransfer] Fetched: %@", fetchedFilename)
+                } catch {
+                    NSLog("[FileTransfer] Failed to fetch %@: %@", guestPath, error.localizedDescription)
+                    failedPaths.append(URL(fileURLWithPath: guestPath).lastPathComponent)
                 }
+            }
 
-                // Only clear the queue when ALL files transferred successfully
-                if failedPaths.isEmpty {
-                    if !files.isEmpty {
-                        try await client.clearFileQueue()
-                        queuedGuestFileCount = 0
-                        print("[FileTransfer] Cleared guest file queue")
-                    }
-                } else {
-                    lastError = "Failed to fetch: \(failedPaths.joined(separator: ", "))"
-                    print("[FileTransfer] \(failedPaths.count) file(s) failed, queue NOT cleared")
+            // Reveal all files in Finder at once
+            if !savedURLs.isEmpty {
+                NSWorkspace.shared.activateFileViewerSelecting(savedURLs)
+            }
+
+            // Only clear the queue when ALL files transferred successfully
+            if failedPaths.isEmpty {
+                do {
+                    try await client.clearFileQueue()
+                    self.queuedGuestFilePaths = []
+                    self.queuedGuestFileCount = 0
+                    NSLog("[FileTransfer] Cleared guest file queue")
+                } catch {
+                    NSLog("[FileTransfer] ERROR clearing queue: %@", error.localizedDescription)
+                    self.lastError = "Failed to clear queue: \(error.localizedDescription)"
                 }
-            } catch {
-                lastError = "Failed to list guest files: \(error.localizedDescription)"
+            } else {
+                self.lastError = "Failed to fetch: \(failedPaths.joined(separator: ", "))"
+                NSLog("[FileTransfer] %d file(s) failed, queue NOT cleared", failedPaths.count)
             }
         }
     }

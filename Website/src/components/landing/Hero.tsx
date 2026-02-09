@@ -1,15 +1,15 @@
-import Image from "next/image";
-import Link from "next/link";
+import Image from "next/image"
+import Link from "next/link"
 
 export default function Hero() {
   return (
     <section className="py-20 sm:py-28">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
-          Agentic Workspace VMs
+          Agentic Workspaces
           <br />
           <span className="text-ghost-600 dark:text-ghost-400">
-            for macOS
+            Virtualization for macOS
           </span>
         </h1>
         <p className="text-lg sm:text-xl text-gray-600 dark:text-gray-400 max-w-2xl mx-auto mb-10">
@@ -47,5 +47,5 @@ export default function Hero() {
         </div>
       </div>
     </section>
-  );
+  )
 }

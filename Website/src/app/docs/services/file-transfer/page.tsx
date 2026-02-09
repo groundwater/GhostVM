@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import Link from "next/link";
+import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
 export const metadata: Metadata = { title: "File Transfer - GhostVM Docs" };
@@ -33,6 +35,20 @@ export default function FileTransfer() {
         Received files are saved to the host&apos;s Downloads folder by default.
       </p>
 
+      <h2>File Quarantine</h2>
+      <p>
+        Files received from the guest are automatically tagged with the{" "}
+        <code>com.apple.quarantine</code> extended attribute. This means macOS
+        Gatekeeper will verify them before they can be opened or executed — the
+        same protection applied to files downloaded from the web.
+      </p>
+
+      <Callout variant="info" title="Why Quarantine?">
+        A guest VM is an untrusted boundary. Quarantining received files ensures
+        that code from the workspace cannot bypass Gatekeeper simply by being
+        transferred to the host.
+      </Callout>
+
       <h2>Transfer Protocol</h2>
       <p>
         File transfer uses the vsock event stream (port 5003). Files are sent as
@@ -48,7 +64,7 @@ export default function FileTransfer() {
       <h2>Requirements</h2>
       <p>
         File transfer requires{" "}
-        <a href="/docs/ghosttools">GhostTools</a> running in the guest VM.
+        <Link href="/docs/ghosttools">GhostTools</Link> running in the guest VM.
       </p>
 
       <PrevNextNav currentHref="/docs/services/file-transfer" />

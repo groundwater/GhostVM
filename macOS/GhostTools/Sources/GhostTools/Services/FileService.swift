@@ -52,8 +52,9 @@ final class FileService {
     func readFile(at path: String) throws -> (data: Data, filename: String, permissions: Int?) {
         let url = resolveFilePath(path)
 
-        // Security check: ensure we're not accessing sensitive system files
-        guard isPathAllowed(url) else {
+        // Security check: allow files the user explicitly queued for sending,
+        // otherwise block sensitive system directories
+        guard isOutgoingFile(url.path) || isPathAllowed(url) else {
             throw FileServiceError.accessDenied
         }
 

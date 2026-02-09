@@ -40,16 +40,24 @@ export default function GUIApp() {
       </p>
       <ul>
         <li>
-          <strong>Guest Tools status</strong> &mdash; green dot when GhostTools
-          is connected
+          <strong>Guest Tools status</strong> &mdash; three-state indicator
+          (connecting, connected, not found) so you always know the current state
         </li>
         <li>
           <strong>Port Forwards</strong> &mdash; view and edit active port
-          mappings
+          mappings, with auto-detected ports and process names
         </li>
         <li>
           <strong>Clipboard Sync</strong> &mdash; toggle sync mode
           (bidirectional, host-to-guest, guest-to-host, or disabled)
+        </li>
+        <li>
+          <strong>Icon Chooser</strong> &mdash; switch the workspace Dock icon
+          between Generic, App, Stack, and Custom modes, saved instantly
+        </li>
+        <li>
+          <strong>Capture Inputs</strong> &mdash; toggle to send all keyboard
+          input directly to the VM, bypassing host shortcuts
         </li>
         <li>
           <strong>File receive</strong> &mdash; accept files queued by the guest
@@ -120,7 +128,8 @@ export default function GUIApp() {
       <p>
         The Restore Images window lists available macOS versions from the
         configured IPSW feed. You can download, resume, cancel, or delete
-        restore images. Downloads include SHA-1 verification.
+        restore images. Downloads are resumable and include SHA-1 verification
+        to ensure integrity.
       </p>
 
       <PrevNextNav currentHref="/docs/gui-app" />

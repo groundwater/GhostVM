@@ -110,6 +110,44 @@ final class ScreenshotTests: XCTestCase {
         add(attachment)
     }
 
+    // MARK: - Edit VM Sheet
+
+    func testCaptureEditVMSheet() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ui-testing", "--ui-testing-with-vms", "--ui-testing-tall"]
+        app.launch()
+
+        let window = app.windows["GhostVM"]
+        XCTAssertTrue(window.waitForExistence(timeout: 5))
+
+        // Right-click the second VM row (first is "Running" so Edit is disabled)
+        let list = window.outlines.firstMatch.exists ? window.outlines.firstMatch : window.tables.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 3))
+        let secondRow = list.cells.element(boundBy: 1)
+        XCTAssertTrue(secondRow.waitForExistence(timeout: 3))
+        secondRow.rightClick()
+
+        // Click "Edit Settings…" in the context menu (U+2026 ellipsis)
+        let editMenuItem = app.menuItems["Edit Settings\u{2026}"]
+        XCTAssertTrue(editMenuItem.waitForExistence(timeout: 3))
+        editMenuItem.click()
+
+        // Wait for the sheet to appear (look for Save button)
+        let saveButton = window.buttons["Save"]
+        XCTAssertTrue(saveButton.waitForExistence(timeout: 5))
+
+        sleep(1)
+
+        // Capture just the sheet, not the whole window with dimmed background
+        let sheet = window.sheets.firstMatch
+        XCTAssertTrue(sheet.exists)
+        let screenshot = sheet.screenshot()
+        let attachment = XCTAttachment(screenshot: screenshot)
+        attachment.name = "edit-vm-sheet"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
     // MARK: - Context Menu
 
     func testCaptureContextMenu() {

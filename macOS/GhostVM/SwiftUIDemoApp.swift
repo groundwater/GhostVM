@@ -408,6 +408,7 @@ struct VMListDemoView: View {
                 get: { vmToEdit != nil },
                 set: { if !$0 { vmToEdit = nil } }
             ))
+            .presentationSizing(.fitted)
         }
         // Install VM sheet
         .sheet(item: $vmToInstall) { vm in
@@ -1045,7 +1046,7 @@ struct EditVMView: View {
             }
             .padding(EdgeInsets(top: 8, leading: 24, bottom: 18, trailing: 24))
         }
-        .frame(minWidth: 620)
+        .frame(minWidth: 620, minHeight: 500, idealHeight: 780, maxHeight: 1200)
         .onAppear {
             loadCurrentSettings()
         }

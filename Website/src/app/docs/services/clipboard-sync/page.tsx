@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import Link from "next/link";
+import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
 export const metadata: Metadata = { title: "Clipboard Sync - GhostVM Docs" };
@@ -54,6 +56,30 @@ export default function ClipboardSync() {
         </tbody>
       </table>
 
+      <h2>Permission Panel</h2>
+      <p>
+        When a workspace attempts to sync the clipboard, a permission panel
+        appears with three options:
+      </p>
+      <ul>
+        <li>
+          <strong>Deny</strong> — block the sync. Nothing is copied.
+        </li>
+        <li>
+          <strong>Allow Once</strong> — permit this single sync. The panel will
+          appear again next time.
+        </li>
+        <li>
+          <strong>Always Allow</strong> — permit all future syncs for this
+          workspace without asking again.
+        </li>
+      </ul>
+
+      <Callout variant="info" title="Changing Permissions">
+        You can reset a workspace&apos;s clipboard permission at any time from the
+        VM toolbar clipboard menu.
+      </Callout>
+
       <h2>How it Works</h2>
       <p>
         Clipboard sync is event-driven — it activates when the VM window gains
@@ -80,7 +106,7 @@ export default function ClipboardSync() {
       <h2>Requirements</h2>
       <p>
         Clipboard sync requires{" "}
-        <a href="/docs/ghosttools">GhostTools</a> to be running inside the
+        <Link href="/docs/ghosttools">GhostTools</Link> to be running inside the
         guest VM. The Guest Tools indicator in the VM toolbar shows connection
         status.
       </p>

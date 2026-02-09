@@ -1009,6 +1009,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     // MARK: - QueuedFilesPanelDelegate
 
     func queuedFilesPanelDidAllow(_ panel: QueuedFilesPanel) {
+        NSLog("HelperToolbar: Save clicked, delegate=%@", delegate != nil ? "present" : "NIL")
         panel.close()
         queuedFilesPanel = nil
         queuedFileNames = []

@@ -18,7 +18,7 @@ export default function Services() {
       <p>
         When a VM is running, the host creates a <code>GhostClient</code> that
         connects to the guest via vsock. The guest runs{" "}
-        <a href="/docs/ghosttools">GhostTools</a>, a companion app that
+        <Link href="/docs/ghosttools">GhostTools</Link>, a companion app that
         provides the server-side of these services.
       </p>
       <p>
@@ -34,7 +34,8 @@ export default function Services() {
         >
           <h3 className="text-lg font-semibold mb-2">Clipboard Sync</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            Bidirectional clipboard sharing between host and guest.
+            Bidirectional clipboard sharing between host and guest, with
+            permission controls for deny, allow once, or always allow.
           </p>
         </Link>
         <Link
@@ -43,7 +44,8 @@ export default function Services() {
         >
           <h3 className="text-lg font-semibold mb-2">File Transfer</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            Drag-and-drop files into the VM or receive files from the guest.
+            Drag-and-drop files into the VM or receive files from the guest,
+            with automatic quarantine for Gatekeeper verification.
           </p>
         </Link>
         <Link
@@ -52,7 +54,8 @@ export default function Services() {
         >
           <h3 className="text-lg font-semibold mb-2">Port Forwarding</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            Map guest ports to localhost for accessing services running in VMs.
+            Auto-detect guest ports with process names and map them to localhost
+            for instant access.
           </p>
         </Link>
         <Link

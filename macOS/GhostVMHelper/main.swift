@@ -107,6 +107,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - App Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSLog("GhostVMHelper: BUILD 2025-02-09A — file transfer debug build")
         // Parse command line arguments
         let args = ProcessInfo.processInfo.arguments
         if let bundleIndex = args.firstIndex(of: "--vm-bundle"), bundleIndex + 1 < args.count {
@@ -240,13 +241,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         vmMenu.addItem(NSMenuItem.separator())
 
-        let suspendItem = NSMenuItem(title: "Suspend", action: #selector(suspendVMAction), keyEquivalent: "s")
-        suspendItem.keyEquivalentModifierMask = [.command, .option]
+        let suspendItem = NSMenuItem(title: "Suspend", action: #selector(suspendVMAction), keyEquivalent: "")
         suspendItem.target = self
         vmMenu.addItem(suspendItem)
 
-        let shutdownItem = NSMenuItem(title: "Shut Down", action: #selector(shutdownVMAction), keyEquivalent: "q")
-        shutdownItem.keyEquivalentModifierMask = [.command, .option]
+        let shutdownItem = NSMenuItem(title: "Shut Down", action: #selector(shutdownVMAction), keyEquivalent: "")
         shutdownItem.target = self
         vmMenu.addItem(shutdownItem)
 
@@ -262,11 +261,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let windowMenu = NSMenu(title: "Window")
         windowMenuItem.submenu = windowMenu
 
-        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m"))
+        windowMenu.addItem(NSMenuItem(title: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: ""))
         windowMenu.addItem(NSMenuItem(title: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: ""))
         windowMenu.addItem(NSMenuItem.separator())
-        let fullscreenItem = NSMenuItem(title: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
-        fullscreenItem.keyEquivalentModifierMask = [.command, .control]
+        let fullscreenItem = NSMenuItem(title: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "")
         windowMenu.addItem(fullscreenItem)
 
         NSApp.mainMenu = mainMenu
@@ -481,6 +479,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar) {
+        NSLog("GhostVMHelper: toolbarDidRequestReceiveFiles called, fileTransferService=%@", fileTransferService != nil ? "present" : "NIL")
         window?.level = .normal
         fileTransferService?.fetchAllGuestFiles()
         restoreVMViewFocus()
@@ -542,20 +541,22 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
+        // Use the file paths we already have from the event stream
+        // instead of making a redundant HTTP round-trip via listGuestFiles()
+        let paths = fileTransferService?.queuedGuestFilePaths ?? []
+        let names = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+        NSLog("GhostVMHelper: toolbarDidDetectNewQueuedFiles — %d file(s) from event stream", names.count)
+        helperToolbar?.setQueuedFileNames(names)
+
+        // Float the window above ALL other apps — this is the only
+        // reliable way to appear in front on macOS 14+.
+        window?.level = .floating
+        window?.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+        NSApp.requestUserAttention(.criticalRequest)
+
         Task {
-            let files = (try? await fileTransferService?.listGuestFiles()) ?? []
-            let names = files.map { URL(fileURLWithPath: $0).lastPathComponent }
-            helperToolbar?.setQueuedFileNames(names)
-
-            // Float the window above ALL other apps — this is the only
-            // reliable way to appear in front on macOS 14+.
-            window?.level = .floating
-            window?.orderFrontRegardless()
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.requestUserAttention(.criticalRequest)
-
             try? await Task.sleep(for: .milliseconds(200))
-
             helperToolbar?.showQueuedFilesPopover()
         }
     }

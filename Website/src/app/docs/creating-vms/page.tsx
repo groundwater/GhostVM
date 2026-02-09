@@ -29,7 +29,7 @@ export default function CreatingVMs() {
       <ul>
         <li>
           VMs are stored as self-contained <code>.GhostVM</code> bundles (
-          <a href="/docs/vm-bundles">learn more</a>)
+          <Link href="/docs/vm-bundles">learn more</Link>)
         </li>
         <li>
           Each bundle contains the disk image, configuration, snapshots, and

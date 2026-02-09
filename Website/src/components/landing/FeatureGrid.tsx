@@ -2,6 +2,7 @@ import {
   Package,
   Zap,
   Camera,
+  Shield,
 } from "lucide-react";
 
 const features = [
@@ -23,6 +24,12 @@ const features = [
     description:
       "Checkpoint before risky changes. Create, revert, and delete snapshots to save and restore full workspace state.",
   },
+  {
+    icon: Shield,
+    title: "Security Boundaries",
+    description:
+      "Files from guests are quarantined for Gatekeeper verification. Clipboard sync requires explicit permission — deny, allow once, or always allow.",
+  },
 ];
 
 export default function FeatureGrid() {
@@ -30,9 +37,9 @@ export default function FeatureGrid() {
     <section className="py-20">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <h2 className="text-3xl font-bold text-center mb-12">
-          Built for speed, isolation, and portability
+          Built for speed, isolation, and security
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
           {features.map((feature) => (
             <div
               key={feature.title}

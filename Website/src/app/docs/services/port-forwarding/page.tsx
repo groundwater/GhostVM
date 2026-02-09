@@ -42,12 +42,44 @@ export default function PortForwarding() {
 }`}
       </CodeBlock>
 
-      <h2>Auto Port Mapping</h2>
+      <h2>Auto Port Detection</h2>
       <p>
-        GhostVM includes automatic port mapping that detects listening ports
-        inside the guest (reported by GhostTools) and creates port forwards
-        automatically. If the desired host port is already in use, GhostVM falls
-        back to an available port.
+        GhostVM automatically detects listening TCP ports inside the guest
+        (reported by GhostTools) and creates port forwards on the fly. No manual
+        configuration is needed for most workflows.
+      </p>
+
+      <h3>Process Names</h3>
+      <p>
+        Each auto-detected port shows the name of the process that opened it —
+        for example <code>node</code>, <code>python</code>, or{" "}
+        <code>postgres</code>. This makes it easy to tell which service is
+        behind each port at a glance.
+      </p>
+
+      <h3>Notification Popup</h3>
+      <p>
+        When a new port is detected, a lightweight notification appears so you
+        know a service just started listening. No action is required — the
+        forward is already active.
+      </p>
+
+      <h3>Management Panel</h3>
+      <p>
+        Click the network icon in the VM toolbar to open the management panel.
+        From here you can:
+      </p>
+      <ul>
+        <li>Block or unblock individual auto-detected ports</li>
+        <li>Copy the <code>localhost</code> URL for any forward</li>
+        <li>Manually add or remove static port forwards</li>
+      </ul>
+
+      <h3>Host Port Fallback</h3>
+      <p>
+        If the desired host port is already in use, GhostVM tries port+1,
+        port+2, and so on until it finds an available port. The actual host port
+        is shown in the management panel.
       </p>
 
       <Callout variant="info" title="Quick Access">

@@ -51,6 +51,7 @@ final class QueuedFilesPanel: NSObject, NSPopoverDelegate {
 
 extension QueuedFilesPanel: QueuedFilesContentViewControllerDelegate {
     func contentViewControllerDidAllow(_ vc: QueuedFilesContentViewController) {
+        NSLog("QueuedFilesPanel: Save clicked, delegate=%@", delegate != nil ? "present" : "NIL")
         delegate?.queuedFilesPanelDidAllow(self)
     }
 
