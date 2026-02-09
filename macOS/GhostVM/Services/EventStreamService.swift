@@ -3,11 +3,26 @@ import AppKit
 import Combine
 import Virtualization
 
+/// A guest port with optional process name.
+public struct GuestPort: Equatable {
+    public let port: Int
+    public let process: String
+}
+
+/// Guest foreground app info pushed via the event stream.
+public struct GuestForegroundApp: Equatable {
+    public let name: String
+    public let bundleId: String
+    public let icon: NSImage?
+}
+
 /// Persistent event stream from guest via vsock port 5003.
 /// Reads NDJSON lines and dispatches: file queue updates, URL opens, log messages.
 @MainActor
 public final class EventStreamService: ObservableObject {
     @Published public private(set) var queuedGuestFiles: [String] = []
+    @Published public private(set) var detectedGuestPorts: [GuestPort] = []
+    @Published public private(set) var foregroundApp: GuestForegroundApp?
 
     public var queuedGuestFileCount: Int { queuedGuestFiles.count }
 
@@ -30,6 +45,8 @@ public final class EventStreamService: ObservableObject {
         task = nil
         client = nil
         queuedGuestFiles = []
+        detectedGuestPorts = []
+        foregroundApp = nil
     }
 
     private func reconnectLoop() async {
@@ -109,10 +126,47 @@ public final class EventStreamService: ObservableObject {
             if let urls = obj["urls"] as? [String] {
                 Task { @MainActor in
                     for urlString in urls {
-                        if let url = URL(string: urlString) {
+                        if let url = URL(string: urlString),
+                           let scheme = url.scheme?.lowercased(),
+                           scheme == "http" || scheme == "https" {
                             NSWorkspace.shared.open(url)
                         }
                     }
+                }
+            }
+        case "ports":
+            if let portObjects = obj["ports"] as? [[String: Any]] {
+                // New format: [{"port": 5012, "process": "node"}, ...]
+                let guestPorts = portObjects.compactMap { entry -> GuestPort? in
+                    guard let port = entry["port"] as? Int else { return nil }
+                    let process = entry["process"] as? String ?? ""
+                    return GuestPort(port: port, process: process)
+                }
+                let summary = guestPorts.map { "\($0.process.isEmpty ? "?" : $0.process):\($0.port)" }
+                NSLog("EventStream: ports (new format): %@", summary.joined(separator: ", "))
+                Task { @MainActor [weak self] in
+                    self?.detectedGuestPorts = guestPorts
+                }
+            } else if let ports = obj["ports"] as? [Int] {
+                // Legacy format: [5012, 3000, ...] — no process names
+                NSLog("EventStream: ports (LEGACY format, no process names): %@", ports.map { String($0) }.joined(separator: ", "))
+                let guestPorts = ports.map { GuestPort(port: $0, process: "") }
+                Task { @MainActor [weak self] in
+                    self?.detectedGuestPorts = guestPorts
+                }
+            } else {
+                NSLog("EventStream: WARNING: 'ports' field not parseable: %@", String(describing: obj["ports"]))
+            }
+        case "app":
+            if let name = obj["name"] as? String, let bundleId = obj["bundleId"] as? String {
+                var icon: NSImage? = nil
+                if let iconStr = obj["icon"] as? String,
+                   let iconData = Data(base64Encoded: iconStr) {
+                    icon = NSImage(data: iconData)
+                }
+                let app = GuestForegroundApp(name: name, bundleId: bundleId, icon: icon)
+                Task { @MainActor [weak self] in
+                    self?.foregroundApp = app
                 }
             }
         case "log":

@@ -3,8 +3,8 @@ import SwiftUI
 import UserNotifications
 import CoreServices
 
-/// GhostTools version - update this when making changes to verify correct binary is running
-let kGhostToolsVersion = "1.40.0"
+/// GhostTools version - reads from Info.plist; falls back to "dev" when running bare binary
+let kGhostToolsVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
@@ -31,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var tunnelServer: TunnelServer?
     private var healthServer: HealthServer?
     private var isServerRunning = false
+    private var isFilePickerOpen = false
+    private var preferencesWindowController: PreferencesWindowController?
 
     /// Files queued for sending to host (accessor for FileService)
     private var filesToSend: [URL] {
@@ -67,13 +69,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
+        setupGlobalShortcut()
         requestNotificationPermission()
         installLaunchAgentIfNeeded()
         registerAsDefaultBrowser()
+
+        // Refresh menu when outgoing files change (e.g. host clears queue via DELETE)
+        NotificationCenter.default.addObserver(forName: .outgoingFilesChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.updateMenu()
+        }
+
         startServer()
         startTunnelServer()
         startHealthServer()
         startEventPushServer()
+        startPortScanner()
+        startForegroundAppService()
         startUpdateChecker()
     }
 
@@ -356,6 +367,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        GlobalShortcutService.shared.stop()
+        ForegroundAppService.shared.stop()
+        PortScannerService.shared.stop()
         server?.stop()
         tunnelServer?.stop()
         healthServer?.stop()
@@ -401,18 +415,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateStatusIcon(connected: Bool) {
         guard let button = statusItem?.button else { return }
-
-        let color = connected ? NSColor.systemGreen : NSColor.systemGray
-
-        if let image = NSImage(systemSymbolName: "app.connected.to.app.below.fill", accessibilityDescription: "GhostTools") {
-            let colorConfig = NSImage.SymbolConfiguration(paletteColors: [color])
+        if let image = NSImage(systemSymbolName: "gearshape.2.fill", accessibilityDescription: "GhostTools") {
             let sizeConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
-            let configuredImage = image.withSymbolConfiguration(colorConfig.applying(sizeConfig))
-            button.image = configuredImage
+            button.image = image.withSymbolConfiguration(sizeConfig)
         } else {
             button.title = "●"
-            button.contentTintColor = color
         }
+        button.alphaValue = connected ? 1.0 : 0.5
     }
 
     private func updateMenu() {
@@ -434,7 +443,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Send to Host menu item
-        let sendToHostItem = NSMenuItem(title: "Send to Host...", action: #selector(sendToHost), keyEquivalent: "s")
+        let shortcut = GlobalShortcutService.shared.currentShortcut
+        let sendToHostItem = NSMenuItem(
+            title: "Send to Host...",
+            action: #selector(sendToHost),
+            keyEquivalent: GlobalShortcutService.shared.isEnabled ? shortcut.keyEquivalentCharacter : ""
+        )
+        if GlobalShortcutService.shared.isEnabled {
+            sendToHostItem.keyEquivalentModifierMask = shortcut.keyEquivalentModifierMask
+        }
         sendToHostItem.target = self
         menu.addItem(sendToHostItem)
 
@@ -461,6 +478,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Preferences
+        let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(showPreferences), keyEquivalent: ",")
+        prefsItem.target = self
+        menu.addItem(prefsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         // Quit
         let quitItem = NSMenuItem(title: "Quit GhostTools", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         menu.addItem(quitItem)
@@ -469,6 +493,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func sendToHost() {
+        guard !isFilePickerOpen else { return }
+        isFilePickerOpen = true
+
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
@@ -483,6 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
 
         panel.begin { [weak self] response in
+            self?.isFilePickerOpen = false
             guard response == .OK else { return }
             let urls = panel.urls
             guard !urls.isEmpty else { return }
@@ -491,6 +519,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.queueFilesForHost(urls)
             }
         }
+    }
+
+    @objc private func showPreferences() {
+        if preferencesWindowController == nil {
+            preferencesWindowController = PreferencesWindowController()
+            preferencesWindowController?.onSettingsChanged = { [weak self] in
+                self?.updateMenu()
+            }
+        }
+        preferencesWindowController?.showWindow(nil)
+    }
+
+    private func setupGlobalShortcut() {
+        GlobalShortcutService.shared.onShortcutTriggered = { [weak self] in
+            self?.sendToHost()
+        }
+        GlobalShortcutService.shared.start()
+        print("[GhostTools] Global shortcut setup complete")
     }
 
     private func queueFilesForHost(_ urls: [URL]) {
@@ -583,6 +629,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[GhostTools] Failed to start event push server: \(error)")
             }
         }
+    }
+
+    private func startPortScanner() {
+        print("[GhostTools] Starting port scanner service...")
+        PortScannerService.shared.start()
+    }
+
+    private func startForegroundAppService() {
+        print("[GhostTools] Starting foreground app service...")
+        ForegroundAppService.shared.start()
     }
 }
 

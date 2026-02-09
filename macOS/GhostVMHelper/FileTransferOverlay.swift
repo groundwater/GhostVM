@@ -10,6 +10,7 @@ public struct FileWithRelativePath {
 /// Delegate protocol for file transfer events
 protocol FileTransferDelegate: AnyObject {
     func fileTransfer(didReceiveFiles files: [FileWithRelativePath])
+    func fileTransfer(didRequestShareFolders folders: [URL], readOnly: Bool, copyFiles files: [FileWithRelativePath])
 }
 
 /// Custom VZVirtualMachineView subclass that supports file drag-and-drop
@@ -114,12 +115,38 @@ final class FocusableVMView: VZVirtualMachineView {
         isDragging = false
         hideDropZone()
 
-        guard let files = extractFilesWithPaths(from: sender), !files.isEmpty else {
+        let pasteboard = sender.draggingPasteboard
+        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty else {
             return false
         }
 
-        NSLog("GhostVMHelper: Dropping \(files.count) file(s)")
-        fileTransferDelegate?.fileTransfer(didReceiveFiles: files)
+        // Separate folders from files
+        let fm = FileManager.default
+        var folderURLs: [URL] = []
+        var fileURLs: [URL] = []
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                folderURLs.append(url)
+            } else {
+                fileURLs.append(url)
+            }
+        }
+
+        guard !folderURLs.isEmpty || !fileURLs.isEmpty else { return false }
+
+        if folderURLs.isEmpty {
+            // No folders — copy files directly (existing behavior)
+            let files = enumerateFiles(folderURLs: [], fileURLs: fileURLs)
+            guard !files.isEmpty else { return false }
+            NSLog("GhostVMHelper: Dropping \(files.count) file(s)")
+            fileTransferDelegate?.fileTransfer(didReceiveFiles: files)
+        } else {
+            // Folders present — ask Share or Copy
+            showShareOrCopyAlert(folderURLs: folderURLs, fileURLs: fileURLs)
+        }
+
         return true
     }
 
@@ -149,42 +176,62 @@ final class FocusableVMView: VZVirtualMachineView {
         return pasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
     }
 
-    private func extractFilesWithPaths(from draggingInfo: NSDraggingInfo) -> [FileWithRelativePath]? {
-        let pasteboard = draggingInfo.draggingPasteboard
-        guard let urls = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] else {
-            return nil
-        }
+    private func showShareOrCopyAlert(folderURLs: [URL], fileURLs: [URL]) {
+        let folderNames = folderURLs.map { $0.lastPathComponent }.joined(separator: ", ")
 
+        let readOnlyCheckbox = NSButton(checkboxWithTitle: "Read only", target: nil, action: nil)
+        readOnlyCheckbox.state = .on
+
+        let alert = NSAlert()
+        alert.messageText = "Share or Copy?"
+        alert.informativeText = "You dropped \(folderURLs.count == 1 ? "a folder" : "\(folderURLs.count) folders") (\(folderNames)).\n\nShare mounts the folder in the guest for direct access.\nCopy sends individual files to the guest."
+        alert.alertStyle = .informational
+        alert.accessoryView = readOnlyCheckbox
+        alert.addButton(withTitle: "Share")
+        alert.addButton(withTitle: "Copy")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        switch response {
+        case .alertFirstButtonReturn:
+            // Share — loose files still get copied
+            let readOnly = readOnlyCheckbox.state == .on
+            let looseFiles = enumerateFiles(folderURLs: [], fileURLs: fileURLs)
+            NSLog("GhostVMHelper: Sharing \(folderURLs.count) folder(s) (readOnly=\(readOnly)), copying \(looseFiles.count) loose file(s)")
+            fileTransferDelegate?.fileTransfer(didRequestShareFolders: folderURLs, readOnly: readOnly, copyFiles: looseFiles)
+        case .alertSecondButtonReturn:
+            // Copy — enumerate folders recursively
+            let allFiles = enumerateFiles(folderURLs: folderURLs, fileURLs: fileURLs)
+            guard !allFiles.isEmpty else { return }
+            NSLog("GhostVMHelper: Copying \(allFiles.count) file(s)")
+            fileTransferDelegate?.fileTransfer(didReceiveFiles: allFiles)
+        default:
+            break
+        }
+    }
+
+    private func enumerateFiles(folderURLs: [URL], fileURLs: [URL]) -> [FileWithRelativePath] {
         var result: [FileWithRelativePath] = []
         let fm = FileManager.default
 
-        for url in urls {
-            var isDirectory: ObjCBool = false
-            guard fm.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
-
-            if isDirectory.boolValue {
-                // For directories, preserve the folder name as the base of relative paths
-                let baseFolderName = url.lastPathComponent
-                let baseURL = url
-
-                // Enumerate all files in directory recursively
-                if let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
-                    for case let fileURL as URL in enumerator {
-                        var isFile: ObjCBool = false
-                        if fm.fileExists(atPath: fileURL.path, isDirectory: &isFile) && !isFile.boolValue {
-                            // Compute relative path: folder/subfolder/file.txt
-                            let relativePath = baseFolderName + "/" + fileURL.path.dropFirst(baseURL.path.count + 1)
-                            result.append(FileWithRelativePath(url: fileURL, relativePath: String(relativePath)))
-                        }
+        for url in folderURLs {
+            let baseFolderName = url.lastPathComponent
+            if let enumerator = fm.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                for case let fileURL as URL in enumerator {
+                    var isFile: ObjCBool = false
+                    if fm.fileExists(atPath: fileURL.path, isDirectory: &isFile) && !isFile.boolValue {
+                        let relativePath = baseFolderName + "/" + fileURL.path.dropFirst(url.path.count + 1)
+                        result.append(FileWithRelativePath(url: fileURL, relativePath: String(relativePath)))
                     }
                 }
-            } else {
-                // Single file - relative path is just the filename
-                result.append(FileWithRelativePath(url: url, relativePath: url.lastPathComponent))
             }
         }
 
-        return result.isEmpty ? nil : result
+        for url in fileURLs {
+            result.append(FileWithRelativePath(url: url, relativePath: url.lastPathComponent))
+        }
+
+        return result
     }
 }
 

@@ -45,7 +45,7 @@ final class App2VMSessionRegistry {
     ///   - store: The VM store to update status in
     ///   - vmID: The VM's ID in the store for status updates
     ///   - runningPID: If non-nil, reconnect to an already-running helper instead of launching a new one
-    func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil) {
+    func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil, recovery: Bool = false) {
         let path = bundleURL.standardizedFileURL.path
         lock.lock()
         var session = sessions[path]
@@ -82,6 +82,7 @@ final class App2VMSessionRegistry {
         if let pid = runningPID {
             session?.reconnectToRunningHelper(pid: pid)
         } else {
+            session?.recoveryBoot = recovery
             session?.startIfNeeded()
         }
     }
@@ -104,6 +105,9 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     @Published private(set) var state: State = .idle
     @Published private(set) var statusText: String = ""
     @Published private(set) var virtualMachine: VZVirtualMachine?
+
+    /// When true, the helper app will boot into macOS Recovery mode.
+    var recoveryBoot: Bool = false
 
     /// The VM's dispatch queue, needed for vsock operations
     var vmQueue: DispatchQueue? { windowlessSession?.vmQueue }
@@ -335,8 +339,13 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
             // Launch the helper app with VM bundle path (use standardized path)
             let configuration = NSWorkspace.OpenConfiguration()
-            configuration.arguments = ["--vm-bundle", standardizedPath]
+            var args = ["--vm-bundle", standardizedPath]
+            if recoveryBoot {
+                args.append("--recovery")
+            }
+            configuration.arguments = args
             configuration.activates = true
+            configuration.createsNewApplicationInstance = true
 
             NSWorkspace.shared.openApplication(
                 at: helperAppURL,
@@ -374,8 +383,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         case "running":
             App2VMSessionRegistry.shared.register(self)
             transition(to: .running, message: "Running")
-        case "stopping":
-            transition(to: .stopping, message: "Stopping…")
         case "suspending":
             transition(to: .suspending, message: "Suspending…")
         case "stopped":
@@ -573,35 +580,20 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    private var stopTimeoutWorkItem: DispatchWorkItem?
-
     func stop() {
         guard helperProcess != nil else {
             transition(to: .stopped, message: "Stopped")
             return
         }
 
-        transition(to: .stopping, message: "Stopping…")
-
-        // Set up a 15-second timeout
-        let timeoutWorkItem = DispatchWorkItem { [weak self] in
-            guard let self = self else { return }
-            if case .stopping = self.state {
-                self.transition(to: .failed("Stop timed out. Use Terminate to force quit."))
-            }
-        }
-        stopTimeoutWorkItem = timeoutWorkItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeoutWorkItem)
-
-        // Send stop command to helper
+        // Fire-and-forget: just send the power button event to the helper.
+        // Don't change local state — the guest may show a confirmation
+        // dialog and the user might cancel.  The helper will notify us
+        // via DistributedNotificationCenter when the VM actually stops.
         sendStopToHelper()
     }
 
     func terminate() {
-        // Cancel any pending stop timeout
-        stopTimeoutWorkItem?.cancel()
-        stopTimeoutWorkItem = nil
-
         guard helperProcess != nil else {
             transition(to: .stopped, message: "Stopped")
             return
@@ -651,15 +643,6 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             case .failed(let text):
                 statusText = "Error: \(text)"
             }
-        }
-
-        // Cancel stop timeout on terminal states
-        switch newState {
-        case .stopped, .failed:
-            stopTimeoutWorkItem?.cancel()
-            stopTimeoutWorkItem = nil
-        default:
-            break
         }
 
         // Note: Services (clipboard, port forwarding, log polling) now run in the helper app

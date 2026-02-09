@@ -10,8 +10,6 @@ final class VMStoredConfigNormalizeTests: XCTestCase {
         diskPath: String = "disk.img",
         sharedFolderPath: String? = nil,
         sharedFolders: [SharedFolderConfig] = [],
-        guestOSType: String = "macOS",
-        efiVariableStorePath: String? = nil,
         legacyName: String? = nil
     ) -> VMStoredConfig {
         let now = Date()
@@ -34,9 +32,7 @@ final class VMStoredConfigNormalizeTests: XCTestCase {
             lastInstallBuild: nil,
             lastInstallVersion: nil,
             lastInstallDate: nil,
-            legacyName: legacyName,
-            guestOSType: guestOSType,
-            efiVariableStorePath: efiVariableStorePath
+            legacyName: legacyName
         )
     }
 

@@ -6,12 +6,13 @@ final class MockGhostClient: GhostClientProtocol {
     var clipboardContent: String?
     var clipboardType: String?
     var setClipboardCalls: [(content: String, type: String)] = []
-    var sentFiles: [(url: URL, relativePath: String?)] = []
+    var sentFiles: [(url: URL, relativePath: String?, batchID: String?, isLastInBatch: Bool, permissions: Int?)] = []
     var healthResult: Bool = true
     var shouldThrow: Error?
     var fileList: [String] = []
     var fetchedFileData: Data = Data()
     var fetchedFilename: String = "test.txt"
+    var fetchedPermissions: Int? = nil
     var clearFileQueueCalled = false
     var getClipboardCallCount = 0
     var checkHealthCallCount = 0
@@ -27,16 +28,16 @@ final class MockGhostClient: GhostClientProtocol {
         setClipboardCalls.append((content: content, type: type))
     }
 
-    func sendFile(fileURL: URL, relativePath: String?, progressHandler: ((Double) -> Void)?) async throws -> String {
+    func sendFile(fileURL: URL, relativePath: String?, batchID: String?, isLastInBatch: Bool, permissions: Int?, progressHandler: ((Double) -> Void)?) async throws -> String {
         if let error = shouldThrow { throw error }
-        sentFiles.append((url: fileURL, relativePath: relativePath))
+        sentFiles.append((url: fileURL, relativePath: relativePath, batchID: batchID, isLastInBatch: isLastInBatch, permissions: permissions))
         progressHandler?(1.0)
         return "/guest/path/\(fileURL.lastPathComponent)"
     }
 
-    func fetchFile(at path: String) async throws -> (data: Data, filename: String) {
+    func fetchFile(at path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
         if let error = shouldThrow { throw error }
-        return (fetchedFileData, fetchedFilename)
+        return (fetchedFileData, fetchedFilename, fetchedPermissions)
     }
 
     func listFiles() async throws -> [String] {

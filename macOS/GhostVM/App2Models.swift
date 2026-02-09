@@ -8,24 +8,14 @@ struct App2VM: Identifiable, Hashable, Codable {
     var bundlePath: String
     var osVersion: String
     var status: String
-    var guestOSType: String
-    var installerISOPath: String?
     var installed: Bool
 
     var bundleURL: URL {
         URL(fileURLWithPath: bundlePath).standardizedFileURL
     }
 
-    var isLinux: Bool {
-        guestOSType == "Linux"
-    }
-
-    var isMacOS: Bool {
-        guestOSType == "macOS"
-    }
-
     var needsInstall: Bool {
-        isMacOS && !installed
+        !installed
     }
 }
 
@@ -39,11 +29,21 @@ final class App2VMStore: ObservableObject {
 
     init() {
         if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
-            vms = []
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing-with-vms") {
+                vms = Self.mockVMs
+            } else {
+                vms = []
+            }
         } else {
             loadKnownVMs()
         }
     }
+
+    private static let mockVMs: [App2VM] = [
+        App2VM(id: UUID(), name: "macOS Sequoia", bundlePath: "/tmp/mock/macOS-Sequoia.GhostVM", osVersion: "macOS 15.2", status: "Running", installed: true),
+        App2VM(id: UUID(), name: "macOS Dev", bundlePath: "/tmp/mock/macOS-Dev.GhostVM", osVersion: "macOS 15.4 Beta", status: "Stopped", installed: true),
+        App2VM(id: UUID(), name: "macOS Sonoma", bundlePath: "/tmp/mock/macOS-Sonoma.GhostVM", osVersion: "macOS 14.7", status: "Suspended", installed: true),
+    ]
 
     func reloadDefaultDirectory() {
         // Legacy helper retained for debugging.
@@ -146,8 +146,6 @@ final class App2VMStore: ObservableObject {
             bundlePath: reloaded.bundlePath,
             osVersion: reloaded.osVersion,
             status: reloaded.status,
-            guestOSType: reloaded.guestOSType,
-            installerISOPath: reloaded.installerISOPath,
             installed: reloaded.installed
         )
         vms[index] = updated
@@ -230,9 +228,7 @@ final class App2VMStore: ObservableObject {
         let entry = try controller.loadEntry(for: bundleURL)
 
         let osVersion: String
-        if entry.guestOSType == "Linux" {
-            osVersion = "Linux"
-        } else if let version = entry.lastInstallVersion {
+        if let version = entry.lastInstallVersion {
             osVersion = "macOS \(version)"
         } else if entry.installed {
             osVersion = "Installed"
@@ -246,8 +242,6 @@ final class App2VMStore: ObservableObject {
             bundlePath: bundleURL.path,
             osVersion: osVersion,
             status: entry.statusDescription,
-            guestOSType: entry.guestOSType,
-            installerISOPath: entry.installerISOPath,
             installed: entry.installed
         )
         return (vm, entry.runningPID)

@@ -17,8 +17,6 @@ public final class VMFileLayout {
     public var pidFileURL: URL { bundleURL.appendingPathComponent("vmctl.pid") }
     public var snapshotsDirectoryURL: URL { bundleURL.appendingPathComponent("Snapshots") }
     public var suspendStateURL: URL { bundleURL.appendingPathComponent("suspend.vzvmsave") }
-    public var efiVariableStoreURL: URL { bundleURL.appendingPathComponent("NVRAM.bin") }
-
     // MARK: - Helper App Bundle
 
     /// Directory containing the helper app bundle

@@ -139,8 +139,6 @@ public final class VMController {
             memoryBytes: config.memoryBytes,
             diskBytes: config.diskBytes,
             lastInstallVersion: config.lastInstallVersion,
-            guestOSType: config.guestOSType,
-            installerISOPath: config.installerISOPath,
             isSuspended: config.isSuspended
         )
     }
@@ -472,179 +470,6 @@ public final class VMController {
 
     public func initVM(name: String, options: InitOptions) throws {
         try initVM(at: bundleURL(for: name), preferredName: name, options: options)
-    }
-
-    // MARK: - Init Linux VM
-
-    public func initLinuxVM(at providedBundleURL: URL, preferredName: String? = nil, options: LinuxInitOptions) throws {
-        guard VZVirtualMachine.isSupported else {
-            throw VMError.message("Virtualization is not supported on this host. Ensure you are on Apple Silicon and virtualization is enabled.")
-        }
-
-        var bundleURL = providedBundleURL.standardizedFileURL
-        let ext = bundleURL.pathExtension.lowercased()
-        if ext.isEmpty {
-            bundleURL.appendPathExtension(VMController.bundleExtension)
-        } else if ext != VMController.bundleExtensionLowercased && ext != VMController.legacyBundleExtensionLowercased {
-            throw VMError.message("Bundle path must end with .\(VMController.bundleExtension) (or legacy .\(VMController.legacyBundleExtension)).")
-        }
-
-        let vmName: String
-        if let preferred = preferredName?.trimmingCharacters(in: .whitespacesAndNewlines), !preferred.isEmpty {
-            vmName = preferred
-        } else {
-            vmName = defaultName(for: bundleURL)
-        }
-
-        guard !vmName.isEmpty else {
-            throw VMError.message("VM name cannot be empty.")
-        }
-
-        var isDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: bundleURL.path, isDirectory: &isDirectory) {
-            throw VMError.message("Bundle \(bundleURL.path) already exists.")
-        }
-
-        let layout = VMFileLayout(bundleURL: bundleURL)
-        try layout.ensureBundleDirectory()
-
-        // Validate ISO path if provided
-        var isoAbsolutePath: String?
-        if let isoPath = options.isoPath {
-            let absoluteISO = standardizedAbsolutePath(isoPath)
-            guard fileManager.fileExists(atPath: absoluteISO) else {
-                throw VMError.message("ISO file does not exist: \(absoluteISO)")
-            }
-            // Warn if ISO filename suggests x86_64 architecture
-            let isoFilename = URL(fileURLWithPath: absoluteISO).lastPathComponent.lowercased()
-            if isoFilename.contains("x86") || isoFilename.contains("amd64") || isoFilename.contains("i386") || isoFilename.contains("i686") {
-                print("Warning: ISO filename '\(isoFilename)' suggests x86_64 architecture. This VM requires ARM64 ISOs.")
-            }
-            isoAbsolutePath = absoluteISO
-        }
-
-        let minCPUs = max(Int(VZVirtualMachineConfiguration.minimumAllowedCPUCount), 1)
-        let minMemory = VZVirtualMachineConfiguration.minimumAllowedMemorySize
-
-        if options.cpus < minCPUs {
-            throw VMError.message("CPU count \(options.cpus) is below minimum required \(minCPUs).")
-        }
-
-        let requestedMemoryBytes = options.memoryGiB * (1 << 30)
-        if requestedMemoryBytes < minMemory {
-            throw VMError.message("Memory \(options.memoryGiB) GiB is below minimum required \(minMemory >> 30) GiB.")
-        }
-
-        let requestedDiskBytes = options.diskGiB * (1 << 30)
-        if requestedDiskBytes < (10 * (1 << 30)) {
-            throw VMError.message("Disk size must be at least 10 GiB.")
-        }
-
-        // Create EFI variable store (NVRAM.bin)
-        do {
-            _ = try VZEFIVariableStore(creatingVariableStoreAt: layout.efiVariableStoreURL, options: [])
-        } catch {
-            throw VMError.message("Failed to create EFI variable store: \(error.localizedDescription)")
-        }
-
-        // Create disk image
-        if !fileManager.createFile(atPath: layout.diskURL.path, contents: nil, attributes: nil) {
-            throw VMError.message("Failed to create disk image at \(layout.diskURL.path).")
-        }
-        let handle = try FileHandle(forWritingTo: layout.diskURL)
-        try handle.truncate(atOffset: requestedDiskBytes)
-        try handle.close()
-
-        // Process shared folders
-        var validatedSharedFolders: [SharedFolderConfig] = []
-        for folder in options.sharedFolders {
-            let absolutePath = standardizedAbsolutePath(folder.path)
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: absolutePath, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw VMError.message("Shared folder path \(folder.path) does not exist or is not a directory.")
-            }
-            validatedSharedFolders.append(SharedFolderConfig(id: folder.id, path: absolutePath, readOnly: folder.readOnly))
-        }
-
-        if !fileManager.fileExists(atPath: layout.snapshotsDirectoryURL.path) {
-            try fileManager.createDirectory(at: layout.snapshotsDirectoryURL, withIntermediateDirectories: true, attributes: nil)
-        }
-
-        // Generate a persistent MAC address for this VM
-        let macAddress = VZMACAddress.randomLocallyAdministered()
-
-        let config = VMStoredConfig(
-            version: 1,
-            createdAt: Date(),
-            modifiedAt: Date(),
-            cpus: options.cpus,
-            memoryBytes: requestedMemoryBytes,
-            diskBytes: requestedDiskBytes,
-            restoreImagePath: "",  // Not used for Linux VMs
-            hardwareModelPath: "",  // Not used for Linux VMs
-            machineIdentifierPath: "",  // Not used for Linux VMs
-            auxiliaryStoragePath: "",  // Not used for Linux VMs
-            diskPath: layout.diskURL.lastPathComponent,
-            sharedFolderPath: nil,
-            sharedFolderReadOnly: true,
-            sharedFolders: validatedSharedFolders,
-            installed: true,  // Linux VMs are considered "installed" immediately (user installs via ISO)
-            lastInstallBuild: nil,
-            lastInstallVersion: nil,
-            lastInstallDate: nil,
-            legacyName: nil,
-            macAddress: macAddress.string,
-            guestOSType: "Linux",
-            efiVariableStorePath: layout.efiVariableStoreURL.lastPathComponent,
-            installerISOPath: isoAbsolutePath
-        )
-
-        let store = VMConfigStore(layout: layout)
-        try store.save(config)
-
-        print("Initialized Linux VM '\(vmName)' at \(bundleURL.path).")
-        if let isoPath = isoAbsolutePath {
-            print("Installer ISO: \(isoPath)")
-        } else {
-            print("No installer ISO attached. Use 'vmctl attach-iso' to add one.")
-        }
-        print("Disk size: \(options.diskGiB) GiB, Memory: \(options.memoryGiB) GiB, vCPUs: \(options.cpus)")
-    }
-
-    public func initLinuxVM(name: String, options: LinuxInitOptions) throws {
-        try initLinuxVM(at: bundleURL(for: name), preferredName: name, options: options)
-    }
-
-    // MARK: - Detach ISO
-
-    public func detachISO(bundleURL: URL) throws {
-        let layout = try layoutForExistingBundle(at: bundleURL)
-        let store = VMConfigStore(layout: layout)
-        var config = try store.load()
-        let vmName = displayName(for: bundleURL)
-
-        guard config.guestOSType == "Linux" else {
-            throw VMError.message("VM '\(vmName)' is not a Linux VM.")
-        }
-
-        guard config.installerISOPath != nil else {
-            print("No installer ISO attached to '\(vmName)'.")
-            return
-        }
-
-        guard !isVMProcessRunning(layout: layout) else {
-            throw VMError.message("Stop VM '\(vmName)' before detaching the installer ISO.")
-        }
-
-        config.installerISOPath = nil
-        config.modifiedAt = Date()
-        try store.save(config)
-
-        print("Installer ISO detached from '\(vmName)'.")
-    }
-
-    public func detachISO(name: String) throws {
-        try detachISO(bundleURL: bundleURL(for: name))
     }
 
     // MARK: - Delete VM
@@ -1213,25 +1038,14 @@ public final class VMController {
         let vmName = displayName(for: bundleURL)
         let sanitized = try sanitizedSnapshotName(snapshotName)
         let snapshotDir = layout.snapshotsDirectoryURL.appendingPathComponent(sanitized, isDirectory: true)
-        let isLinux = config.guestOSType == "Linux"
 
-        // Determine which items to copy based on guest OS type
-        let itemsToCopy: [(String, URL)]
-        if isLinux {
-            itemsToCopy = [
-                ("config.json", layout.configURL),
-                ("disk.img", layout.diskURL),
-                ("NVRAM.bin", layout.efiVariableStoreURL)
-            ]
-        } else {
-            itemsToCopy = [
-                ("config.json", layout.configURL),
-                ("disk.img", layout.diskURL),
-                ("HardwareModel.bin", layout.hardwareModelURL),
-                ("MachineIdentifier.bin", layout.machineIdentifierURL),
-                ("AuxiliaryStorage.bin", layout.auxiliaryStorageURL)
-            ]
-        }
+        let itemsToCopy: [(String, URL)] = [
+            ("config.json", layout.configURL),
+            ("disk.img", layout.diskURL),
+            ("HardwareModel.bin", layout.hardwareModelURL),
+            ("MachineIdentifier.bin", layout.machineIdentifierURL),
+            ("AuxiliaryStorage.bin", layout.auxiliaryStorageURL)
+        ]
 
         switch subcommand {
         case "create":
@@ -1261,25 +1075,7 @@ public final class VMController {
             let tempDir = bundleURL.appendingPathComponent(".revert-temp-\(UUID().uuidString)", isDirectory: true)
             try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true, attributes: nil)
 
-            // Determine items to revert based on what exists in snapshot (handles mixed scenarios)
-            let revertItems: [(String, URL)]
-            if isLinux {
-                revertItems = [
-                    ("config.json", layout.configURL),
-                    ("disk.img", layout.diskURL),
-                    ("NVRAM.bin", layout.efiVariableStoreURL)
-                ]
-            } else {
-                revertItems = [
-                    ("config.json", layout.configURL),
-                    ("disk.img", layout.diskURL),
-                    ("HardwareModel.bin", layout.hardwareModelURL),
-                    ("MachineIdentifier.bin", layout.machineIdentifierURL),
-                    ("AuxiliaryStorage.bin", layout.auxiliaryStorageURL)
-                ]
-            }
-
-            for (name, targetURL) in revertItems {
+            for (name, targetURL) in itemsToCopy {
                 let backupURL = tempDir.appendingPathComponent(name)
                 if fileManager.fileExists(atPath: targetURL.path) {
                     try copyItem(from: targetURL, to: backupURL)

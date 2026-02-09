@@ -1,6 +1,6 @@
 name: GhostVM
 options:
-  bundleIdPrefix: com.groundwater
+  bundleIdPrefix: com.yellowgreenfruit
   deploymentTarget:
     macOS: "15.0"
   xcodeVersion: "15.4"
@@ -26,7 +26,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVMKit
-        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvmkit
+        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvmkit
         GENERATE_INFOPLIST_FILE: YES
         DEFINES_MODULE: YES
         SWIFT_VERSION: "5.0"
@@ -68,6 +68,9 @@ targets:
     sources:
       - path: GhostVMHelper
       - path: GhostVM/Services
+      - path: GhostVM/Resources/VMIcons
+        type: resource
+        buildPhase: resources
     dependencies:
       - target: GhostVMKit
         embed: true
@@ -78,7 +81,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
-        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm.helper
+        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm.helper
         INFOPLIST_FILE: GhostVMHelper/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
@@ -123,7 +126,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVM
-        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm
+        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm
         INFOPLIST_FILE: GhostVM/VMApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
@@ -147,6 +150,19 @@ targets:
       - target: GhostVMKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.groundwater.ghostvm.tests
+        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+
+  GhostVMUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: GhostVMUITests
+    dependencies:
+      - target: GhostVM
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm.uitests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: "5.0"

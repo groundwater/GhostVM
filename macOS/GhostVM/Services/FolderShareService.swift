@@ -46,6 +46,14 @@ public final class FolderShareService: ObservableObject {
         print("[FolderShareService] Added folder: \(folder.path)")
     }
 
+    /// Update the readOnly flag for a shared folder and rebuild the device share.
+    public func setReadOnly(id: UUID, readOnly: Bool) {
+        guard let index = activeFolders.firstIndex(where: { $0.id == id }) else { return }
+        activeFolders[index].readOnly = readOnly
+        rebuildShare()
+        print("[FolderShareService] Set readOnly=\(readOnly) for folder: \(activeFolders[index].path)")
+    }
+
     /// Remove a shared folder by ID and rebuild the device share.
     public func removeFolder(id: UUID) {
         guard let index = activeFolders.firstIndex(where: { $0.id == id }) else { return }

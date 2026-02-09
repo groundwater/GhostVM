@@ -30,22 +30,6 @@ final class FeatureFlagsTests: XCTestCase {
         XCTAssertFalse(flags.isEnabled("foo"))
     }
 
-    func testLinuxVMSupportProperty() {
-        XCTAssertFalse(flags.linuxVMSupport)
-
-        flags.linuxVMSupport = true
-        XCTAssertTrue(flags.linuxVMSupport)
-        XCTAssertTrue(flags.isEnabled("linuxVMSupport"))
-
-        flags.linuxVMSupport = false
-        XCTAssertFalse(flags.linuxVMSupport)
-    }
-
-    func testAllFlagsContainsLinuxSupport() {
-        let keys = FeatureFlags.allFlags.map { $0.key }
-        XCTAssertTrue(keys.contains("linuxVMSupport"))
-    }
-
     func testFlagDescriptorHasNonEmptyFields() {
         for flag in FeatureFlags.allFlags {
             XCTAssertFalse(flag.key.isEmpty)

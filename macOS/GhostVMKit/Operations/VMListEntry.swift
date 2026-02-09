@@ -11,8 +11,6 @@ public struct VMListEntry {
     public let memoryBytes: UInt64
     public let diskBytes: UInt64
     public let lastInstallVersion: String?
-    public let guestOSType: String
-    public let installerISOPath: String?
     public let isSuspended: Bool
 
     public var isRunning: Bool {
@@ -48,8 +46,6 @@ public struct VMListEntry {
         memoryBytes: UInt64,
         diskBytes: UInt64,
         lastInstallVersion: String? = nil,
-        guestOSType: String = "macOS",
-        installerISOPath: String? = nil,
         isSuspended: Bool = false
     ) {
         self.name = name
@@ -61,8 +57,6 @@ public struct VMListEntry {
         self.memoryBytes = memoryBytes
         self.diskBytes = diskBytes
         self.lastInstallVersion = lastInstallVersion
-        self.guestOSType = guestOSType
-        self.installerISOPath = installerISOPath
         self.isSuspended = isSuspended
     }
 
@@ -77,8 +71,6 @@ public struct VMListEntry {
             memoryBytes: memoryBytes,
             diskBytes: diskBytes,
             lastInstallVersion: lastInstallVersion,
-            guestOSType: guestOSType,
-            installerISOPath: installerISOPath,
             isSuspended: isSuspended
         )
     }

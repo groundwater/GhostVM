@@ -5,6 +5,8 @@ enum PushEvent {
     case files([String])
     case urls([String])
     case log(String)
+    case ports([PortInfo])
+    case app(name: String, bundleId: String, iconBase64: String?)
 
     var jsonLine: String {
         switch self {
@@ -16,6 +18,16 @@ enum PushEvent {
             return "{\"type\":\"urls\",\"urls\":[\(escaped.joined(separator: ","))]}"
         case .log(let message):
             return "{\"type\":\"log\",\"message\":\(escapeJSON(message))}"
+        case .ports(let portInfos):
+            let entries = portInfos.map { "{\"port\":\($0.port),\"process\":\(escapeJSON($0.process))}" }
+            return "{\"type\":\"ports\",\"ports\":[\(entries.joined(separator: ","))]}"
+        case .app(let name, let bundleId, let iconBase64):
+            var json = "{\"type\":\"app\",\"name\":\(escapeJSON(name)),\"bundleId\":\(escapeJSON(bundleId))"
+            if let icon = iconBase64 {
+                json += ",\"icon\":\(escapeJSON(icon))"
+            }
+            json += "}"
+            return json
         }
     }
 
@@ -48,6 +60,9 @@ final class EventPushServer: @unchecked Sendable {
     /// Current connected client fd (-1 if none)
     private var clientFd: Int32 = -1
     private let clientLock = NSLock()
+
+    /// Called on main thread when a new host client connects.
+    var onClientConnected: (() -> Void)?
 
     private init() {}
 
@@ -114,6 +129,11 @@ final class EventPushServer: @unchecked Sendable {
                 }
 
                 print("[EventPushServer] Client connected, fd=\(newFd)")
+
+                // Notify listeners on main thread
+                if let callback = self?.onClientConnected {
+                    DispatchQueue.main.async { callback() }
+                }
 
                 // Block on read until host disconnects (on background thread)
                 DispatchQueue.global(qos: .utility).async { [weak self] in

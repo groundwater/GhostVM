@@ -29,6 +29,6 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
-	<string>NSApplication</string>
+	<string>HelperApplication</string>
 </dict>
 </plist>

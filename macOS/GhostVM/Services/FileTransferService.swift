@@ -81,6 +81,9 @@ public final class FileTransferService: ObservableObject {
     /// Queue of files pending transfer (with relative paths for folder structure)
     private var pendingFiles: [FileWithRelativePath] = []
     private var isProcessingQueue = false
+    private var currentBatchID: String?
+    private var currentBatchTotal: Int = 0
+    private var currentBatchSent: Int = 0
 
     /// Send files to the guest VM
     /// - Parameter files: Files with their relative paths to send
@@ -92,9 +95,12 @@ public final class FileTransferService: ObservableObject {
             return
         }
 
-        // Add to queue
+        // Add to queue with batch tracking
+        currentBatchID = UUID().uuidString
+        currentBatchTotal = files.count
+        currentBatchSent = 0
         pendingFiles.append(contentsOf: files)
-        print("[FileTransfer] Queued \(files.count) file(s), total pending: \(pendingFiles.count)")
+        print("[FileTransfer] Queued \(files.count) file(s), batch \(currentBatchID ?? "nil"), total pending: \(pendingFiles.count)")
 
         // Start processing if not already
         processNextFile()
@@ -108,9 +114,12 @@ public final class FileTransferService: ObservableObject {
 
         isProcessingQueue = true
         let file = pendingFiles.removeFirst()
+        currentBatchSent += 1
+        let batchID = currentBatchID
+        let isLast = currentBatchSent >= currentBatchTotal
 
-        print("[FileTransfer] Processing: \(file.relativePath) (\(pendingFiles.count) remaining)")
-        sendFile(file.url, relativePath: file.relativePath, client: client) { [weak self] in
+        print("[FileTransfer] Processing: \(file.relativePath) (\(pendingFiles.count) remaining, batch isLast=\(isLast))")
+        sendFile(file.url, relativePath: file.relativePath, batchID: batchID, isLastInBatch: isLast, client: client) { [weak self] in
             // Completion callback - process next file
             Task { @MainActor in
                 self?.isProcessingQueue = false
@@ -123,16 +132,20 @@ public final class FileTransferService: ObservableObject {
     /// - Parameters:
     ///   - url: The local file URL
     ///   - relativePath: The relative path to preserve folder structure (e.g., "folder/file.txt")
+    ///   - batchID: Batch identifier for grouped Finder reveal
+    ///   - isLastInBatch: Whether this is the last file in the batch
     ///   - client: The GhostClient to use for transfer
     ///   - completion: Callback when transfer completes
-    private func sendFile(_ url: URL, relativePath: String, client: any GhostClientProtocol, completion: (() -> Void)? = nil) {
+    private func sendFile(_ url: URL, relativePath: String, batchID: String?, isLastInBatch: Bool, client: any GhostClientProtocol, completion: (() -> Void)? = nil) {
         let displayName = relativePath
 
-        // Get file size
+        // Get file size and permissions
         let fileSize: Int64
+        let permissions: Int?
         do {
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
             fileSize = (attributes[.size] as? Int64) ?? 0
+            permissions = attributes[.posixPermissions] as? Int
         } catch {
             lastError = "Cannot read file: \(error.localizedDescription)"
             completion?()
@@ -156,7 +169,7 @@ public final class FileTransferService: ObservableObject {
                 }
 
                 // Stream to guest (no memory loading) - pass relative path for folder structure
-                let savedPath = try await client.sendFile(fileURL: url, relativePath: relativePath) { progress in
+                let savedPath = try await client.sendFile(fileURL: url, relativePath: relativePath, batchID: batchID, isLastInBatch: isLastInBatch, permissions: permissions) { progress in
                     Task { @MainActor in
                         self?.updateTransferState(id: transferId, state: .transferring(progress: progress))
                     }
@@ -202,7 +215,7 @@ public final class FileTransferService: ObservableObject {
             do {
                 updateTransferState(id: transferId, state: .transferring(progress: 0.5))
 
-                let (data, fetchedFilename) = try await client.fetchFile(at: guestPath)
+                let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
 
                 // Determine save location
                 let saveURL: URL
@@ -221,11 +234,19 @@ public final class FileTransferService: ObservableObject {
 
                 // Write file
                 try data.write(to: saveURL)
+                Self.applyQuarantine(to: saveURL)
+
+                // Apply permissions if provided
+                if let permissions = permissions {
+                    try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: saveURL.path)
+                }
 
                 updateTransferState(id: transferId, state: .completed(path: saveURL.path))
 
-                // Reveal in Finder
-                NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+                // Reveal in Finder (only for single-file fetch with save panel)
+                if showSavePanel {
+                    NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+                }
 
             } catch {
                 updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
@@ -256,15 +277,44 @@ public final class FileTransferService: ObservableObject {
                 let files = try await listGuestFiles()
                 print("[FileTransfer] Found \(files.count) file(s) queued on guest")
 
+                var savedURLs: [URL] = []
+                var failedPaths: [String] = []
+                let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+
                 for guestPath in files {
-                    fetchFile(at: guestPath, showSavePanel: false)
+                    do {
+                        let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
+                        let saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
+                        try data.write(to: saveURL)
+                        Self.applyQuarantine(to: saveURL)
+
+                        if let permissions = permissions {
+                            try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: saveURL.path)
+                        }
+
+                        savedURLs.append(saveURL)
+                        print("[FileTransfer] Fetched: \(fetchedFilename)")
+                    } catch {
+                        print("[FileTransfer] Failed to fetch \(guestPath): \(error)")
+                        failedPaths.append(URL(fileURLWithPath: guestPath).lastPathComponent)
+                    }
                 }
 
-                // Clear the queue on the guest
-                if !files.isEmpty {
-                    try await client.clearFileQueue()
-                    queuedGuestFileCount = 0
-                    print("[FileTransfer] Cleared guest file queue")
+                // Reveal all files in Finder at once
+                if !savedURLs.isEmpty {
+                    NSWorkspace.shared.activateFileViewerSelecting(savedURLs)
+                }
+
+                // Only clear the queue when ALL files transferred successfully
+                if failedPaths.isEmpty {
+                    if !files.isEmpty {
+                        try await client.clearFileQueue()
+                        queuedGuestFileCount = 0
+                        print("[FileTransfer] Cleared guest file queue")
+                    }
+                } else {
+                    lastError = "Failed to fetch: \(failedPaths.joined(separator: ", "))"
+                    print("[FileTransfer] \(failedPaths.count) file(s) failed, queue NOT cleared")
                 }
             } catch {
                 lastError = "Failed to list guest files: \(error.localizedDescription)"
@@ -309,6 +359,14 @@ public final class FileTransferService: ObservableObject {
     }
 
     // MARK: - Private
+
+    /// Mark a file as quarantined so Gatekeeper checks it before execution.
+    private static func applyQuarantine(to url: URL) {
+        let value = "0082;\(String(format: "%lx", Int(Date().timeIntervalSince1970)));GhostVM;"
+        _ = value.withCString { ptr in
+            setxattr(url.path, "com.apple.quarantine", ptr, strlen(ptr), 0, 0)
+        }
+    }
 
     private func updateTransferState(id: UUID, state: FileTransferState) {
         if let index = transfers.firstIndex(where: { $0.id == id }) {

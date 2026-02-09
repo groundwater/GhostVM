@@ -60,6 +60,10 @@ final class VsockServer: @unchecked Sendable {
     private var isRunning = false
     private let router: Router
 
+    /// Tracks file paths per batch ID for batched Finder reveal
+    private var batchFiles: [String: [URL]] = [:]
+    private let batchLock = NSLock()
+
     /// Status callback for connection state changes
     var onStatusChange: ((Bool) -> Void)?
 
@@ -270,8 +274,32 @@ final class VsockServer: @unchecked Sendable {
 
         print("[VsockServer] File saved: \(destURL.path) (\(bytesWritten) bytes)")
 
-        // Reveal file in Finder
-        NSWorkspace.shared.activateFileViewerSelecting([destURL])
+        // Apply permissions if provided
+        if let permStr = request.header("X-Permissions"),
+           let mode = Int(permStr, radix: 8) {
+            try? FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: destURL.path)
+        }
+
+        // Batch reveal: accumulate paths per batch, reveal on last file
+        let batchID = request.header("X-Batch-ID")
+        let isLastInBatch = request.header("X-Batch-Last") == "true"
+
+        if let batchID = batchID {
+            batchLock.lock()
+            batchFiles[batchID, default: []].append(destURL)
+            if isLastInBatch {
+                let allFiles = batchFiles.removeValue(forKey: batchID) ?? [destURL]
+                batchLock.unlock()
+                // Compute top-level items to reveal
+                let topLevelURLs = computeTopLevelItems(allFiles, baseURL: baseURL)
+                NSWorkspace.shared.activateFileViewerSelecting(topLevelURLs)
+            } else {
+                batchLock.unlock()
+            }
+        } else {
+            // No batch — reveal this single file
+            NSWorkspace.shared.activateFileViewerSelecting([destURL])
+        }
 
         let response = FileReceiveResponse(path: destURL.path)
         guard let data = try? JSONEncoder().encode(response) else {
@@ -329,7 +357,18 @@ final class VsockServer: @unchecked Sendable {
     private func writeResponse(_ response: HTTPResponse, to socket: Int32) {
         let responseData = HTTPParser.formatResponse(response)
         responseData.withUnsafeBytes { bufferPointer in
-            _ = write(socket, bufferPointer.baseAddress!, responseData.count)
+            guard let baseAddress = bufferPointer.baseAddress else { return }
+            var offset = 0
+            while offset < responseData.count {
+                let bytesWritten = write(socket, baseAddress.advanced(by: offset), responseData.count - offset)
+                if bytesWritten < 0 {
+                    if errno == EINTR { continue }
+                    print("[VsockServer] write failed: errno \(errno)")
+                    return
+                }
+                if bytesWritten == 0 { return }
+                offset += bytesWritten
+            }
         }
     }
 
@@ -341,6 +380,23 @@ final class VsockServer: @unchecked Sendable {
             serverSocket = -1
         }
         onStatusChange?(false)
+    }
+
+    /// Given a list of file URLs under baseURL, returns the unique top-level items (files or folders)
+    /// For example, if files are baseURL/MyApp.app/Contents/MacOS/binary and baseURL/MyApp.app/Contents/Info.plist,
+    /// this returns [baseURL/MyApp.app]
+    private func computeTopLevelItems(_ urls: [URL], baseURL: URL) -> [URL] {
+        let basePath = baseURL.path
+        var topLevelNames = Set<String>()
+        for url in urls {
+            let relativePath = String(url.path.dropFirst(basePath.count))
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let firstComponent = relativePath.components(separatedBy: "/").first ?? relativePath
+            if !firstComponent.isEmpty {
+                topLevelNames.insert(firstComponent)
+            }
+        }
+        return topLevelNames.map { baseURL.appendingPathComponent($0) }
     }
 
     /// Sanitize a relative path, preserving folder structure but preventing traversal attacks

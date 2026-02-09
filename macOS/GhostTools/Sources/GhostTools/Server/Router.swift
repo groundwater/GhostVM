@@ -34,6 +34,8 @@ final class Router: @unchecked Sendable {
             return handlePortForwards(request)
         } else if path == "/api/v1/logs" {
             return handleLogs(request)
+        } else if path == "/api/v1/open" {
+            return handleOpen(request)
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
@@ -141,6 +143,13 @@ final class Router: @unchecked Sendable {
 
         do {
             let savedURL = try FileService.shared.receiveFile(data: body, filename: filename)
+
+            // Apply permissions if provided
+            if let permStr = request.header("X-Permissions"),
+               let mode = Int(permStr, radix: 8) {
+                try? FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: savedURL.path)
+            }
+
             let response = FileReceiveResponse(path: savedURL.path)
 
             guard let data = try? JSONEncoder().encode(response) else {
@@ -174,12 +183,15 @@ final class Router: @unchecked Sendable {
         let decodedPath = filePath.removingPercentEncoding ?? filePath
 
         do {
-            let (data, filename) = try FileService.shared.readFile(at: decodedPath)
-            let headers: [String: String] = [
+            let (data, filename, permissions) = try FileService.shared.readFile(at: decodedPath)
+            var headers: [String: String] = [
                 "Content-Type": "application/octet-stream",
                 "Content-Disposition": "attachment; filename=\"\(filename)\"",
                 "Content-Length": "\(data.count)"
             ]
+            if let permissions = permissions {
+                headers["X-Permissions"] = String(permissions, radix: 8)
+            }
             return HTTPResponse(status: .ok, headers: headers, body: data)
         } catch FileServiceError.accessDenied {
             return HTTPResponse.error(.forbidden, message: "Access denied")
@@ -269,6 +281,36 @@ final class Router: @unchecked Sendable {
             return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
         }
     }
+
+    // MARK: - Open
+
+    private func handleOpen(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        guard let body = request.body else {
+            return HTTPResponse.error(.badRequest, message: "Request body required")
+        }
+
+        guard let openRequest = try? JSONDecoder().decode(OpenRequest.self, from: body) else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
+        }
+
+        log("[Router] POST /open: \(openRequest.path)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [openRequest.path]
+
+        do {
+            try process.run()
+            return HTTPResponse(status: .ok)
+        } catch {
+            log("[Router] Failed to open: \(error)")
+            return HTTPResponse.error(.internalServerError, message: "Failed to open: \(error.localizedDescription)")
+        }
+    }
 }
 
 // MARK: - Request/Response Types
@@ -301,4 +343,8 @@ struct URLListResponse: Codable {
 
 struct LogListResponse: Codable {
     let logs: [String]
+}
+
+struct OpenRequest: Codable {
+    let path: String
 }

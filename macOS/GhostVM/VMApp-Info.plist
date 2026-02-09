@@ -15,7 +15,7 @@
 			<string>Editor</string>
 			<key>LSItemContentTypes</key>
 			<array>
-				<string>com.groundwater.ghostvm</string>
+				<string>com.yellowgreenfruit.ghostvm</string>
 			</array>
 			<key>LSTypeIsPackage</key>
 			<true/>
@@ -55,7 +55,7 @@
 			<key>UTTypeIconFile</key>
 			<string>GhostVMIcon</string>
 			<key>UTTypeIdentifier</key>
-			<string>com.groundwater.ghostvm</string>
+			<string>com.yellowgreenfruit.ghostvm</string>
 			<key>UTTypeTagSpecification</key>
 			<dict>
 				<key>public.filename-extension</key>

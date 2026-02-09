@@ -17,7 +17,7 @@ public final class ClipboardSyncService: ObservableObject {
     @Published public private(set) var isConnected: Bool = false
 
     private let hostPasteboard = NSPasteboard.general
-    private var lastHostChangeCount: Int = 0
+    public private(set) var lastHostChangeCount: Int = 0
     private var lastGuestContent: String?
 
     private var guestClient: (any GhostClientProtocol)?

@@ -28,26 +28,3 @@ public struct InitOptions {
         self.sharedFolders = sharedFolders
     }
 }
-
-/// Options for initializing a new Linux VM.
-public struct LinuxInitOptions {
-    public var cpus: Int
-    public var memoryGiB: UInt64
-    public var diskGiB: UInt64
-    public var isoPath: String?
-    public var sharedFolders: [SharedFolderConfig]
-
-    public init(
-        cpus: Int = 4,
-        memoryGiB: UInt64 = 8,
-        diskGiB: UInt64 = 64,
-        isoPath: String? = nil,
-        sharedFolders: [SharedFolderConfig] = []
-    ) {
-        self.cpus = cpus
-        self.memoryGiB = memoryGiB
-        self.diskGiB = diskGiB
-        self.isoPath = isoPath
-        self.sharedFolders = sharedFolders
-    }
-}

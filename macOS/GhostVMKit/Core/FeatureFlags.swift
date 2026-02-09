@@ -13,20 +13,10 @@ public final class FeatureFlags {
     private static let keyPrefix = "featureFlag_"
 
     public static let allFlags: [FlagDescriptor] = [
-        FlagDescriptor(
-            key: "linuxVMSupport",
-            displayName: "Linux VM Support",
-            description: "Enable creating and managing Linux virtual machines. Existing Linux VMs remain accessible regardless of this setting."
-        ),
     ]
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-    }
-
-    public var linuxVMSupport: Bool {
-        get { defaults.bool(forKey: Self.keyPrefix + "linuxVMSupport") }
-        set { defaults.set(newValue, forKey: Self.keyPrefix + "linuxVMSupport") }
     }
 
     public func isEnabled(_ key: String) -> Bool {

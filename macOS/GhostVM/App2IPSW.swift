@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SwiftUI
 
@@ -7,6 +8,7 @@ struct App2IPSWFeedEntry: Hashable, Identifiable {
     let firmwareURL: URL
     let productVersion: String
     let buildVersion: String
+    let firmwareSHA1: String?
 
     var id: String {
         "\(productVersion)|\(buildVersion)|\(firmwareURL.absoluteString)"
@@ -45,6 +47,12 @@ struct App2IPSWDownloadProgress {
     let bytesWritten: Int64
     let totalBytes: Int64
     let speedBytesPerSecond: Double
+}
+
+struct IPSWVerificationFailure {
+    let filename: String
+    let expected: String
+    let actual: String
 }
 
 // MARK: - IPSW Service (feed + cache)
@@ -136,6 +144,21 @@ final class App2IPSWService: ObservableObject {
         if fileManager.fileExists(atPath: url.path) {
             try fileManager.removeItem(at: url)
         }
+        let partial = url.appendingPathExtension("download")
+        if fileManager.fileExists(atPath: partial.path) {
+            try fileManager.removeItem(at: partial)
+        }
+    }
+
+    func partialDownloadSize(filename: String) -> Int64? {
+        let url = cacheDirectory.appendingPathComponent(filename, isDirectory: false)
+            .appendingPathExtension("download")
+        guard fileManager.fileExists(atPath: url.path),
+              let attrs = try? fileManager.attributesOfItem(atPath: url.path),
+              let size = attrs[.size] as? Int64, size > 0 else {
+            return nil
+        }
+        return size
     }
 
     // MARK: - Feed
@@ -171,7 +194,8 @@ final class App2IPSWService: ObservableObject {
             let entry = App2IPSWFeedEntry(
                 firmwareURL: firmwareURL,
                 productVersion: productVersion,
-                buildVersion: buildVersion
+                buildVersion: buildVersion,
+                firmwareSHA1: restore["FirmwareSHA1"] as? String
             )
             deduped[entry.id] = entry
         }
@@ -225,10 +249,13 @@ final class App2IPSWService: ObservableObject {
 
     // MARK: - Download
 
+    private static let maxRetries = 10
+
     func download(
         _ entry: App2IPSWFeedEntry,
+        resume: Bool = false,
         progress: @escaping (App2IPSWDownloadProgress) -> Void
-    ) async throws -> App2IPSWCachedImage {
+    ) async throws -> (image: App2IPSWCachedImage, verificationFailure: IPSWVerificationFailure?) {
         try ensureCacheDirectory()
         let destination = cacheDirectory.appendingPathComponent(entry.filename, isDirectory: false)
         let temporary = destination.appendingPathExtension("download")
@@ -236,11 +263,18 @@ final class App2IPSWService: ObservableObject {
         if fileManager.fileExists(atPath: destination.path) {
             try fileManager.removeItem(at: destination)
         }
-        if fileManager.fileExists(atPath: temporary.path) {
-            try fileManager.removeItem(at: temporary)
-        }
-        guard fileManager.createFile(atPath: temporary.path, contents: nil, attributes: nil) else {
-            throw NSError(domain: "App2IPSW", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to prepare download destination."])
+
+        var existingSize: Int64 = 0
+        if resume, fileManager.fileExists(atPath: temporary.path) {
+            let attrs = try FileManager.default.attributesOfItem(atPath: temporary.path)
+            existingSize = (attrs[.size] as? Int64) ?? 0
+        } else {
+            if fileManager.fileExists(atPath: temporary.path) {
+                try fileManager.removeItem(at: temporary)
+            }
+            guard fileManager.createFile(atPath: temporary.path, contents: nil, attributes: nil) else {
+                throw NSError(domain: "App2IPSW", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to prepare download destination."])
+            }
         }
 
         let fileHandle = try FileHandle(forWritingTo: temporary)
@@ -248,39 +282,99 @@ final class App2IPSWService: ObservableObject {
             try? fileHandle.close()
         }
 
-        let (bytes, response) = try await URLSession.shared.bytes(from: entry.firmwareURL)
-        let expected = response.expectedContentLength > 0 ? response.expectedContentLength : 0
+        if existingSize > 0 {
+            try fileHandle.seekToEnd()
+        }
 
-        var written: Int64 = 0
+        var written: Int64 = existingSize
+        var totalExpected: Int64 = 0
         let start = Date()
-        var buffer = Data()
+        var retriesRemaining = Self.maxRetries
 
-        do {
-            for try await byte in bytes {
-                if Task.isCancelled {
-                    throw CancellationError()
+        // Outer loop: each iteration opens a new byte stream (possibly resuming).
+        // Transient network errors trigger a retry with a Range request.
+        outerLoop: while true {
+            let bytes: URLSession.AsyncBytes
+            if written > 0 {
+                var request = URLRequest(url: entry.firmwareURL)
+                request.setValue("bytes=\(written)-", forHTTPHeaderField: "Range")
+                let (resumeBytes, response) = try await URLSession.shared.bytes(for: request)
+                if let http = response as? HTTPURLResponse, http.statusCode == 206 {
+                    bytes = resumeBytes
+                    let contentLength = response.expectedContentLength > 0 ? response.expectedContentLength : 0
+                    totalExpected = contentLength > 0 ? written + contentLength : totalExpected
+                } else {
+                    // Server doesn't support range requests — restart from scratch
+                    try fileHandle.seek(toOffset: 0)
+                    try fileHandle.truncate(atOffset: 0)
+                    written = 0
+                    let (freshBytes, freshResponse) = try await URLSession.shared.bytes(from: entry.firmwareURL)
+                    bytes = freshBytes
+                    totalExpected = freshResponse.expectedContentLength > 0 ? freshResponse.expectedContentLength : 0
                 }
-                buffer.append(byte)
-                written += 1
+            } else {
+                let (freshBytes, response) = try await URLSession.shared.bytes(from: entry.firmwareURL)
+                bytes = freshBytes
+                totalExpected = response.expectedContentLength > 0 ? response.expectedContentLength : 0
+            }
 
-                if buffer.count >= 1 << 20 {
+            var buffer = Data()
+
+            do {
+                for try await byte in bytes {
+                    if Task.isCancelled {
+                        throw CancellationError()
+                    }
+                    buffer.append(byte)
+                    written += 1
+
+                    if buffer.count >= 1 << 20 {
+                        try fileHandle.write(contentsOf: buffer)
+                        buffer.removeAll(keepingCapacity: true)
+                        let elapsed = max(Date().timeIntervalSince(start), 0.001)
+                        let speed = Double(written) / elapsed
+                        progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: totalExpected, speedBytesPerSecond: speed))
+                    }
+                }
+
+                // Stream ended normally — flush remaining buffer
+                if !buffer.isEmpty {
                     try fileHandle.write(contentsOf: buffer)
-                    buffer.removeAll(keepingCapacity: true)
                     let elapsed = max(Date().timeIntervalSince(start), 0.001)
                     let speed = Double(written) / elapsed
-                    progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: expected, speedBytesPerSecond: speed))
+                    progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: totalExpected, speedBytesPerSecond: speed))
                 }
-            }
+                break outerLoop
+            } catch is CancellationError {
+                // Flush what we have before deleting
+                if !buffer.isEmpty {
+                    try? fileHandle.write(contentsOf: buffer)
+                }
+                try? fileManager.removeItem(at: temporary)
+                throw CancellationError()
+            } catch {
+                // Transient error — flush buffer to disk and retry
+                if !buffer.isEmpty {
+                    try? fileHandle.write(contentsOf: buffer)
+                }
+                try? fileHandle.synchronize()
 
-            if !buffer.isEmpty {
-                try fileHandle.write(contentsOf: buffer)
-                let elapsed = max(Date().timeIntervalSince(start), 0.001)
-                let speed = Double(written) / elapsed
-                progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: expected, speedBytesPerSecond: speed))
+                retriesRemaining -= 1
+                if retriesRemaining <= 0 {
+                    // Out of retries — keep .download file for manual resume
+                    throw error
+                }
+
+                // Exponential backoff: 1s, 2s, 4s, 8s… capped at 30s
+                let attempt = Self.maxRetries - retriesRemaining
+                let delay = min(pow(2.0, Double(attempt - 1)), 30.0)
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+
+                // Re-check the actual file size before resuming
+                try? fileHandle.synchronize()
+                let offset = try fileHandle.seekToEnd()
+                written = Int64(offset)
             }
-        } catch {
-            try? fileManager.removeItem(at: temporary)
-            throw error
         }
 
         do {
@@ -293,12 +387,41 @@ final class App2IPSWService: ObservableObject {
                 fileURL: destination,
                 sizeBytes: values.fileSize.map { Int64($0) }
             )
-            return cached
+
+            // Verify SHA1 if the feed provided one
+            var failure: IPSWVerificationFailure? = nil
+            if let expectedSHA1 = entry.firmwareSHA1, !expectedSHA1.isEmpty {
+                let actualSHA1 = try Self.sha1Hash(of: destination)
+                if actualSHA1.lowercased() != expectedSHA1.lowercased() {
+                    failure = IPSWVerificationFailure(
+                        filename: entry.filename,
+                        expected: expectedSHA1,
+                        actual: actualSHA1
+                    )
+                }
+            }
+
+            return (cached, failure)
         } catch {
             try? fileManager.removeItem(at: temporary)
             try? fileManager.removeItem(at: destination)
             throw error
         }
+    }
+
+    /// Compute SHA1 hash of a file by streaming in chunks.
+    private static func sha1Hash(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var sha1 = Insecure.SHA1()
+        while autoreleasepool(invoking: {
+            let chunk = handle.readData(ofLength: 4 * 1024 * 1024)
+            if chunk.isEmpty { return false }
+            sha1.update(data: chunk)
+            return true
+        }) {}
+        let digest = sha1.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Helpers
@@ -327,7 +450,10 @@ struct App2RestoreImage: Identifiable, Hashable {
     var sizeDescription: String
     var isDownloaded: Bool
     var isDownloading: Bool
+    var hasPartialDownload: Bool = false
+    var partialBytes: Int64 = 0
     let firmwareURL: URL
+    let firmwareSHA1: String?
 }
 
 @MainActor
@@ -342,6 +468,7 @@ final class App2RestoreImageStore: ObservableObject {
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
     @Published var downloadStatuses: [String: DownloadStatus] = [:]
+    @Published var verificationFailure: IPSWVerificationFailure? = nil
 
     private let service: App2IPSWService
     private var downloadTasks: [String: Task<Void, Never>] = [:]
@@ -361,12 +488,20 @@ final class App2RestoreImageStore: ObservableObject {
             let cached = service.listCachedImages()
             let cachedByFilename = Dictionary(uniqueKeysWithValues: cached.map { ($0.filename, $0) })
 
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useGB, .useMB]
+            formatter.countStyle = .file
+            formatter.includesUnit = true
+
             var all: [App2RestoreImage] = entries.map { entry in
                 let cachedImage = cachedByFilename[entry.filename]
                 let isDownloaded = cachedImage != nil
+                let partialSize = isDownloaded ? nil : service.partialDownloadSize(filename: entry.filename)
                 let sizeDescription: String
                 if let cachedImage {
                     sizeDescription = cachedImage.sizeDescription
+                } else if let partialSize {
+                    sizeDescription = "\(formatter.string(fromByteCount: partialSize)) downloaded (partial)"
                 } else {
                     sizeDescription = "Not downloaded"
                 }
@@ -379,7 +514,10 @@ final class App2RestoreImageStore: ObservableObject {
                     sizeDescription: sizeDescription,
                     isDownloaded: isDownloaded,
                     isDownloading: false,
-                    firmwareURL: entry.firmwareURL
+                    hasPartialDownload: partialSize != nil,
+                    partialBytes: partialSize ?? 0,
+                    firmwareURL: entry.firmwareURL,
+                    firmwareSHA1: entry.firmwareSHA1
                 )
             }
 
@@ -410,7 +548,8 @@ final class App2RestoreImageStore: ObservableObject {
                     sizeDescription: cachedImage.sizeDescription,
                     isDownloaded: true,
                     isDownloading: false,
-                    firmwareURL: cachedImage.fileURL
+                    firmwareURL: cachedImage.fileURL,
+                    firmwareSHA1: nil
                 )
                 all.append(image)
             }
@@ -444,6 +583,7 @@ final class App2RestoreImageStore: ObservableObject {
             }
             images[index].isDownloading = false
             downloadStatuses.removeValue(forKey: image.id)
+            updatePartialState(at: index)
             return
         }
 
@@ -451,6 +591,8 @@ final class App2RestoreImageStore: ObservableObject {
             do {
                 try service.deleteCachedImage(filename: image.filename)
                 images[index].isDownloaded = false
+                images[index].hasPartialDownload = false
+                images[index].partialBytes = 0
                 images[index].sizeDescription = "Not downloaded"
             } catch {
                 errorMessage = error.localizedDescription
@@ -465,16 +607,19 @@ final class App2RestoreImageStore: ObservableObject {
         let entry = App2IPSWFeedEntry(
             firmwareURL: image.firmwareURL,
             productVersion: image.version,
-            buildVersion: image.build
+            buildVersion: image.build,
+            firmwareSHA1: image.firmwareSHA1
         )
+        let shouldResume = images[index].hasPartialDownload
 
         downloadStatuses[image.id] = DownloadStatus(bytesWritten: 0, totalBytes: 0, speedBytesPerSecond: 0)
 
         let id = image.id
+        let filename = image.filename
         let task = Task { [weak self] in
             guard let self else { return }
             do {
-                let cached = try await self.service.download(entry) { progress in
+                let result = try await self.service.download(entry, resume: shouldResume) { progress in
                     Task { @MainActor in
                         self.downloadStatuses[id] = DownloadStatus(
                             bytesWritten: progress.bytesWritten,
@@ -487,10 +632,15 @@ final class App2RestoreImageStore: ObservableObject {
                     if let updatedIndex = self.images.firstIndex(where: { $0.id == id }) {
                         self.images[updatedIndex].isDownloading = false
                         self.images[updatedIndex].isDownloaded = true
-                        self.images[updatedIndex].sizeDescription = cached.sizeDescription
+                        self.images[updatedIndex].hasPartialDownload = false
+                        self.images[updatedIndex].partialBytes = 0
+                        self.images[updatedIndex].sizeDescription = result.image.sizeDescription
                     }
                     self.downloadStatuses.removeValue(forKey: id)
                     self.downloadTasks.removeValue(forKey: id)
+                    if let failure = result.verificationFailure {
+                        self.verificationFailure = failure
+                    }
                 }
             } catch {
                 if (error as? CancellationError) != nil {
@@ -506,6 +656,7 @@ final class App2RestoreImageStore: ObservableObject {
                 await MainActor.run {
                     if let updatedIndex = self.images.firstIndex(where: { $0.id == id }) {
                         self.images[updatedIndex].isDownloading = false
+                        self.updatePartialState(at: updatedIndex)
                     }
                     self.downloadStatuses.removeValue(forKey: id)
                     self.downloadTasks.removeValue(forKey: id)
@@ -515,6 +666,36 @@ final class App2RestoreImageStore: ObservableObject {
         }
 
         downloadTasks[id] = task
+    }
+
+    private func updatePartialState(at index: Int) {
+        let filename = images[index].filename
+        if let partialSize = service.partialDownloadSize(filename: filename) {
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useGB, .useMB]
+            formatter.countStyle = .file
+            formatter.includesUnit = true
+            images[index].hasPartialDownload = true
+            images[index].partialBytes = partialSize
+            images[index].sizeDescription = "\(formatter.string(fromByteCount: partialSize)) downloaded (partial)"
+        } else {
+            images[index].hasPartialDownload = false
+            images[index].partialBytes = 0
+            images[index].sizeDescription = "Not downloaded"
+        }
+    }
+
+    func trashFailedImage(filename: String) {
+        let url = service.cacheDirectory.appendingPathComponent(filename, isDirectory: false)
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+            if let index = images.firstIndex(where: { $0.filename == filename }) {
+                images[index].isDownloaded = false
+                images[index].sizeDescription = "Not downloaded"
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
     }
 
     // Best-effort parser for filenames like:

@@ -81,4 +81,62 @@ public enum HTTPResponseParser {
         let bodyData = data[separatorRange.upperBound...]
         return (statusCode, bodyData.isEmpty ? nil : Data(bodyData))
     }
+
+    /// Parse HTTP response preserving binary body data and returning headers
+    public static func parseBinaryWithHeaders(_ data: Data) throws -> (statusCode: Int, headers: [String: String], body: Data?) {
+        // Find the header/body separator (CRLFCRLF)
+        let separator = Data([0x0D, 0x0A, 0x0D, 0x0A]) // \r\n\r\n
+        guard let separatorRange = data.range(of: separator) else {
+            guard let responseString = String(data: data, encoding: .utf8) else {
+                throw GhostClientError.decodingError
+            }
+
+            let headerLines = responseString.components(separatedBy: "\r\n")
+            guard let statusLine = headerLines.first else {
+                throw GhostClientError.decodingError
+            }
+
+            let statusParts = statusLine.components(separatedBy: " ")
+            guard statusParts.count >= 2,
+                  let statusCode = Int(statusParts[1]) else {
+                throw GhostClientError.decodingError
+            }
+
+            let headers = parseHeaders(headerLines)
+            return (statusCode, headers, nil)
+        }
+
+        let headerData = data[..<separatorRange.lowerBound]
+        guard let headerString = String(data: headerData, encoding: .utf8) else {
+            throw GhostClientError.decodingError
+        }
+
+        let headerLines = headerString.components(separatedBy: "\r\n")
+        guard let statusLine = headerLines.first else {
+            throw GhostClientError.decodingError
+        }
+
+        let statusParts = statusLine.components(separatedBy: " ")
+        guard statusParts.count >= 2,
+              let statusCode = Int(statusParts[1]) else {
+            throw GhostClientError.decodingError
+        }
+
+        let headers = parseHeaders(headerLines)
+        let bodyData = data[separatorRange.upperBound...]
+        return (statusCode, headers, bodyData.isEmpty ? nil : Data(bodyData))
+    }
+
+    /// Parse header lines (skipping the status line) into a dictionary
+    private static func parseHeaders(_ headerLines: [String]) -> [String: String] {
+        var headers: [String: String] = [:]
+        for line in headerLines.dropFirst() {
+            if let colonIndex = line.firstIndex(of: ":") {
+                let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                headers[key] = value
+            }
+        }
+        return headers
+    }
 }

@@ -13,7 +13,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test framework dist tools dmg
+.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug screenshots website website-build
 
 all: help
 
@@ -41,7 +41,7 @@ cli: $(XCODE_PROJECT)
 	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl"
 
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
-app: $(XCODE_PROJECT) dmg
+app: $(XCODE_PROJECT) dmg ghostvm-icon
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
@@ -57,6 +57,24 @@ app: $(XCODE_PROJECT) dmg
 	@# Re-sign after adding resources
 	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+
+# Build the SwiftUI app in Debug configuration
+debug: $(XCODE_PROJECT) dmg ghostvm-icon
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme $(APP_NAME) \
+		-configuration Debug \
+		-derivedDataPath $(BUILD_DIR) \
+		build
+	@# Copy icons into app bundle Resources
+	@mkdir -p "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources"
+	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
+	@cp macOS/GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
+	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
+	@# Copy GhostTools.dmg into app bundle Resources
+	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
+	@# Re-sign after adding resources
+	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
+	@echo "Debug app built at: $(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 
 # Build and run the app (attached to terminal)
 run: app
@@ -81,16 +99,81 @@ tools:
 	cd $(GHOSTTOOLS_DIR) && swift build -c release
 	@echo "GhostTools built at: $(GHOSTTOOLS_DIR)/.build/release/GhostTools"
 
+# Build GhostTools debug binary for guest VM debugging
+debug-tools:
+	@echo "Building GhostTools (debug)..."
+	cd $(GHOSTTOOLS_DIR) && swift build
+	@echo "Patching SDK version for guest compatibility..."
+	vtool -set-build-version macos 14.0 15.0 -replace \
+		-output $(GHOSTTOOLS_DIR)/.build/debug/GhostTools-debug \
+		$(GHOSTTOOLS_DIR)/.build/debug/GhostTools
+	codesign --force -s "-" $(GHOSTTOOLS_DIR)/.build/debug/GhostTools-debug
+	@echo "Debug binary: $(GHOSTTOOLS_DIR)/.build/debug/GhostTools-debug"
+	@echo "Copy to guest and use: lldb GhostTools-debug"
+
+# Generate GhostTools .icns from source PNG
+GHOSTTOOLS_ICON_SRC = macOS/GhostVM/GhostToolsIcon.png
+GHOSTTOOLS_ICON_ICNS = build/GhostToolsIcon.icns
+GHOSTTOOLS_ICONSET = build/GhostToolsIcon.iconset
+
+ghosttools-icon: $(GHOSTTOOLS_ICON_ICNS)
+
+$(GHOSTTOOLS_ICON_ICNS): $(GHOSTTOOLS_ICON_SRC)
+	@echo "Generating GhostToolsIcon.icns..."
+	@rm -rf "$(GHOSTTOOLS_ICONSET)"
+	@mkdir -p "$(GHOSTTOOLS_ICONSET)"
+	@sips -z 16 16     "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_16x16.png"      > /dev/null
+	@sips -z 32 32     "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_16x16@2x.png"   > /dev/null
+	@sips -z 32 32     "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_32x32.png"      > /dev/null
+	@sips -z 64 64     "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_32x32@2x.png"   > /dev/null
+	@sips -z 128 128   "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_128x128.png"    > /dev/null
+	@sips -z 256 256   "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_128x128@2x.png" > /dev/null
+	@sips -z 256 256   "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_256x256.png"    > /dev/null
+	@sips -z 512 512   "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_256x256@2x.png" > /dev/null
+	@sips -z 512 512   "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_512x512.png"    > /dev/null
+	@sips -z 1024 1024 "$(GHOSTTOOLS_ICON_SRC)" --out "$(GHOSTTOOLS_ICONSET)/icon_512x512@2x.png" > /dev/null
+	iconutil -c icns "$(GHOSTTOOLS_ICONSET)" -o "$(GHOSTTOOLS_ICON_ICNS)"
+	@rm -rf "$(GHOSTTOOLS_ICONSET)"
+	@echo "GhostToolsIcon.icns created at: $(GHOSTTOOLS_ICON_ICNS)"
+
+# Generate GhostVM app .icns from source PNG
+GHOSTVM_ICON_SRC = macOS/GhostVM/Resources/GhostVMIcon.png
+GHOSTVM_ICON_ICNS = build/GhostVMIcon.icns
+GHOSTVM_ICONSET = build/GhostVMIcon.iconset
+
+ghostvm-icon: $(GHOSTVM_ICON_ICNS)
+
+$(GHOSTVM_ICON_ICNS): $(GHOSTVM_ICON_SRC)
+	@echo "Generating GhostVMIcon.icns..."
+	@rm -rf "$(GHOSTVM_ICONSET)"
+	@mkdir -p "$(GHOSTVM_ICONSET)"
+	@sips -z 16 16     "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_16x16.png"      > /dev/null
+	@sips -z 32 32     "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_16x16@2x.png"   > /dev/null
+	@sips -z 32 32     "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_32x32.png"      > /dev/null
+	@sips -z 64 64     "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_32x32@2x.png"   > /dev/null
+	@sips -z 128 128   "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_128x128.png"    > /dev/null
+	@sips -z 256 256   "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_128x128@2x.png" > /dev/null
+	@sips -z 256 256   "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_256x256.png"    > /dev/null
+	@sips -z 512 512   "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_256x256@2x.png" > /dev/null
+	@sips -z 512 512   "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_512x512.png"    > /dev/null
+	@sips -z 1024 1024 "$(GHOSTVM_ICON_SRC)" --out "$(GHOSTVM_ICONSET)/icon_512x512@2x.png" > /dev/null
+	iconutil -c icns "$(GHOSTVM_ICONSET)" -o "$(GHOSTVM_ICON_ICNS)"
+	@rm -rf "$(GHOSTVM_ICONSET)"
+	@echo "GhostVMIcon.icns created at: $(GHOSTVM_ICON_ICNS)"
+
 # Create GhostTools.app bundle and package into DMG
-dmg: tools
+dmg: tools ghosttools-icon
 	@echo "Creating GhostTools.app bundle..."
 	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS"
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources"
-	@# Copy executable
+	@# Copy executable (patch SDK version for guest compatibility)
 	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/"
+	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/GhostTools"
 	@# Copy Info.plist
 	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/"
+	@# Copy app icon
+	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources/"
 	@# Copy README to DMG root
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@# Ad-hoc sign the app
@@ -106,7 +189,7 @@ dmg: tools
 # Distribution settings
 DIST_DIR = build/dist
 DMG_NAME = GhostVM
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
 
 # Auto-detect Developer ID Application identity for distribution
 DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -179,6 +262,7 @@ dist: app cli
 	@mkdir -p "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/Resources"
 	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/MacOS/"
 	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/"
+	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/Resources/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
 	codesign --force --options runtime --timestamp --deep -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
@@ -222,6 +306,18 @@ dist: app cli
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/MacOS/vmctl"
 
+# Capture XCUITest screenshots for the website
+screenshots: $(XCODE_PROJECT)
+	./scripts/capture-screenshots.sh
+
+# Run the Next.js dev server
+website:
+	cd Website && npm run dev
+
+# Build the Next.js site for production
+website-build:
+	cd Website && npm run build
+
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -rf $(XCODE_PROJECT)
@@ -235,12 +331,17 @@ help:
 	@echo "  make cli      - Build vmctl CLI"
 	@echo "  make generate - Generate Xcode project from macOS/project.yml"
 	@echo "  make app      - Build SwiftUI app via xcodebuild"
+	@echo "  make debug    - Build SwiftUI app in Debug configuration"
 	@echo "  make run      - Build and run attached to terminal"
 	@echo "  make launch   - Build and launch detached"
 	@echo "  make test     - Run unit tests"
 	@echo "  make tools    - Build GhostTools guest agent"
+	@echo "  make debug-tools - Build GhostTools debug binary (lldb-compatible with macOS 15)"
 	@echo "  make dmg      - Create GhostTools.dmg"
 	@echo "  make dist     - Create distribution DMG with app + vmctl"
+	@echo "  make screenshots - Capture XCUITest screenshots for website"
+	@echo "  make website  - Run Next.js dev server (Website/)"
+	@echo "  make website-build - Build Next.js site for production"
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
 	@echo "Variables:"

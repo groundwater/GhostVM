@@ -77,12 +77,12 @@ public final class GhostClient: GhostClientProtocol {
     ///   - relativePath: Optional relative path to preserve folder structure (e.g., "folder/subfolder/file.txt")
     ///   - progressHandler: Optional callback for progress updates (0.0 to 1.0)
     /// - Returns: The path where the file was saved in the guest
-    public nonisolated func sendFile(fileURL: URL, relativePath: String? = nil, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
+    public nonisolated func sendFile(fileURL: URL, relativePath: String? = nil, batchID: String? = nil, isLastInBatch: Bool = false, permissions: Int? = nil, progressHandler: ((Double) -> Void)? = nil) async throws -> String {
         let pathToSend = relativePath ?? fileURL.lastPathComponent
         if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
+            return try await sendFileViaTCP(host: tcpHost, port: tcpPort, fileURL: fileURL, relativePath: pathToSend, batchID: batchID, isLastInBatch: isLastInBatch, permissions: permissions, progressHandler: progressHandler)
         } else if let vm = virtualMachine {
-            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, relativePath: pathToSend, progressHandler: progressHandler)
+            return try await sendFileViaVsock(vm: vm, fileURL: fileURL, relativePath: pathToSend, batchID: batchID, isLastInBatch: isLastInBatch, permissions: permissions, progressHandler: progressHandler)
         } else {
             throw GhostClientError.notConnected
         }
@@ -91,7 +91,7 @@ public final class GhostClient: GhostClientProtocol {
     /// Fetch a file from the guest VM
     /// - Parameter path: The file path in the guest to fetch
     /// - Returns: The file data and filename
-    public func fetchFile(at path: String) async throws -> (data: Data, filename: String) {
+    public func fetchFile(at path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
         if let tcpHost = tcpHost, let tcpPort = tcpPort {
             return try await fetchFileViaTCP(host: tcpHost, port: tcpPort, path: path)
         } else if let vm = virtualMachine {
@@ -133,6 +133,51 @@ public final class GhostClient: GhostClientProtocol {
             return try await fetchURLsViaVsock(vm: vm)
         } else {
             throw GhostClientError.notConnected
+        }
+    }
+
+    // MARK: - Open Path
+
+    /// Ask the guest to open a path (e.g. in Finder)
+    public func openPath(_ path: String) async throws {
+        let body = try JSONEncoder().encode(["path": path])
+        if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            try await openPathViaTCP(host: tcpHost, port: tcpPort, body: body)
+        } else if let vm = virtualMachine {
+            try await openPathViaVsock(vm: vm, body: body)
+        } else {
+            throw GhostClientError.notConnected
+        }
+    }
+
+    private func openPathViaTCP(host: String, port: Int, body: Data) async throws {
+        guard let session = urlSession else { throw GhostClientError.notConnected }
+
+        var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/open")!)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = authToken {
+            urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        urlRequest.httpBody = body
+
+        let (_, response) = try await session.data(for: urlRequest)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw GhostClientError.invalidResponse((response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+    }
+
+    private func openPathViaVsock(vm: VZVirtualMachine, body: Data) async throws {
+        let responseData = try await sendHTTPRequest(
+            vm: vm,
+            method: "POST",
+            path: "/api/v1/open",
+            body: body,
+            contentType: "application/json"
+        )
+        let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
         }
     }
 
@@ -345,7 +390,7 @@ public final class GhostClient: GhostClientProtocol {
         }
     }
 
-    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
+    private nonisolated func sendFileViaTCP(host: String, port: Int, fileURL: URL, relativePath: String, batchID: String?, isLastInBatch: Bool, permissions: Int?, progressHandler: ((Double) -> Void)?) async throws -> String {
         guard let session = urlSession else {
             throw GhostClientError.notConnected
         }
@@ -356,6 +401,15 @@ public final class GhostClient: GhostClientProtocol {
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue(relativePath, forHTTPHeaderField: "X-Filename")
+        if let batchID = batchID {
+            urlRequest.setValue(batchID, forHTTPHeaderField: "X-Batch-ID")
+        }
+        if isLastInBatch {
+            urlRequest.setValue("true", forHTTPHeaderField: "X-Batch-Last")
+        }
+        if let permissions = permissions {
+            urlRequest.setValue(String(permissions, radix: 8), forHTTPHeaderField: "X-Permissions")
+        }
         if let token = authToken {
             urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
@@ -380,7 +434,7 @@ public final class GhostClient: GhostClientProtocol {
         return fileResponse.path
     }
 
-    private func fetchFileViaTCP(host: String, port: Int, path: String) async throws -> (data: Data, filename: String) {
+    private func fetchFileViaTCP(host: String, port: Int, path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
         guard let session = urlSession else {
             throw GhostClientError.notConnected
         }
@@ -411,7 +465,13 @@ public final class GhostClient: GhostClientProtocol {
             filename = String(match)
         }
 
-        return (data, filename)
+        // Extract permissions from X-Permissions header
+        var permissions: Int? = nil
+        if let permStr = httpResponse.value(forHTTPHeaderField: "X-Permissions") {
+            permissions = Int(permStr, radix: 8)
+        }
+
+        return (data, filename, permissions)
     }
 
     private func listFilesViaTCP(host: String, port: Int) async throws -> [String] {
@@ -542,7 +602,7 @@ public final class GhostClient: GhostClientProtocol {
         }
     }
 
-    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, relativePath: String, progressHandler: ((Double) -> Void)?) async throws -> String {
+    private nonisolated func sendFileViaVsock(vm: VZVirtualMachine, fileURL: URL, relativePath: String, batchID: String?, isLastInBatch: Bool, permissions: Int?, progressHandler: ((Double) -> Void)?) async throws -> String {
         // Get file size
         let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
         guard let fileSize = attributes[.size] as? Int64 else {
@@ -586,6 +646,15 @@ public final class GhostClient: GhostClientProtocol {
         httpHeaders += "Connection: close\r\n"
         httpHeaders += "Content-Type: application/octet-stream\r\n"
         httpHeaders += "X-Filename: \(relativePath)\r\n"
+        if let batchID = batchID {
+            httpHeaders += "X-Batch-ID: \(batchID)\r\n"
+        }
+        if isLastInBatch {
+            httpHeaders += "X-Batch-Last: true\r\n"
+        }
+        if let permissions = permissions {
+            httpHeaders += "X-Permissions: \(String(permissions, radix: 8))\r\n"
+        }
         httpHeaders += "Content-Length: \(fileSize)\r\n"
         httpHeaders += "\r\n"
 
@@ -657,7 +726,7 @@ public final class GhostClient: GhostClientProtocol {
         return fileResponse.path
     }
 
-    private func fetchFileViaVsock(vm: VZVirtualMachine, path: String) async throws -> (data: Data, filename: String) {
+    private func fetchFileViaVsock(vm: VZVirtualMachine, path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
         let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
 
         let responseData = try await sendHTTPRequest(
@@ -667,7 +736,7 @@ public final class GhostClient: GhostClientProtocol {
             body: nil
         )
 
-        let (statusCode, body) = try HTTPResponseParser.parseBinary(responseData)
+        let (statusCode, headers, body) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -678,7 +747,11 @@ public final class GhostClient: GhostClientProtocol {
         }
 
         let filename = URL(fileURLWithPath: path).lastPathComponent
-        return (body, filename)
+        var permissions: Int? = nil
+        if let permStr = headers["X-Permissions"] {
+            permissions = Int(permStr, radix: 8)
+        }
+        return (body, filename, permissions)
     }
 
     private func listFilesViaVsock(vm: VZVirtualMachine) async throws -> [String] {

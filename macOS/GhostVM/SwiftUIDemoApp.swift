@@ -53,6 +53,13 @@ struct GhostVMSwiftUIApp: App {
                 .environmentObject(restoreStore)
         }
 
+        #if DEBUG
+        Window("Marketplace", id: "marketplace") {
+            MarketplaceView()
+        }
+        .defaultSize(width: 780, height: 520)
+        #endif
+
         // Real VM window shown when pressing Play.
         WindowGroup(id: "vm", for: App2VM.self) { vmBinding in
             if let vm = vmBinding.wrappedValue {
@@ -206,6 +213,14 @@ struct VMListDemoView: View {
     // Install VM state
     @State private var vmToInstall: App2VM?
 
+    // Watermark
+    @AppStorage("showListWatermark") private var showListWatermark: Bool = true
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var ghostWatermarkImage: NSImage? {
+        NSImage(named: colorScheme == .dark ? "ghostvm-dark" : "ghostvm")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -216,10 +231,40 @@ struct VMListDemoView: View {
                 }
                 .buttonStyle(.borderedProminent)
 
+                #if DEBUG
+                Button {
+                    openWindow(id: "marketplace")
+                } label: {
+                    Label("Marketplace", systemImage: "storefront")
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                #endif
+
                 Spacer()
+
+                Button {
+                    openWindow(id: "restoreImages")
+                } label: {
+                    Label("Images", systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.bordered)
             }
             .padding(.top, 8)
             .padding(.horizontal, 12)
+
+            Divider()
+
+            ZStack(alignment: .bottomTrailing) {
+                if showListWatermark, let img = ghostWatermarkImage {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 180, height: 180)
+                        .opacity(0.07)
+                        .allowsHitTesting(false)
+                        .padding(24)
+                }
 
             List(selection: $selectedVMID) {
                 if isDropTarget && store.vms.isEmpty {
@@ -238,6 +283,9 @@ struct VMListDemoView: View {
                         play: {
                             // Launch helper app (no window in main app - helper provides window)
                             App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
+                        },
+                        playRecovery: {
+                            App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id, recovery: true)
                         },
                         requestDelete: {
                             vmPendingDelete = vm
@@ -268,6 +316,9 @@ struct VMListDemoView: View {
                             play: {
                                 // Launch helper app (no window in main app - helper provides window)
                                 App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
+                            },
+                            playRecovery: {
+                                App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id, recovery: true)
                             },
                             requestDelete: {
                                 vmPendingDelete = vm
@@ -306,7 +357,9 @@ struct VMListDemoView: View {
                 }
             }
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
             .onDrop(of: [UTType.fileURL], isTargeted: $isDropTarget, perform: handleDrop)
+            } // ZStack
         }
         .frame(minWidth: 520, minHeight: 360)
         .sheet(isPresented: $isShowingCreateSheet) {
@@ -316,6 +369,17 @@ struct VMListDemoView: View {
         }
         .onAppear {
             App2AppDelegate.sharedStore = store
+            // Force a deterministic window size for UI testing screenshots
+            if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+                DispatchQueue.main.async {
+                    if let window = NSApplication.shared.windows.first(where: { $0.title == "GhostVM" }) {
+                        let isTall = ProcessInfo.processInfo.arguments.contains("--ui-testing-tall")
+                        let size = isTall ? NSSize(width: 660, height: 740) : NSSize(width: 540, height: 480)
+                        window.setContentSize(size)
+                        window.center()
+                    }
+                }
+            }
         }
         .alert("Delete this virtual machine?", isPresented: Binding(
             get: { vmPendingDelete != nil },
@@ -449,14 +513,12 @@ struct CreateVMDemoView: View {
     @EnvironmentObject private var restoreStore: App2RestoreImageStore
     @Environment(\.openWindow) private var openWindow
 
-    @State private var osType: String = "macOS"
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
     @State private var diskGiB: String = "64"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
-    @State private var selectedISOPath: String?
     @State private var isCreating: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -471,21 +533,8 @@ struct CreateVMDemoView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(osType == "macOS"
-                ? "Provide the required .ipsw restore image. Adjust CPU, memory, and disk as needed."
-                : "Provide an ARM64 Linux installer ISO. Adjust CPU, memory, and disk as needed.")
+            Text("Provide the required .ipsw restore image. Adjust CPU, memory, and disk as needed.")
                 .fixedSize(horizontal: false, vertical: true)
-
-            if FeatureFlags.shared.linuxVMSupport {
-                labeledRow("Guest OS") {
-                    Picker("", selection: $osType) {
-                        Text("macOS").tag("macOS")
-                        Text("Linux").tag("Linux")
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 200)
-                }
-            }
 
             labeledRow("CPUs") {
                 HStack(spacing: 8) {
@@ -517,34 +566,12 @@ struct CreateVMDemoView: View {
                 }
             }
 
-            if osType == "macOS" {
-                labeledRow("Restore Image*") {
-                    restorePicker
-                }
-            } else {
-                labeledRow("Installer ISO") {
-                    isoPicker
-                }
+            labeledRow("Restore Image*") {
+                restorePicker
             }
 
             labeledRow("Shared Folders") {
-                VStack(alignment: .leading, spacing: 8) {
-                    ForEach(sharedFolders.indices, id: \.self) { index in
-                        SharedFolderRowView(
-                            folder: $sharedFolders[index],
-                            onDelete: {
-                                sharedFolders.remove(at: index)
-                            }
-                        )
-                    }
-
-                    Button {
-                        sharedFolders.append(SharedFolderConfig(path: "", readOnly: true))
-                    } label: {
-                        Label("Add Shared Folder", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderless)
-                }
+                SharedFolderListView(folders: $sharedFolders)
             }
 
             Spacer(minLength: 8)
@@ -576,41 +603,30 @@ struct CreateVMDemoView: View {
     }
 
     private var canCreate: Bool {
-        if osType == "macOS" {
-            return hasRestoreOptions && selectedRestorePath != nil
-        } else {
-            // Linux can be created without an ISO (user can attach later)
-            return true
-        }
+        return selectedRestorePath != nil
     }
 
     @ViewBuilder
     private var restorePicker: some View {
-        if hasRestoreOptions {
-            Picker("Restore Image", selection: restoreSelectionBinding) {
-                ForEach(restoreItems) { item in
-                    Text(item.title).tag(item.path)
-                }
-                if !restoreItems.isEmpty {
-                    Divider()
-                }
-                Text("Manage Restore Images…")
-                    .tag("__manage_restore__")
+        Picker("Restore Image", selection: restoreSelectionBinding) {
+            ForEach(restoreItems) { item in
+                Text(item.title).tag(item.path)
             }
-            .labelsHidden()
-            .frame(maxWidth: .infinity)
-            .onChange(of: restoreSelectionBinding.wrappedValue) { oldValue, newValue in
-                if newValue == "__manage_restore__" {
-                    DispatchQueue.main.async {
-                        openWindow(id: "restoreImages")
-                        selectedRestorePath = oldValue.isEmpty ? nil : oldValue
-                    }
+            if !restoreItems.isEmpty {
+                Divider()
+            }
+            Text("Manage Restore Images…")
+                .tag("__manage_restore__")
+        }
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
+        .onChange(of: restoreSelectionBinding.wrappedValue) { oldValue, newValue in
+            if newValue == "__manage_restore__" {
+                DispatchQueue.main.async {
+                    openWindow(id: "restoreImages")
+                    selectedRestorePath = oldValue.isEmpty ? nil : oldValue
                 }
             }
-        } else {
-            Text("No downloaded restore images detected.")
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -626,44 +642,6 @@ struct CreateVMDemoView: View {
     }
 
     @ViewBuilder
-    private var isoPicker: some View {
-        HStack(spacing: 8) {
-            if let isoPath = selectedISOPath {
-                Text(URL(fileURLWithPath: isoPath).lastPathComponent)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Button("Clear") {
-                    selectedISOPath = nil
-                }
-                .buttonStyle(.borderless)
-            } else {
-                Text("No ISO selected (optional)")
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            Button("Choose ISO…") {
-                chooseISOFile()
-            }
-        }
-    }
-
-    private func chooseISOFile() {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = [.init(filenameExtension: "iso")!]
-        panel.message = "Select an ARM64 Linux installer ISO"
-        panel.begin { response in
-            if response == .OK, let url = panel.url {
-                DispatchQueue.main.async {
-                    self.selectedISOPath = url.path
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
     private func labeledRow<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             Text(title)
@@ -671,10 +649,6 @@ struct CreateVMDemoView: View {
                 .frame(width: labelWidth, alignment: .leading)
             content()
         }
-    }
-
-    private var hasRestoreOptions: Bool {
-        !restoreItems.isEmpty
     }
 
     private func reloadRestoreItems() {
@@ -704,34 +678,17 @@ struct CreateVMDemoView: View {
     private func create() {
         guard canCreate, !isCreating else { return }
 
-        let suggestedName: String
-        if osType == "macOS" {
-            guard let restorePath = selectedRestorePath else { return }
-            let filename = URL(fileURLWithPath: restorePath)
-                .deletingPathExtension()
-                .lastPathComponent
-            let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
-            suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
-        } else {
-            if let isoPath = selectedISOPath {
-                let filename = URL(fileURLWithPath: isoPath)
-                    .deletingPathExtension()
-                    .lastPathComponent
-                let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
-                suggestedName = trimmed.isEmpty ? "Linux VM" : trimmed
-            } else {
-                suggestedName = "Linux VM"
-            }
-        }
+        guard let restorePath = selectedRestorePath else { return }
+        let filename = URL(fileURLWithPath: restorePath)
+            .deletingPathExtension()
+            .lastPathComponent
+        let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
 
         SavePanelAdapter.chooseVMBundleURL(suggestedName: suggestedName) { url in
             guard let url else { return }
             DispatchQueue.main.async {
-                if self.osType == "macOS" {
-                    self.performCreate(at: url)
-                } else {
-                    self.performCreateLinux(at: url)
-                }
+                self.performCreate(at: url)
             }
         }
     }
@@ -777,44 +734,6 @@ struct CreateVMDemoView: View {
         }
     }
 
-    private func performCreateLinux(at initialURL: URL) {
-        var bundleURL = initialURL.standardizedFileURL
-        let ext = bundleURL.pathExtension.lowercased()
-        if ext != "ghostvm" {
-            bundleURL.deletePathExtension()
-            bundleURL.appendPathExtension("GhostVM")
-        }
-
-        // Filter out empty shared folders
-        let validFolders = sharedFolders.filter { !$0.path.trimmingCharacters(in: .whitespaces).isEmpty }
-
-        var opts = LinuxInitOptions()
-        opts.cpus = Int(cpuCount) ?? 4
-        opts.memoryGiB = UInt64(memoryGiB) ?? 8
-        opts.diskGiB = UInt64(diskGiB) ?? 64
-        opts.isoPath = selectedISOPath
-        opts.sharedFolders = validFolders
-
-        isCreating = true
-
-        DispatchQueue.global(qos: .userInitiated).async {
-            let controller = VMController()
-            do {
-                try controller.initLinuxVM(at: bundleURL, preferredName: nil, options: opts)
-                DispatchQueue.main.async {
-                    self.isCreating = false
-                    self.store.addBundles(from: [bundleURL])
-                    self.isPresented = false
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.isCreating = false
-                    self.errorMessage = error.localizedDescription
-                    self.isShowingError = true
-                }
-            }
-        }
-    }
 }
 
 @available(macOS 13.0, *)
@@ -822,6 +741,7 @@ struct VMRowView: View {
     let vm: App2VM
     let isSelected: Bool
     let play: () -> Void
+    let playRecovery: () -> Void
     let requestDelete: () -> Void
     let requestCreateSnapshot: () -> Void
     let requestRevertSnapshot: (String) -> Void
@@ -896,6 +816,7 @@ struct VMRowView: View {
                     VMContextMenu(
                         vm: vm,
                         play: play,
+                        playRecovery: playRecovery,
                         requestDelete: requestDelete,
                         requestCreateSnapshot: requestCreateSnapshot,
                         requestRevertSnapshot: requestRevertSnapshot,
@@ -1012,23 +933,34 @@ struct EditVMView: View {
     @State private var memoryGiB: String = "8"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
+    @State private var diskGiB: String = ""
     @State private var customIcon: NSImage?
     @State private var customIconChanged: Bool = false
     @State private var iconRemoved: Bool = false
     @State private var selectedPresetIcon: String?
+    @State private var isDynamicIconMode: Bool = false   // "stack" mode
+    @State private var isAppIconMode: Bool = false       // "app" mode
+    @State private var showIconPopover: Bool = false
 
-    private static let presetIcons: [(name: String, resource: String)] = [
-        ("Daemon", "icon-daemon"),
+    private static let allPresetIcons: [(name: String, resource: String)] = [
+        // Row 1: People
         ("Hipster", "icon-hipster"),
-        ("80s Bro", "icon-80s-bro"),
-        ("Quill", "icon-quill"),
-        ("Terminal", "icon-terminal"),
-        ("Banana", "icon-banana"),
-        ("Typewriter", "icon-typewriter"),
         ("Nerd", "icon-nerd"),
+        ("80s Bro", "icon-80s-bro"),
+        // Row 2: Tech/Writing
+        ("Terminal", "icon-terminal"),
+        ("Quill", "icon-quill"),
+        ("Typewriter", "icon-typewriter"),
         ("Kernel", "icon-kernel"),
+        // Row 3: Organic
+        ("Banana", "icon-banana"),
         ("Papaya", "icon-papaya"),
+        ("Daemon", "icon-daemon"),
     ]
+
+    private var presetIcons: [(name: String, resource: String)] {
+        Self.allPresetIcons
+    }
     @State private var isSaving: Bool = false
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
@@ -1037,82 +969,65 @@ struct EditVMView: View {
     private let labelWidth: CGFloat = 120
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Edit \"\(vm.name)\"")
-                .font(.headline)
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Edit \"\(vm.name)\"")
+                        .font(.headline)
 
-            if isLoading {
-                ProgressView("Loading settings…")
-                    .padding(.vertical, 8)
-            } else {
-                iconRow
+                    if isLoading {
+                        ProgressView("Loading settings…")
+                            .padding(.vertical, 8)
+                    } else {
+                        if !ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+                            iconRow
+                        }
 
-                labeledRow("CPUs") {
-                    HStack(spacing: 8) {
-                        TextField("Number of vCPUs", text: $cpuCount)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 120)
-                        Text("cores")
+                        labeledRow("CPUs") {
+                            HStack(spacing: 8) {
+                                TextField("Number of vCPUs", text: $cpuCount)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 120)
+                                Text("cores")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        labeledRow("Memory") {
+                            HStack(spacing: 8) {
+                                TextField("GiB", text: $memoryGiB)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 120)
+                                Text("GiB")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        labeledRow("Disk") {
+                            HStack(spacing: 8) {
+                                TextField("GiB", text: $diskGiB)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 120)
+                                Text("GiB")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        labeledRow("Shared Folders") {
+                            SharedFolderListView(folders: $sharedFolders)
+                        }
+
+                        labeledRow("Port Forwards") {
+                            PortForwardListView(forwards: $portForwards)
+                        }
+
+                        Text("Changes will take effect the next time you start the VM.")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
-
-                labeledRow("Memory") {
-                    HStack(spacing: 8) {
-                        TextField("GiB", text: $memoryGiB)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(maxWidth: 120)
-                        Text("GiB")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                labeledRow("Shared Folders") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(sharedFolders.indices, id: \.self) { index in
-                            SharedFolderRowView(
-                                folder: $sharedFolders[index],
-                                onDelete: {
-                                    sharedFolders.remove(at: index)
-                                }
-                            )
-                        }
-
-                        Button {
-                            sharedFolders.append(SharedFolderConfig(path: "", readOnly: true))
-                        } label: {
-                            Label("Add Shared Folder", systemImage: "plus")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-
-                labeledRow("Port Forwards") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(portForwards.indices, id: \.self) { index in
-                            PortForwardRowView(
-                                forward: $portForwards[index],
-                                onDelete: {
-                                    portForwards.remove(at: index)
-                                }
-                            )
-                        }
-
-                        Button {
-                            portForwards.append(PortForwardConfig(hostPort: 0, guestPort: 0, enabled: true))
-                        } label: {
-                            Label("Add Port Forward", systemImage: "plus")
-                        }
-                        .buttonStyle(.borderless)
-                    }
-                }
-
-                Text("Changes will take effect the next time you start the VM.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .padding(EdgeInsets(top: 18, leading: 24, bottom: 8, trailing: 24))
             }
-
-            Spacer(minLength: 8)
 
             HStack {
                 Spacer()
@@ -1128,8 +1043,8 @@ struct EditVMView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(isSaving || isLoading)
             }
+            .padding(EdgeInsets(top: 8, leading: 24, bottom: 18, trailing: 24))
         }
-        .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 620)
         .onAppear {
             loadCurrentSettings()
@@ -1148,51 +1063,125 @@ struct EditVMView: View {
                 .frame(width: labelWidth, alignment: .leading)
                 .padding(.top, 4)
 
-            let columns = Array(repeating: GridItem(.fixed(80), spacing: 8), count: 4)
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-                // "None" tile
-                iconTile(selected: customIcon == nil && selectedPresetIcon == nil) {
+            HStack(spacing: 8) {
+                // "Generic" tile
+                iconTile(selected: customIcon == nil && selectedPresetIcon == nil && !isDynamicIconMode && !isAppIconMode) {
                     Image(systemName: "desktopcomputer")
                         .font(.system(size: 32))
                         .foregroundStyle(.secondary)
                 } action: {
                     customIcon = nil
                     selectedPresetIcon = nil
+                    isDynamicIconMode = false
+                    isAppIconMode = false
                     customIconChanged = true
                     iconRemoved = true
                 }
 
-                // Preset icon tiles
-                ForEach(Self.presetIcons, id: \.resource) { preset in
-                    let isSelected = selectedPresetIcon == preset.resource
-                    iconTile(selected: isSelected, showBackground: false) {
-                        if let img = NSImage(named: preset.resource) {
-                            Image(nsImage: img)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                                .frame(width: 80, height: 80)
-                                .clipShape(RoundedRectangle(cornerRadius: 80 * 185.4 / 1024, style: .continuous))
-                        }
-                    } action: {
-                        if let img = NSImage(named: preset.resource) {
-                            customIcon = img
-                            selectedPresetIcon = preset.resource
-                            customIconChanged = true
-                            iconRemoved = false
-                        }
-                    }
-                }
-
-                // "Custom..." tile
-                iconTile(selected: customIcon != nil && selectedPresetIcon == nil) {
-                    Image(systemName: "plus.square")
+                // "Application" tile — shows exact foreground app icon
+                iconTile(selected: isAppIconMode) {
+                    Image(systemName: "app")
                         .font(.system(size: 32))
                         .foregroundStyle(.secondary)
                 } action: {
-                    selectIconFile()
+                    isAppIconMode = true
+                    isDynamicIconMode = false
+                    customIcon = nil
+                    selectedPresetIcon = nil
+                    customIconChanged = false
+                    iconRemoved = false
+                }
+
+                // "Stack" tile — stacked icons of recent apps
+                iconTile(selected: isDynamicIconMode) {
+                    Image(systemName: "sparkles.rectangle.stack")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                } action: {
+                    isDynamicIconMode = true
+                    isAppIconMode = false
+                    customIcon = nil
+                    selectedPresetIcon = nil
+                    customIconChanged = false
+                    iconRemoved = false
+                }
+
+                // "Custom" tile — shows chosen icon or plus symbol
+                let isCustomSelected = customIcon != nil && !isDynamicIconMode && !isAppIconMode
+                iconTile(selected: isCustomSelected, showBackground: customIcon == nil) {
+                    if let icon = customIcon, selectedPresetIcon == nil {
+                        Image(nsImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 80, height: 80)
+                            .clipShape(RoundedRectangle(cornerRadius: 80 * 185.4 / 1024, style: .continuous))
+                    } else if let presetResource = selectedPresetIcon, let img = NSImage(named: presetResource) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 80, height: 80)
+                            .clipShape(RoundedRectangle(cornerRadius: 80 * 185.4 / 1024, style: .continuous))
+                    } else {
+                        Image(systemName: "plus.square")
+                            .font(.system(size: 32))
+                            .foregroundStyle(.secondary)
+                    }
+                } action: {
+                    showIconPopover = true
+                }
+                .popover(isPresented: $showIconPopover) {
+                    iconPopoverContent
                 }
             }
         }
+        .onDrop(of: [UTType.image], isTargeted: nil) { providers in
+            handleIconDrop(providers)
+        }
+    }
+
+    @ViewBuilder
+    private var iconPopoverContent: some View {
+        let columns = Array(repeating: GridItem(.fixed(80), spacing: 8), count: 4)
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+            ForEach(presetIcons, id: \.resource) { preset in
+                let isSelected = selectedPresetIcon == preset.resource
+                iconTile(selected: isSelected, showBackground: false) {
+                    if let img = NSImage(named: preset.resource) {
+                        Image(nsImage: img)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 80, height: 80)
+                            .clipShape(RoundedRectangle(cornerRadius: 80 * 185.4 / 1024, style: .continuous))
+                    }
+                } action: {
+                    if let img = NSImage(named: preset.resource) {
+                        customIcon = img
+                        selectedPresetIcon = preset.resource
+                        isDynamicIconMode = false
+                        isAppIconMode = false
+                        customIconChanged = true
+                        iconRemoved = false
+                        showIconPopover = false
+                    }
+                }
+            }
+
+            iconTile(selected: false) {
+                VStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.system(size: 24))
+                        .foregroundStyle(.secondary)
+                    Text("Upload")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            } action: {
+                showIconPopover = false
+                selectIconFile()
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: 360)
         .onDrop(of: [UTType.image], isTargeted: nil) { providers in
             handleIconDrop(providers)
         }
@@ -1233,6 +1222,24 @@ struct EditVMView: View {
     }
 
     private func loadCurrentSettings() {
+        // In UI testing mode, inject mock settings instead of reading from disk
+        if ProcessInfo.processInfo.arguments.contains("--ui-testing") {
+            self.cpuCount = "6"
+            self.memoryGiB = "16"
+            self.diskGiB = "128"
+            self.portForwards = [
+                PortForwardConfig(hostPort: 8080, guestPort: 80),
+                PortForwardConfig(hostPort: 3000, guestPort: 3000),
+                PortForwardConfig(hostPort: 5432, guestPort: 5432),
+            ]
+            self.sharedFolders = [
+                SharedFolderConfig(path: "/Users/jake/Projects", readOnly: true),
+                SharedFolderConfig(path: "/Users/jake/shared-data", readOnly: false),
+            ]
+            self.isLoading = false
+            return
+        }
+
         DispatchQueue.global(qos: .userInitiated).async {
             let controller = VMController()
             do {
@@ -1240,6 +1247,7 @@ struct EditVMView: View {
                 DispatchQueue.main.async {
                     self.cpuCount = "\(config.cpus)"
                     self.memoryGiB = "\(config.memoryBytes / (1 << 30))"
+                    self.diskGiB = "\(config.diskBytes / (1 << 30))"
 
                     // Load shared folders: prefer new array, fall back to legacy single folder
                     if !config.sharedFolders.isEmpty {
@@ -1252,6 +1260,10 @@ struct EditVMView: View {
 
                     // Load port forwards
                     self.portForwards = config.portForwards
+
+                    // Load icon mode
+                    self.isDynamicIconMode = config.iconMode == "stack"
+                    self.isAppIconMode = config.iconMode == "app"
 
                     // Load custom icon
                     let layout = VMFileLayout(bundleURL: vm.bundleURL)
@@ -1294,9 +1306,23 @@ struct EditVMView: View {
                     portForwards: validForwards
                 )
 
-                // Save or remove custom icon
+                // Save icon mode
                 let layout = VMFileLayout(bundleURL: vm.bundleURL)
-                if customIconChanged {
+                let store = VMConfigStore(layout: layout)
+                var storedConfig = try store.load()
+                if isDynamicIconMode {
+                    storedConfig.iconMode = "stack"
+                } else if isAppIconMode {
+                    storedConfig.iconMode = "app"
+                } else {
+                    storedConfig.iconMode = nil
+                }
+                try store.save(storedConfig)
+
+                // Save or remove custom icon
+                if isDynamicIconMode || isAppIconMode {
+                    // Dynamic modes — don't touch icon.png
+                } else if customIconChanged {
                     if iconRemoved {
                         try? FileManager.default.removeItem(at: layout.customIconURL)
                         NSWorkspace.shared.setIcon(nil, forFile: vm.bundleURL.path, options: [])
@@ -1335,6 +1361,8 @@ struct EditVMView: View {
            let image = NSImage(contentsOf: url) {
             customIcon = image
             selectedPresetIcon = nil
+            isDynamicIconMode = false
+            isAppIconMode = false
             customIconChanged = true
             iconRemoved = false
         }
@@ -1349,11 +1377,15 @@ struct EditVMView: View {
                     if let url = item as? URL, let image = NSImage(contentsOf: url) {
                         self.customIcon = image
                         self.selectedPresetIcon = nil
+                        self.isDynamicIconMode = false
+                        self.isAppIconMode = false
                         self.customIconChanged = true
                         self.iconRemoved = false
                     } else if let data = item as? Data, let image = NSImage(data: data) {
                         self.customIcon = image
                         self.selectedPresetIcon = nil
+                        self.isDynamicIconMode = false
+                        self.isAppIconMode = false
                         self.customIconChanged = true
                         self.iconRemoved = false
                     }
@@ -1365,106 +1397,6 @@ struct EditVMView: View {
     }
 }
 
-@available(macOS 13.0, *)
-struct SharedFolderRowView: View {
-    @Binding var folder: SharedFolderConfig
-    let onDelete: () -> Void
-
-    var body: some View {
-        HStack(spacing: 8) {
-            TextField("Folder path", text: $folder.path)
-                .textFieldStyle(.roundedBorder)
-
-            Button {
-                selectFolder()
-            } label: {
-                Image(systemName: "folder")
-            }
-            .buttonStyle(.borderless)
-
-            Toggle("Read-only", isOn: $folder.readOnly)
-                .toggleStyle(.checkbox)
-                .fixedSize()
-
-            Button(role: .destructive) {
-                onDelete()
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-        }
-    }
-
-    private func selectFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.canCreateDirectories = true
-        panel.prompt = "Select"
-        panel.message = "Choose a folder to share with the VM"
-
-        if panel.runModal() == .OK, let url = panel.url {
-            folder.path = url.path
-        }
-    }
-}
-
-@available(macOS 13.0, *)
-struct PortForwardRowView: View {
-    @Binding var forward: PortForwardConfig
-    let onDelete: () -> Void
-
-    @State private var hostPortText: String = ""
-    @State private var guestPortText: String = ""
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Text("Host")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("Port", text: $hostPortText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-                .onChange(of: hostPortText) { _, newValue in
-                    if let port = UInt16(newValue) {
-                        forward.hostPort = port
-                    }
-                }
-
-            Image(systemName: "arrow.right")
-                .foregroundStyle(.secondary)
-
-            Text("Guest")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            TextField("Port", text: $guestPortText)
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-                .onChange(of: guestPortText) { _, newValue in
-                    if let port = UInt16(newValue) {
-                        forward.guestPort = port
-                    }
-                }
-
-            Toggle("Enabled", isOn: $forward.enabled)
-                .toggleStyle(.checkbox)
-                .fixedSize()
-
-            Button(role: .destructive) {
-                onDelete()
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-        }
-        .onAppear {
-            hostPortText = forward.hostPort > 0 ? "\(forward.hostPort)" : ""
-            guestPortText = forward.guestPort > 0 ? "\(forward.guestPort)" : ""
-        }
-    }
-}
-
 // MARK: - Port Forward Editor (Runtime)
 
 @available(macOS 13.0, *)
@@ -1473,90 +1405,28 @@ struct PortForwardEditorView: View {
     @ObservedObject var portForwardService: PortForwardService
     @Binding var isPresented: Bool
 
-    @State private var newHostPort: String = ""
-    @State private var newGuestPort: String = ""
-    @State private var errorMessage: String?
-
-    private var activeForwards: [PortForwardConfig] {
-        portForwardService.activeForwards
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Port Forwards")
                 .font(.headline)
 
-            if activeForwards.isEmpty {
-                Text("No active port forwards")
-                    .foregroundStyle(.secondary)
-                    .font(.subheadline)
-            } else {
-                ForEach(activeForwards) { forward in
-                    HStack {
-                        Text(verbatim: "localhost:\(forward.hostPort)")
-                            .font(.system(.body, design: .monospaced))
-                        Image(systemName: "arrow.right")
-                            .foregroundStyle(.secondary)
-                        Text(verbatim: "guest:\(forward.guestPort)")
-                            .font(.system(.body, design: .monospaced))
-                        Spacer()
-                        Button {
-                            session.removePortForward(hostPort: forward.hostPort)
-                        } label: {
-                            Image(systemName: "minus.circle.fill")
-                                .foregroundStyle(.red)
-                        }
-                        .buttonStyle(.plain)
+            PortForwardCallbackListView(
+                forwards: portForwardService.activeForwards,
+                onAdd: { host, guest in
+                    do {
+                        try session.addPortForward(hostPort: host, guestPort: guest)
+                        return nil
+                    } catch {
+                        return "Port \(host) already in use"
                     }
+                },
+                onRemove: { hostPort in
+                    session.removePortForward(hostPort: hostPort)
                 }
-            }
-
-            Divider()
-
-            HStack(spacing: 8) {
-                TextField("Host", text: $newHostPort)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 60)
-                Image(systemName: "arrow.right")
-                    .foregroundStyle(.secondary)
-                TextField("Guest", text: $newGuestPort)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 60)
-                Button("Add") {
-                    addPortForward()
-                }
-                .disabled(newHostPort.isEmpty || newGuestPort.isEmpty)
-            }
-
-            if let error = errorMessage {
-                Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
+            )
         }
         .padding()
-        .frame(width: 280)
-    }
-
-    private func addPortForward() {
-        errorMessage = nil
-
-        guard let hostPort = UInt16(newHostPort) else {
-            errorMessage = "Invalid host port"
-            return
-        }
-        guard let guestPort = UInt16(newGuestPort) else {
-            errorMessage = "Invalid guest port"
-            return
-        }
-
-        do {
-            try session.addPortForward(hostPort: hostPort, guestPort: guestPort)
-            newHostPort = ""
-            newGuestPort = ""
-        } catch {
-            errorMessage = "Port \(hostPort) already in use"
-        }
+        .frame(width: 300)
     }
 }
 
@@ -1586,6 +1456,7 @@ func listSnapshots(for bundleURL: URL) -> [String] {
 struct VMContextMenu: View {
     let vm: App2VM
     let play: () -> Void
+    let playRecovery: () -> Void
     let requestDelete: () -> Void
     let requestCreateSnapshot: () -> Void
     let requestRevertSnapshot: (String) -> Void
@@ -1598,6 +1469,7 @@ struct VMContextMenu: View {
     init(
         vm: App2VM,
         play: @escaping () -> Void,
+        playRecovery: @escaping () -> Void = {},
         requestDelete: @escaping () -> Void,
         requestCreateSnapshot: @escaping () -> Void,
         requestRevertSnapshot: @escaping (String) -> Void,
@@ -1608,6 +1480,7 @@ struct VMContextMenu: View {
     ) {
         self.vm = vm
         self.play = play
+        self.playRecovery = playRecovery
         self.requestDelete = requestDelete
         self.requestCreateSnapshot = requestCreateSnapshot
         self.requestRevertSnapshot = requestRevertSnapshot
@@ -1631,6 +1504,11 @@ struct VMContextMenu: View {
 
         Button("Start") {
             play()
+        }
+        .disabled(vm.needsInstall || isRunning)
+
+        Button("Boot to Recovery") {
+            playRecovery()
         }
         .disabled(vm.needsInstall || isRunning)
 
@@ -1675,14 +1553,6 @@ struct VMContextMenu: View {
             }
         }
 
-        // Show "Detach Installer ISO" for Linux VMs with an attached ISO
-        if FeatureFlags.shared.linuxVMSupport && vm.isLinux && vm.installerISOPath != nil {
-            Button("Detach Installer ISO") {
-                detachISO()
-            }
-            .disabled(isRunning)
-        }
-
         Divider()
         Button("Show in Finder") {
             FinderAdapter.revealItem(at: vm.bundleURL)
@@ -1694,21 +1564,6 @@ struct VMContextMenu: View {
             requestDelete()
         }
         .disabled(isRunning)
-    }
-
-    private func detachISO() {
-        DispatchQueue.global(qos: .userInitiated).async {
-            let controller = VMController()
-            do {
-                try controller.detachISO(bundleURL: vm.bundleURL)
-                // Refresh the VM in store by reloading it
-                DispatchQueue.main.async {
-                    store.reloadVM(at: vm.bundleURL)
-                }
-            } catch {
-                print("Failed to detach ISO: \(error)")
-            }
-        }
     }
 }
 
@@ -1813,6 +1668,7 @@ struct VMWindowView: View {
     @StateObject private var healthCheckService = HealthCheckService()
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
     @State private var showPortForwardEditor = false
+    @State private var shutDownCooldown = false
 
     init(vm: App2VM) {
         self.vm = vm
@@ -1871,7 +1727,7 @@ struct VMWindowView: View {
 
     var body: some View {
         ZStack {
-            App2VMDisplayHost(virtualMachine: session.virtualMachine, isLinux: vm.isLinux, captureSystemKeys: captureSystemKeys, fileTransferService: fileTransferService)
+            App2VMDisplayHost(virtualMachine: session.virtualMachine, captureSystemKeys: captureSystemKeys, fileTransferService: fileTransferService)
                 .frame(minWidth: 1024, minHeight: 640)
             // Invisible view that coordinates window close behavior with the VM.
             App2VMWindowCoordinatorHost(session: session)
@@ -2014,10 +1870,14 @@ struct VMWindowView: View {
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     session.stop()
+                    shutDownCooldown = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        shutDownCooldown = false
+                    }
                 } label: {
                     Label("Shut Down", systemImage: "stop.fill")
                 }
-                .disabled(!isRunning)
+                .disabled(!isRunning || shutDownCooldown)
                 .help("Shut down the guest OS gracefully")
             }
             ToolbarItem(placement: .primaryAction) {
@@ -2076,8 +1936,6 @@ struct SettingsDemoView: View {
     @State private var verificationMessage: String? = nil
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
-    @State private var showRacecarBackground: Bool = true
-    @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
 
     private let labelWidth: CGFloat = 130
 
@@ -2136,21 +1994,6 @@ struct SettingsDemoView: View {
                 .padding(.leading, labelWidth + 4)
             }
 
-            labeledRow("VM List Artwork") {
-                Toggle("Show racecar background", isOn: $showRacecarBackground)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            labeledRow("Keyboard") {
-                VStack(alignment: .leading, spacing: 4) {
-                    Toggle("Capture system keys (Cmd+Tab, etc.)", isOn: $captureSystemKeys)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("When enabled, system shortcuts are sent to the VM instead of macOS. Requires restarting the VM window.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            }
-
             labeledRow("App Icon") {
                 Picker("", selection: Binding(
                     get: { AppIconAdapter.shared.iconMode },
@@ -2165,6 +2008,7 @@ struct SettingsDemoView: View {
                 .frame(maxWidth: 260, alignment: .leading)
             }
 
+            #if DEBUG
             Divider()
 
             Text("Experimental Features")
@@ -2185,6 +2029,7 @@ struct SettingsDemoView: View {
                     }
                 }
             }
+            #endif
 
             Spacer()
         }
@@ -2305,8 +2150,10 @@ struct RestoreImagesDemoView: View {
 
                         Button(
                             image.isDownloaded
-                                ? (image.isDownloading ? "Delete" : "Delete")
-                                : (image.isDownloading ? "Cancel" : "Download")
+                                ? "Delete"
+                                : image.isDownloading
+                                    ? "Cancel"
+                                    : image.hasPartialDownload ? "Resume" : "Download"
                         ) {
                             store.toggleDownload(for: image)
                         }
@@ -2327,6 +2174,27 @@ struct RestoreImagesDemoView: View {
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 360)
+        .alert(
+            "Verification Failed",
+            isPresented: Binding(
+                get: { store.verificationFailure != nil },
+                set: { if !$0 { store.verificationFailure = nil } }
+            )
+        ) {
+            Button("Move to Trash", role: .destructive) {
+                if let failure = store.verificationFailure {
+                    store.trashFailedImage(filename: failure.filename)
+                }
+                store.verificationFailure = nil
+            }
+            Button("Keep", role: .cancel) {
+                store.verificationFailure = nil
+            }
+        } message: {
+            if let failure = store.verificationFailure {
+                Text("The SHA-1 checksum for \"\(failure.filename)\" does not match the expected value from the feed.\n\nExpected: \(failure.expected)\nActual: \(failure.actual)")
+            }
+        }
     }
 
     private static let byteFormatter: ByteCountFormatter = {

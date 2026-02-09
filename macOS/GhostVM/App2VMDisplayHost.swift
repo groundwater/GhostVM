@@ -13,13 +13,11 @@ public struct FileWithRelativePath {
 // SwiftUI wrapper around VZVirtualMachineView so AppKit stays isolated here.
 struct App2VMDisplayHost: NSViewRepresentable {
     let virtualMachine: VZVirtualMachine?
-    let isLinux: Bool
     let captureSystemKeys: Bool
     let fileTransferService: FileTransferService?
 
-    init(virtualMachine: VZVirtualMachine?, isLinux: Bool = false, captureSystemKeys: Bool = true, fileTransferService: FileTransferService? = nil) {
+    init(virtualMachine: VZVirtualMachine?, captureSystemKeys: Bool = true, fileTransferService: FileTransferService? = nil) {
         self.virtualMachine = virtualMachine
-        self.isLinux = isLinux
         self.captureSystemKeys = captureSystemKeys
         self.fileTransferService = fileTransferService
     }
@@ -32,10 +30,7 @@ struct App2VMDisplayHost: NSViewRepresentable {
         let view = FocusableVMView()
         view.capturesSystemKeys = captureSystemKeys
         if #available(macOS 14.0, *) {
-            // Only enable automatic display reconfiguration for macOS guests.
-            // Linux guests with VirtIO graphics use a fixed scanout resolution
-            // and don't handle dynamic resolution changes well.
-            view.automaticallyReconfiguresDisplay = !isLinux
+            view.automaticallyReconfiguresDisplay = true
         }
         view.autoresizingMask = [.width, .height]
         view.coordinator = context.coordinator

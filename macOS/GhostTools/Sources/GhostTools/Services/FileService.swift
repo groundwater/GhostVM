@@ -49,7 +49,7 @@ final class FileService {
     /// Reads a file from the specified path
     /// - Parameter path: The file path to read (relative paths are resolved from home directory)
     /// - Returns: The file data and filename
-    func readFile(at path: String) throws -> (data: Data, filename: String) {
+    func readFile(at path: String) throws -> (data: Data, filename: String, permissions: Int?) {
         let url = resolveFilePath(path)
 
         // Security check: ensure we're not accessing sensitive system files
@@ -60,7 +60,14 @@ final class FileService {
         let data = try Data(contentsOf: url)
         let filename = url.lastPathComponent
 
-        return (data, filename)
+        // Read POSIX permissions
+        var permissions: Int? = nil
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let posix = attrs[.posixPermissions] as? Int {
+            permissions = posix
+        }
+
+        return (data, filename, permissions)
     }
 
     /// Lists files in the receive directory
@@ -102,6 +109,8 @@ final class FileService {
     /// Clear all outgoing files
     func clearOutgoingFiles() {
         outgoingFiles.removeAll()
+        EventPushServer.shared.pushEvent(.files([]))
+        NotificationCenter.default.post(name: .outgoingFilesChanged, object: nil)
     }
 
     /// Check if a path is in the outgoing queue
@@ -200,6 +209,10 @@ final class FileService {
 
         return true
     }
+}
+
+extension Notification.Name {
+    static let outgoingFilesChanged = Notification.Name("outgoingFilesChanged")
 }
 
 enum FileServiceError: Error, LocalizedError {

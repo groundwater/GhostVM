@@ -14,52 +14,28 @@ public final class VMConfigurationBuilder {
 
     public func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VZVirtualMachineConfiguration {
         let config = VZVirtualMachineConfiguration()
-        let isLinux = storedConfig.guestOSType == "Linux"
 
-        // Configure boot loader based on guest OS type
-        if isLinux {
-            let efiBootLoader = VZEFIBootLoader()
-            efiBootLoader.variableStore = try VZEFIVariableStore(url: layout.efiVariableStoreURL)
-            config.bootLoader = efiBootLoader
-        } else {
-            config.bootLoader = VZMacOSBootLoader()
-        }
+        config.bootLoader = VZMacOSBootLoader()
 
         config.cpuCount = storedConfig.cpus
         config.memorySize = storedConfig.memoryBytes
 
-        // Configure platform based on guest OS type
-        if isLinux {
-            config.platform = VZGenericPlatformConfiguration()
-        } else {
-            let platform = VZMacPlatformConfiguration()
-            let hardwareModel = try loadHardwareModel(from: layout.hardwareModelURL)
-            let machineIdentifier = try loadMachineIdentifier(from: layout.machineIdentifierURL)
-            platform.hardwareModel = hardwareModel
-            platform.machineIdentifier = machineIdentifier
-            platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: layout.auxiliaryStorageURL)
-            config.platform = platform
-        }
+        let platform = VZMacPlatformConfiguration()
+        let hardwareModel = try loadHardwareModel(from: layout.hardwareModelURL)
+        let machineIdentifier = try loadMachineIdentifier(from: layout.machineIdentifierURL)
+        platform.hardwareModel = hardwareModel
+        platform.machineIdentifier = machineIdentifier
+        platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: layout.auxiliaryStorageURL)
+        config.platform = platform
 
         // Attach the raw disk image as the primary boot volume.
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: layout.diskURL, readOnly: false)
         let diskDevice = VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
-        diskDevice.blockDeviceIdentifier = isLinux ? "linux-root" : "macos-root"
+        diskDevice.blockDeviceIdentifier = "macos-root"
         var storageDevices: [VZStorageDeviceConfiguration] = [diskDevice]
 
-        // Attach installer ISO for Linux VMs if path is set and file exists
-        if isLinux,
-           let isoPath = storedConfig.installerISOPath,
-           !isoPath.isEmpty,
-           FileManager.default.fileExists(atPath: isoPath) {
-            let isoURL = URL(fileURLWithPath: isoPath)
-            let isoAttachment = try VZDiskImageStorageDeviceAttachment(url: isoURL, readOnly: true)
-            let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: isoAttachment)
-            storageDevices.append(usbDevice)
-        }
-
-        // Always attach GhostTools.dmg for macOS VMs (user can eject if not needed)
-        if !isLinux, let dmgURL = Self.findGhostToolsDMG() {
+        // Always attach GhostTools.dmg (user can eject if not needed)
+        if let dmgURL = Self.findGhostToolsDMG() {
             let dmgAttachment = try VZDiskImageStorageDeviceAttachment(url: dmgURL, readOnly: true)
             let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: dmgAttachment)
             storageDevices.append(usbDevice)
@@ -94,18 +70,10 @@ public final class VMConfigurationBuilder {
             // GUI mode attaches a single display plus keyboard and pointing devices so VZVirtualMachineView works.
             // Use fixed display dimensions to ensure suspend/resume compatibility.
             // The display will auto-resize after start if automaticallyReconfiguresDisplay is enabled (macOS 14+).
-            if isLinux {
-                let graphics = VZVirtioGraphicsDeviceConfiguration()
-                // Use 1920x1200 for Linux - this renders at 1:1 and is readable on HiDPI screens
-                // (Linux guests don't auto-scale like macOS, so Retina resolutions make text tiny)
-                graphics.scanouts = [VZVirtioGraphicsScanoutConfiguration(widthInPixels: 1920, heightInPixels: 1200)]
-                config.graphicsDevices = [graphics]
-            } else {
-                let graphics = VZMacGraphicsDeviceConfiguration()
-                let display = VZMacGraphicsDisplayConfiguration(widthInPixels: 2560, heightInPixels: 1600, pixelsPerInch: 110)
-                graphics.displays = [display]
-                config.graphicsDevices = [graphics]
-            }
+            let graphics = VZMacGraphicsDeviceConfiguration()
+            let display = VZMacGraphicsDisplayConfiguration(widthInPixels: 2560, heightInPixels: 1600, pixelsPerInch: 110)
+            graphics.displays = [display]
+            config.graphicsDevices = [graphics]
             config.keyboards = [VZUSBKeyboardConfiguration()]
             config.pointingDevices = [VZUSBScreenCoordinatePointingDeviceConfiguration()]
         } else {
@@ -152,7 +120,7 @@ public final class VMConfigurationBuilder {
         }
 
         let multiShare = VZMultipleDirectoryShare(directories: directories)
-        let tag = isLinux ? "ghostvm-shares" : VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
+        let tag = VZVirtioFileSystemDeviceConfiguration.macOSGuestAutomountTag
         let shareDevice = VZVirtioFileSystemDeviceConfiguration(tag: tag)
         shareDevice.share = multiShare
         config.directorySharingDevices = [shareDevice]

@@ -1,8 +1,57 @@
 import AppKit
 
+// MARK: - Shared Folder Menu Helpers
+
+/// Custom click gesture that carries the folder path for reveal-in-Finder.
+private final class SharedFolderClickGesture: NSClickGestureRecognizer {
+    var folderPath: String = ""
+    weak var owningMenu: NSMenu?
+}
+
+/// Container view for custom menu items that draws the system selection highlight on hover.
+private final class HighlightingMenuItemView: NSView {
+    var onHighlightChanged: ((Bool) -> Void)?
+    private var isHighlighted = false
+    private var trackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea { removeTrackingArea(existing) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHighlighted = true
+        onHighlightChanged?(true)
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHighlighted = false
+        onHighlightChanged?(false)
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHighlighted {
+            NSColor.selectedContentBackgroundColor.setFill()
+            let path = NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 0), xRadius: 4, yRadius: 4)
+            path.fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 /// NSToolbar implementation for the VM helper window.
 /// Provides quick access to VM status and controls.
-final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate {
+final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
 
     // MARK: - Toolbar Item Identifiers
 
@@ -11,7 +60,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         static let portForwards = NSToolbarItem.Identifier("portForwards")
         static let sharedFolders = NSToolbarItem.Identifier("sharedFolders")
         static let clipboardSync = NSToolbarItem.Identifier("clipboardSync")
+        static let iconChooser = NSToolbarItem.Identifier("iconChooser")
         static let captureKeys = NSToolbarItem.Identifier("captureKeys")
+        static let captureCommands = NSToolbarItem.Identifier("captureCommands")
         static let queuedFiles = NSToolbarItem.Identifier("queuedFiles")
         static let flexibleSpace = NSToolbarItem.Identifier.flexibleSpace
         static let shutDown = NSToolbarItem.Identifier("shutDown")
@@ -23,26 +74,30 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     weak var delegate: HelperToolbarDelegate?
 
     private let toolbar: NSToolbar
-    private var guestToolsConnected = false
+    private var guestToolsStatus: GuestToolsStatus = .connecting
     private var portForwardCount = 0
     private var sharedFolderCount = 0
     private var clipboardSyncMode = "disabled"
     private var captureSystemKeysEnabled = true
+    private var captureQuitEnabled = false
+    private var captureHideEnabled = false
+    private var autoPortMapEnabled = false
     private var queuedFileCount = 0
     private var queuedFileNames: [String] = []
 
     private var guestToolsItem: NSToolbarItem?
+    private var iconChooserItem: NSToolbarItem?
     private var portForwardsItem: NSToolbarItem?
-    private var sharedFoldersItem: NSToolbarItem?
+    private var sharedFoldersItem: NSMenuToolbarItem?
     private var clipboardSyncItem: NSToolbarItem?
     private var captureKeysItem: NSToolbarItem?
+    private var captureCommandsItem: NSMenuToolbarItem?
     private var queuedFilesItem: NSToolbarItem?
     private var shutDownItem: NSToolbarItem?
     private var terminateItem: NSToolbarItem?
 
-    private var portForwardsMenu = NSMenu()
     private var sharedFoldersMenu = NSMenu()
-    private var clipboardSyncMenu = NSMenu()
+    private var captureCommandsMenu = NSMenu()
 
     private let iconConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
 
@@ -52,7 +107,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var sharedFolderPanel: SharedFolderPanel?
     private var sharedFolderEntries: [SharedFolderEntry] = []
     private var queuedFilesPanel: QueuedFilesPanel?
+    private var clipboardPermissionPanel: ClipboardPermissionPanel?
+    private var portForwardPermissionPanel: PortForwardPermissionPanel?
+    private var portForwardNotificationPanel: PortForwardNotificationPanel?
+    private var iconChooserPanel: IconChooserPanel?
+    private var guestToolsInfoPanel: GuestToolsInfoPanel?
     private var previousQueuedFileCount = 0
+    private var blockedPortDescriptions: [String] = []
+
+    // Status text animation state
+    private var statusAnimationTimer: Timer?
+    private var statusDisappearTimer: Timer?
+    private var statusAnimationTarget: String = ""
+    private var statusAnimationIndex: Int = 0
+    private var lastAnimatedStatus: GuestToolsStatus?
 
     // MARK: - Initialization
 
@@ -61,20 +129,31 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         super.init()
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
-        toolbar.allowsUserCustomization = false
+        toolbar.allowsUserCustomization = true
     }
 
     func attach(to window: NSWindow) {
         self.window = window
+        toolbar.autosavesConfiguration = true
         window.toolbar = toolbar
         window.toolbarStyle = .unifiedCompact
     }
 
     // MARK: - State Updates
 
-    func setGuestToolsConnected(_ connected: Bool) {
-        guestToolsConnected = connected
+    func setGuestToolsStatus(_ status: GuestToolsStatus) {
+        let wasNotFound = guestToolsStatus == .notFound
+        guestToolsStatus = status
         updateGuestToolsButton()
+
+        if status == .notFound && !wasNotFound {
+            // Auto-show popover on first transition to notFound
+            showGuestToolsInfoPopover()
+        } else if status != .notFound {
+            // Close popover when status recovers
+            guestToolsInfoPanel?.close()
+            guestToolsInfoPanel = nil
+        }
     }
 
     func setPortForwardCount(_ count: Int) {
@@ -86,7 +165,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         portForwardEntries = entries
         portForwardCount = entries.count
         updatePortForwardsButton()
-        rebuildPortForwardsMenu()
+        portForwardPermissionPanel?.setEntries(entries)
         portForwardPanel?.setEntries(entries)
     }
 
@@ -101,12 +180,32 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     func setClipboardSyncMode(_ mode: String) {
         clipboardSyncMode = mode
         updateClipboardSyncButton()
-        rebuildClipboardSyncMenu()
     }
 
     func setCaptureSystemKeys(_ enabled: Bool) {
         captureSystemKeysEnabled = enabled
         updateCaptureKeysButton()
+    }
+
+    func setCaptureQuit(_ enabled: Bool) {
+        captureQuitEnabled = enabled
+        rebuildCaptureCommandsMenu()
+    }
+
+    func setCaptureHide(_ enabled: Bool) {
+        captureHideEnabled = enabled
+        rebuildCaptureCommandsMenu()
+    }
+
+    func setAutoPortMapEnabled(_ enabled: Bool) {
+        autoPortMapEnabled = enabled
+        updatePortForwardsButton()
+        portForwardPermissionPanel?.setAutoPortMapEnabled(enabled)
+    }
+
+    func setBlockedPortDescriptions(_ ports: [String]) {
+        blockedPortDescriptions = ports
+        portForwardPermissionPanel?.setBlockedPortDescriptions(ports)
     }
 
     func setQueuedFileCount(_ count: Int) {
@@ -119,15 +218,21 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         (terminateItem?.view as? NSButton)?.isEnabled = running
     }
 
+    func setShutDownEnabled(_ enabled: Bool) {
+        (shutDownItem?.view as? NSButton)?.isEnabled = enabled
+    }
+
     // MARK: - NSToolbarDelegate
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
             ItemID.guestToolsStatus,
+            ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
             ItemID.captureKeys,
+            ItemID.captureCommands,
             ItemID.queuedFiles,
             ItemID.flexibleSpace,
             ItemID.shutDown,
@@ -136,13 +241,28 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
+        [
+            ItemID.guestToolsStatus,
+            ItemID.iconChooser,
+            ItemID.portForwards,
+            ItemID.sharedFolders,
+            ItemID.clipboardSync,
+            ItemID.captureKeys,
+            ItemID.captureCommands,
+            ItemID.queuedFiles,
+            ItemID.shutDown,
+            ItemID.terminate,
+            .space,
+            .flexibleSpace
+        ]
     }
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
         case ItemID.guestToolsStatus:
             return makeGuestToolsItem()
+        case ItemID.iconChooser:
+            return makeIconChooserItem()
         case ItemID.portForwards:
             return makePortForwardsItem()
         case ItemID.sharedFolders:
@@ -151,6 +271,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
             return makeClipboardSyncItem()
         case ItemID.captureKeys:
             return makeCaptureKeysItem()
+        case ItemID.captureCommands:
+            return makeCaptureCommandsItem()
         case ItemID.queuedFiles:
             return makeQueuedFilesItem()
         case ItemID.shutDown:
@@ -169,17 +291,65 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Guest Tools"
         item.paletteLabel = "Guest Tools Status"
 
-        let button = NSButton(image: NSImage(systemSymbolName: "app.connected.to.app.below.fill",
-            accessibilityDescription: "Guest Tools")!.withSymbolConfiguration(iconConfig)!,
-            target: nil, action: nil)
+        // Status dot (8×8 colored circle)
+        let dot = NSView(frame: NSRect(x: 0, y: 0, width: 8, height: 8))
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+        ])
+
+        // Status label
+        let label = NSTextField(labelWithString: "")
+        label.font = .systemFont(ofSize: 11, weight: .medium)
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        // Horizontal stack
+        let stack = NSStackView(views: [dot, label])
+        stack.orientation = .horizontal
+        stack.spacing = 6
+        stack.alignment = .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        // Wrap in a borderless button for click handling
+        let button = NSButton(frame: .zero)
         button.bezelStyle = .toolbar
-        button.isBordered = true
-        button.isEnabled = false
+        button.isBordered = false
+        button.title = ""
+        button.target = self
+        button.action = #selector(guestToolsClicked)
+        button.translatesAutoresizingMaskIntoConstraints = false
+
+        button.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: button.leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -4),
+            stack.topAnchor.constraint(equalTo: button.topAnchor),
+            stack.bottomAnchor.constraint(equalTo: button.bottomAnchor),
+        ])
+
         item.view = button
 
         guestToolsItem = item
         updateGuestToolsButton()
 
+        return item
+    }
+
+    private func makeIconChooserItem() -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: ItemID.iconChooser)
+        item.label = "Icon"
+        item.paletteLabel = "Change Icon"
+        item.toolTip = "Change VM icon"
+
+        let button = NSButton(image: NSImage(systemSymbolName: "photo", accessibilityDescription: "Icon")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(iconChooserClicked))
+        button.bezelStyle = .toolbar
+        button.isBordered = true
+        item.view = button
+
+        iconChooserItem = item
         return item
     }
 
@@ -189,27 +359,24 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.paletteLabel = "Port Forwards"
         item.toolTip = "Manage port forwards"
 
-        let button = NSButton(image: NSImage(systemSymbolName: "powerplug", accessibilityDescription: "Port Forwards")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(showPortForwardsMenu(_:)))
+        let button = NSButton(image: portForwardsIcon()!, target: self, action: #selector(portForwardsClicked))
         button.bezelStyle = .toolbar
         button.isBordered = true
         item.view = button
 
         portForwardsItem = item
-        rebuildPortForwardsMenu()
+        updatePortForwardsButton()
 
         return item
     }
 
     private func makeSharedFoldersItem() -> NSToolbarItem {
-        let item = NSToolbarItem(itemIdentifier: ItemID.sharedFolders)
+        let item = NSMenuToolbarItem(itemIdentifier: ItemID.sharedFolders)
         item.label = "Folders"
         item.paletteLabel = "Shared Folders"
         item.toolTip = "Manage shared folders"
-
-        let button = NSButton(image: NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: "Shared Folders")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(showSharedFoldersMenu(_:)))
-        button.bezelStyle = .toolbar
-        button.isBordered = true
-        item.view = button
+        item.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: "Shared Folders")?.withSymbolConfiguration(iconConfig)
+        item.showsIndicator = true
 
         sharedFoldersItem = item
         rebuildSharedFoldersMenu()
@@ -221,32 +388,46 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         let item = NSToolbarItem(itemIdentifier: ItemID.clipboardSync)
         item.label = "Clipboard"
         item.paletteLabel = "Clipboard Sync"
-        item.toolTip = "Clipboard sync mode"
+        item.toolTip = "Toggle clipboard sync"
 
-        let button = NSButton(image: NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Clipboard Sync")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(showClipboardSyncMenu(_:)))
+        let button = NSButton(image: NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Clipboard Sync")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(toggleClipboardSync))
         button.bezelStyle = .toolbar
         button.isBordered = true
         item.view = button
 
         clipboardSyncItem = item
         updateClipboardSyncButton()
-        rebuildClipboardSyncMenu()
 
         return item
     }
 
     private func makeCaptureKeysItem() -> NSToolbarItem {
         let item = NSToolbarItem(itemIdentifier: ItemID.captureKeys)
-        item.label = "System Keys"
-        item.paletteLabel = "Capture System Keys"
+        item.label = "Capture Inputs"
+        item.paletteLabel = "Capture Inputs"
+        item.toolTip = "Toggle input capture"
 
-        let button = NSButton(image: NSImage(systemSymbolName: "cursorarrow.square.fill", accessibilityDescription: "Capture System Keys")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(toggleCaptureKeys))
+        let button = NSButton(image: NSImage(systemSymbolName: "cursorarrow.square.fill", accessibilityDescription: "Capture Inputs")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(toggleCaptureSystemKeys))
         button.bezelStyle = .toolbar
         button.isBordered = true
         item.view = button
 
         captureKeysItem = item
         updateCaptureKeysButton()
+
+        return item
+    }
+
+    private func makeCaptureCommandsItem() -> NSToolbarItem {
+        let item = NSMenuToolbarItem(itemIdentifier: ItemID.captureCommands)
+        item.label = "Commands"
+        item.paletteLabel = "Capture Commands"
+        item.toolTip = "Command key capture settings"
+        item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Capture Commands")?.withSymbolConfiguration(iconConfig)
+        item.showsIndicator = true
+
+        captureCommandsItem = item
+        rebuildCaptureCommandsMenu()
 
         return item
     }
@@ -302,16 +483,37 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
     private func updateGuestToolsButton() {
         guard let item = guestToolsItem, let button = item.view as? NSButton else { return }
+        guard let stack = button.subviews.first as? NSStackView,
+              stack.arrangedSubviews.count >= 2,
+              let dot = stack.arrangedSubviews[0] as? NSView,
+              let label = stack.arrangedSubviews[1] as? NSTextField else { return }
 
-        let symbolName = "app.connected.to.app.below.fill"
-        let color: NSColor = guestToolsConnected ? .systemGreen : .systemGray
+        let shouldAnimate = lastAnimatedStatus != guestToolsStatus
+        lastAnimatedStatus = guestToolsStatus
 
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Guest Tools") {
-            let colorConfig = NSImage.SymbolConfiguration(paletteColors: [color])
-            let combined = colorConfig.applying(iconConfig)
-            button.image = image.withSymbolConfiguration(combined)
+        switch guestToolsStatus {
+        case .connecting:
+            dot.layer?.backgroundColor = NSColor.systemYellow.cgColor
+            label.textColor = .secondaryLabelColor
+            item.toolTip = "GhostTools is connecting"
+            if shouldAnimate {
+                animateStatusText(to: "Connecting\u{2026}", disappearAfter: nil)
+            }
+        case .connected:
+            dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+            label.textColor = .labelColor
+            item.toolTip = "GhostTools is connected"
+            if shouldAnimate {
+                animateStatusText(to: "Guest Tools Connected", disappearAfter: 1.5)
+            }
+        case .notFound:
+            dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+            label.textColor = .secondaryLabelColor
+            item.toolTip = "GhostTools not found — click for help"
+            if shouldAnimate {
+                animateStatusText(to: "Not Found", disappearAfter: nil)
+            }
         }
-        item.toolTip = guestToolsConnected ? "GhostTools is connected" : "GhostTools is not connected"
     }
 
     private func updatePortForwardsButton() {
@@ -321,6 +523,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         } else {
             item.label = "Ports"
         }
+        (item.view as? NSButton)?.image = portForwardsIcon()
     }
 
     private func updateSharedFoldersButton() {
@@ -330,34 +533,33 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         } else {
             item.label = "Folders"
         }
+        let symbolName = sharedFolderCount > 0 ? "folder.fill.badge.gearshape" : "folder.badge.gearshape"
+        item.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Shared Folders")?.withSymbolConfiguration(iconConfig)
     }
 
     private func updateClipboardSyncButton() {
         guard let item = clipboardSyncItem, let button = item.view as? NSButton else { return }
 
-        let symbolName: String
-        switch clipboardSyncMode {
-        case "bidirectional":
-            symbolName = "clipboard.fill"
-        case "hostToGuest":
-            symbolName = "doc.on.clipboard"
-        case "guestToHost":
-            symbolName = "doc.on.clipboard.fill"
-        default:
-            symbolName = "clipboard"
-        }
-
+        let enabled = clipboardSyncMode != "disabled"
+        let symbolName = enabled ? "clipboard.fill" : "clipboard"
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Clipboard Sync")?.withSymbolConfiguration(iconConfig)
+        item.toolTip = enabled ? "Clipboard sync enabled" : "Clipboard sync disabled"
     }
 
     private func updateCaptureKeysButton() {
         guard let item = captureKeysItem, let button = item.view as? NSButton else { return }
 
         let symbolName = captureSystemKeysEnabled ? "cursorarrow.square.fill" : "cursorarrow.square"
-        if let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Capture System Keys") {
-            button.image = image.withSymbolConfiguration(iconConfig)
-        }
-        item.toolTip = captureSystemKeysEnabled ? "System keys captured by VM" : "System keys handled by macOS"
+        button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Capture Inputs")?.withSymbolConfiguration(iconConfig)
+        item.toolTip = captureSystemKeysEnabled ? "Inputs captured by VM" : "Inputs handled by macOS"
+
+        // Disable the Commands dropdown when inputs are captured — CMD overrides
+        // are forced off so the menu would be misleading.
+        updateCaptureCommandsEnabled()
+    }
+
+    private func updateCaptureCommandsEnabled() {
+        captureCommandsItem?.isEnabled = !captureSystemKeysEnabled
     }
 
     private func updateQueuedFilesButton() {
@@ -378,47 +580,87 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         }
     }
 
-    // MARK: - Menu Builders
+    // MARK: - Status Text Animation
 
-    private func rebuildClipboardSyncMenu() {
-        let menu = NSMenu()
-        let modes: [(String, String)] = [
-            ("Bidirectional", "bidirectional"),
-            ("Host \u{2192} Guest", "hostToGuest"),
-            ("Guest \u{2192} Host", "guestToHost"),
-            ("Disabled", "disabled")
-        ]
-
-        for (title, mode) in modes {
-            let menuItem = NSMenuItem(title: title, action: #selector(setClipboardMode(_:)), keyEquivalent: "")
-            menuItem.target = self
-            menuItem.representedObject = mode
-            menuItem.state = (mode == clipboardSyncMode) ? .on : .off
-            menu.addItem(menuItem)
-        }
-
-        clipboardSyncMenu = menu
+    private func cancelStatusAnimation() {
+        statusAnimationTimer?.invalidate()
+        statusAnimationTimer = nil
+        statusDisappearTimer?.invalidate()
+        statusDisappearTimer = nil
     }
 
-    private func rebuildPortForwardsMenu() {
+    private func animateStatusText(to target: String, disappearAfter: TimeInterval?) {
+        cancelStatusAnimation()
+        statusAnimationTarget = target
+        statusAnimationIndex = 0
+
+        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] timer in
+            guard let self = self, let label = self.statusLabel() else { timer.invalidate(); return }
+            self.statusAnimationIndex += 1
+            label.stringValue = String(self.statusAnimationTarget.suffix(self.statusAnimationIndex))
+
+            if self.statusAnimationIndex >= self.statusAnimationTarget.count {
+                timer.invalidate()
+                self.statusAnimationTimer = nil
+
+                if let delay = disappearAfter {
+                    self.statusDisappearTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+                        self?.statusDisappearTimer = nil
+                        self?.animateStatusDisappear()
+                    }
+                }
+            }
+        }
+    }
+
+    private func animateStatusDisappear() {
+        statusAnimationTimer?.invalidate()
+        statusAnimationTimer = nil
+
+        statusAnimationTimer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] timer in
+            guard let self = self, let label = self.statusLabel() else { timer.invalidate(); return }
+            let current = label.stringValue
+            if current.isEmpty {
+                timer.invalidate()
+                self.statusAnimationTimer = nil
+                return
+            }
+            label.stringValue = String(current.dropLast())
+        }
+    }
+
+    /// Helper to find the status label inside the guest tools toolbar item.
+    private func statusLabel() -> NSTextField? {
+        guard let button = guestToolsItem?.view as? NSButton,
+              let stack = button.subviews.first as? NSStackView,
+              stack.arrangedSubviews.count >= 2,
+              let label = stack.arrangedSubviews[1] as? NSTextField else { return nil }
+        return label
+    }
+
+    // MARK: - Menu Builders
+
+
+    private func rebuildCaptureCommandsMenu() {
         let menu = NSMenu()
 
-        if !portForwardEntries.isEmpty {
-            for entry in portForwardEntries {
-                let menuItem = NSMenuItem(title: "localhost:\(entry.hostPort) \u{2192} :\(entry.guestPort)", action: #selector(copyPortForwardURL(_:)), keyEquivalent: "")
-                menuItem.target = self
-                menuItem.representedObject = entry.hostPort
-                menuItem.toolTip = "Click to copy URL"
-                menu.addItem(menuItem)
-            }
-            menu.addItem(NSMenuItem.separator())
-        }
+        let quitItem = NSMenuItem(title: "Quit (\u{2318}Q)", action: #selector(toggleCaptureQuit), keyEquivalent: "")
+        quitItem.target = self
+        quitItem.state = captureQuitEnabled ? .on : .off
+        menu.addItem(quitItem)
 
-        let editItem = NSMenuItem(title: "Edit Port Forwards\u{2026}", action: #selector(editPortForwards(_:)), keyEquivalent: "")
-        editItem.target = self
-        menu.addItem(editItem)
+        let hideItem = NSMenuItem(title: "Hide (\u{2318}H)", action: #selector(toggleCaptureHide), keyEquivalent: "")
+        hideItem.target = self
+        hideItem.state = captureHideEnabled ? .on : .off
+        menu.addItem(hideItem)
 
-        portForwardsMenu = menu
+        captureCommandsMenu = menu
+        captureCommandsItem?.menu = menu
+    }
+
+    private func portForwardsIcon() -> NSImage? {
+        let symbolName = autoPortMapEnabled ? "powerplug.fill" : "powerplug"
+        return NSImage(systemSymbolName: symbolName, accessibilityDescription: "Port Forwards")?.withSymbolConfiguration(iconConfig)
     }
 
     private func rebuildSharedFoldersMenu() {
@@ -426,11 +668,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
         if !sharedFolderEntries.isEmpty {
             for entry in sharedFolderEntries {
-                let title = "\(entry.displayName)\(entry.readOnly ? " (R/O)" : "")"
-                let menuItem = NSMenuItem(title: title, action: #selector(revealSharedFolder(_:)), keyEquivalent: "")
-                menuItem.target = self
-                menuItem.representedObject = entry.path
-                menuItem.toolTip = entry.path
+                let menuItem = NSMenuItem()
+                menuItem.view = makeSharedFolderMenuItemView(for: entry, in: menu)
                 menu.addItem(menuItem)
             }
             menu.addItem(NSMenuItem.separator())
@@ -441,32 +680,126 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         menu.addItem(editItem)
 
         sharedFoldersMenu = menu
+        sharedFoldersItem?.menu = menu
+    }
+
+    private func makeSharedFolderMenuItemView(for entry: SharedFolderEntry, in menu: NSMenu) -> NSView {
+        let wrapper = HighlightingMenuItemView()
+
+        let container = NSStackView()
+        container.orientation = .horizontal
+        container.alignment = .centerY
+        container.spacing = 6
+        container.edgeInsets = NSEdgeInsets(top: 4, left: 14, bottom: 4, right: 10)
+
+        // Folder icon
+        let iconView = NSImageView()
+        let folderImage = NSImage(systemSymbolName: "folder.fill", accessibilityDescription: "Folder")
+        iconView.image = folderImage
+        iconView.contentTintColor = .secondaryLabelColor
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            iconView.widthAnchor.constraint(equalToConstant: 16),
+            iconView.heightAnchor.constraint(equalToConstant: 16),
+        ])
+        container.addArrangedSubview(iconView)
+
+        // Folder name (clickable to reveal in Finder)
+        let label = NSTextField(labelWithString: "\(entry.displayName)\(entry.readOnly ? " (R/O)" : "")")
+        label.font = .menuFont(ofSize: 0)
+        label.lineBreakMode = .byTruncatingTail
+        label.toolTip = entry.path
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        container.addArrangedSubview(label)
+
+        // Click gesture on the row to reveal in Finder
+        let click = SharedFolderClickGesture(target: self, action: #selector(sharedFolderRowClicked(_:)))
+        click.folderPath = entry.path
+        click.owningMenu = menu
+        wrapper.addGestureRecognizer(click)
+
+        // Register views for highlight color switching
+        wrapper.onHighlightChanged = { highlighted in
+            let tint: NSColor = highlighted ? .white : .secondaryLabelColor
+            let textColor: NSColor = highlighted ? .white : .labelColor
+            iconView.contentTintColor = tint
+            label.textColor = textColor
+        }
+
+        // Layout: embed container in wrapper
+        wrapper.addSubview(container)
+        container.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            container.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
+            container.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            container.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            wrapper.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+        ])
+
+        return wrapper
     }
 
     // MARK: - Actions
 
-    @objc private func showPortForwardsMenu(_ sender: NSButton) {
-        portForwardsMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+    @objc private func guestToolsClicked() {
+        guard guestToolsStatus == .notFound else { return }
+        showGuestToolsInfoPopover()
     }
 
-    @objc private func showSharedFoldersMenu(_ sender: NSButton) {
-        sharedFoldersMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+    private func showGuestToolsInfoPopover() {
+        guard let view = guestToolsItem?.view else { return }
+
+        guestToolsInfoPanel?.close()
+
+        let panel = GuestToolsInfoPanel()
+        panel.onClose = { [weak self] in
+            self?.guestToolsInfoPanel = nil
+        }
+        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        guestToolsInfoPanel = panel
     }
 
-    @objc private func showClipboardSyncMenu(_ sender: NSButton) {
-        clipboardSyncMenu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 2), in: sender)
+    @objc private func iconChooserClicked() {
+        if iconChooserPanel?.isShown == true {
+            iconChooserPanel?.close()
+        } else {
+            delegate?.toolbarDidRequestIconChooser(self)
+        }
     }
 
-    @objc private func copyPortForwardURL(_ sender: NSMenuItem) {
-        guard let hostPort = sender.representedObject as? UInt16 else { return }
-        let urlString = "http://localhost:\(hostPort)"
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(urlString, forType: .string)
+    @objc private func toggleClipboardSync() {
+        let newMode = (clipboardSyncMode == "disabled") ? "bidirectional" : "disabled"
+        clipboardSyncMode = newMode
+        updateClipboardSyncButton()
+        delegate?.toolbar(self, didSelectClipboardSyncMode: newMode)
+    }
+
+    @objc private func portForwardsClicked() {
+        // Close notification panel if shown
+        if portForwardNotificationPanel?.isShown == true {
+            portForwardNotificationPanel?.close()
+            portForwardNotificationPanel = nil
+        }
+
+        // Toggle management panel
+        if portForwardPermissionPanel?.isShown == true {
+            portForwardPermissionPanel?.close()
+        } else {
+            showPortForwardPermissionPopover()
+        }
     }
 
     @objc private func revealSharedFolder(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String else { return }
         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
+    }
+
+    @objc private func sharedFolderRowClicked(_ sender: NSClickGestureRecognizer) {
+        guard let gesture = sender as? SharedFolderClickGesture else { return }
+        gesture.owningMenu?.cancelTracking()
+        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: gesture.folderPath)
     }
 
     @objc private func editSharedFolders(_ sender: NSMenuItem) {
@@ -482,15 +815,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         sharedFolderPanel = panel
     }
 
-    @objc private func setClipboardMode(_ sender: NSMenuItem) {
-        guard let mode = sender.representedObject as? String else { return }
-        clipboardSyncMode = mode
-        updateClipboardSyncButton()
-        rebuildClipboardSyncMenu()
-        delegate?.toolbar(self, didSelectClipboardSyncMode: mode)
-    }
 
-    @objc private func editPortForwards(_ sender: NSMenuItem) {
+    private func editPortForwards() {
         let targetWindow = window ?? NSApp.keyWindow
         guard let targetWindow = targetWindow else {
             delegate?.toolbarDidRequestPortForwardEditor(self)
@@ -506,10 +832,22 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         portForwardPanel = panel
     }
 
-    @objc private func toggleCaptureKeys() {
+    @objc private func toggleCaptureSystemKeys() {
         captureSystemKeysEnabled.toggle()
         updateCaptureKeysButton()
         delegate?.toolbar(self, didToggleCaptureSystemKeys: captureSystemKeysEnabled)
+    }
+
+    @objc private func toggleCaptureQuit() {
+        captureQuitEnabled.toggle()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleCaptureQuit: captureQuitEnabled)
+    }
+
+    @objc private func toggleCaptureHide() {
+        captureHideEnabled.toggle()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleCaptureHide: captureHideEnabled)
     }
 
     @objc private func receiveQueuedFiles() {
@@ -543,6 +881,97 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         queuedFilesPanel = panel
     }
 
+    func showIconChooserPopover(bundleURL: URL) {
+        guard let button = iconChooserItem?.view else { return }
+
+        iconChooserPanel?.close()
+
+        let panel = IconChooserPanel()
+        panel.delegate = self
+        panel.onClose = { [weak self] in
+            self?.iconChooserPanel = nil
+        }
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY, bundleURL: bundleURL)
+        iconChooserPanel = panel
+    }
+
+    func showClipboardPermissionPopover() {
+        guard let button = clipboardSyncItem?.view else { return }
+
+        clipboardPermissionPanel?.close()
+
+        let panel = ClipboardPermissionPanel()
+        panel.delegate = self
+        panel.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.clipboardPermissionPanel = nil
+            self.delegate?.toolbarClipboardPermissionPanelDidClose(self)
+        }
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        clipboardPermissionPanel = panel
+    }
+
+    func closeClipboardPermissionPopover() {
+        clipboardPermissionPanel?.close()
+        clipboardPermissionPanel = nil
+    }
+
+    var isClipboardPermissionPopoverShown: Bool {
+        clipboardPermissionPanel?.isShown ?? false
+    }
+
+    func showPortForwardPermissionPopover() {
+        guard let button = portForwardsItem?.view else { return }
+
+        portForwardPermissionPanel?.close()
+
+        let panel = PortForwardPermissionPanel()
+        panel.delegate = self
+        panel.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.portForwardPermissionPanel = nil
+            self.delegate?.toolbarPortForwardPermissionPanelDidClose(self)
+        }
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        panel.setEntries(portForwardEntries)
+        panel.setAutoPortMapEnabled(autoPortMapEnabled)
+        panel.setBlockedPortDescriptions(blockedPortDescriptions)
+        portForwardPermissionPanel = panel
+    }
+
+    func closePortForwardPermissionPopover() {
+        portForwardNotificationPanel?.close()
+        portForwardNotificationPanel = nil
+    }
+
+    var isPortForwardPermissionPopoverShown: Bool {
+        portForwardNotificationPanel?.isShown ?? false
+    }
+
+    func setPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
+        portForwardNotificationPanel?.setPortMappings(mappings)
+    }
+
+    func addPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
+        portForwardNotificationPanel?.addPortMappings(mappings)
+    }
+
+    func showPortForwardNotificationPopover() {
+        guard let button = portForwardsItem?.view else { return }
+
+        portForwardNotificationPanel?.close()
+
+        let panel = PortForwardNotificationPanel()
+        panel.delegate = self
+        panel.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.portForwardNotificationPanel = nil
+            self.delegate?.toolbarPortForwardPermissionPanelDidClose(self)
+        }
+        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        portForwardNotificationPanel = panel
+    }
+
     @objc private func shutDownVM() {
         delegate?.toolbarDidRequestShutDown(self)
     }
@@ -573,6 +1002,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         delegate?.toolbar(self, didRemoveSharedFolderWithID: id)
     }
 
+    func sharedFolderPanel(_ panel: SharedFolderPanel, didSetReadOnly readOnly: Bool, forFolderWithID id: UUID) {
+        delegate?.toolbar(self, didSetSharedFolderReadOnly: readOnly, forID: id)
+    }
+
     // MARK: - QueuedFilesPanelDelegate
 
     func queuedFilesPanelDidAllow(_ panel: QueuedFilesPanel) {
@@ -588,6 +1021,68 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         queuedFileNames = []
         delegate?.toolbarDidRequestDenyFiles(self)
     }
+
+    // MARK: - ClipboardPermissionPanelDelegate
+
+    func clipboardPermissionPanelDidDeny(_ panel: ClipboardPermissionPanel) {
+        panel.close()
+        clipboardPermissionPanel = nil
+        delegate?.toolbarClipboardPermissionDidDeny(self)
+    }
+
+    func clipboardPermissionPanelDidAllowOnce(_ panel: ClipboardPermissionPanel) {
+        panel.close()
+        clipboardPermissionPanel = nil
+        delegate?.toolbarClipboardPermissionDidAllowOnce(self)
+    }
+
+    func clipboardPermissionPanelDidAlwaysAllow(_ panel: ClipboardPermissionPanel) {
+        panel.close()
+        clipboardPermissionPanel = nil
+        delegate?.toolbarClipboardPermissionDidAlwaysAllow(self)
+    }
+
+    // MARK: - PortForwardPermissionPanelDelegate
+
+    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didBlockPort guestPort: UInt16) {
+        delegate?.toolbar(self, didBlockAutoForwardedPort: guestPort)
+    }
+
+    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didRemoveForwardWithHostPort hostPort: UInt16) {
+        delegate?.toolbar(self, didRemovePortForwardWithHostPort: hostPort)
+    }
+
+    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didToggleAutoPortMap enabled: Bool) {
+        autoPortMapEnabled = enabled
+        updatePortForwardsButton()
+        delegate?.toolbar(self, didToggleAutoPortMap: enabled)
+    }
+
+    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didUnblockPort port: UInt16) {
+        delegate?.toolbar(self, didUnblockPort: port)
+    }
+
+    func portForwardPermissionPanelDidUnblockAll(_ panel: PortForwardPermissionPanel) {
+        delegate?.toolbarDidUnblockAllPorts(self)
+    }
+
+    func portForwardPermissionPanelDidRequestAddPortForward(_ panel: PortForwardPermissionPanel) {
+        panel.close()
+        portForwardPermissionPanel = nil
+        editPortForwards()
+    }
+
+    // MARK: - PortForwardNotificationPanelDelegate
+
+    func portForwardNotificationPanel(_ panel: PortForwardNotificationPanel, didBlockPort guestPort: UInt16) {
+        delegate?.toolbar(self, didBlockAutoForwardedPort: guestPort)
+    }
+
+    // MARK: - IconChooserPanelDelegate
+
+    func iconChooserPanel(_ panel: IconChooserPanel, didSelectMode mode: String?, icon: NSImage?) {
+        delegate?.toolbar(self, didSelectIconMode: mode, icon: icon)
+    }
 }
 
 // MARK: - Delegate Protocol
@@ -595,11 +1090,15 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool)
+    func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool)
+    func toolbar(_ toolbar: HelperToolbar, didToggleCaptureHide enabled: Bool)
+    func toolbar(_ toolbar: HelperToolbar, didToggleAutoPortMap enabled: Bool)
     @discardableResult
     func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) -> String?
     func toolbar(_ toolbar: HelperToolbar, didRemovePortForwardWithHostPort hostPort: UInt16)
     func toolbar(_ toolbar: HelperToolbar, didAddSharedFolder path: String, readOnly: Bool)
     func toolbar(_ toolbar: HelperToolbar, didRemoveSharedFolderWithID id: UUID)
+    func toolbar(_ toolbar: HelperToolbar, didSetSharedFolderReadOnly readOnly: Bool, forID id: UUID)
     func toolbarDidRequestPortForwardEditor(_ toolbar: HelperToolbar)
     func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar)
     func toolbarDidRequestDenyFiles(_ toolbar: HelperToolbar)
@@ -607,4 +1106,14 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbarDidRequestShutDown(_ toolbar: HelperToolbar)
     func toolbarDidRequestTerminate(_ toolbar: HelperToolbar)
     func toolbarQueuedFilesPanelDidClose(_ toolbar: HelperToolbar)
+    func toolbarClipboardPermissionDidDeny(_ toolbar: HelperToolbar)
+    func toolbarClipboardPermissionDidAllowOnce(_ toolbar: HelperToolbar)
+    func toolbarClipboardPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
+    func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar)
+    func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16)
+    func toolbarPortForwardPermissionPanelDidClose(_ toolbar: HelperToolbar)
+    func toolbar(_ toolbar: HelperToolbar, didUnblockPort port: UInt16)
+    func toolbarDidUnblockAllPorts(_ toolbar: HelperToolbar)
+    func toolbarDidRequestIconChooser(_ toolbar: HelperToolbar)
+    func toolbar(_ toolbar: HelperToolbar, didSelectIconMode mode: String?, icon: NSImage?)
 }

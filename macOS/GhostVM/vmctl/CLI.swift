@@ -63,26 +63,6 @@ struct CLI {
             } catch {
                 fail(error)
             }
-        case "create-linux":
-            guard FeatureFlags.shared.linuxVMSupport else {
-                print("Error: Linux VM support is disabled. Enable it in GhostVM > Settings > Experimental Features.")
-                exit(1)
-            }
-            do {
-                try handleCreateLinux(arguments: Array(arguments.dropFirst()))
-            } catch {
-                fail(error)
-            }
-        case "detach-iso":
-            guard FeatureFlags.shared.linuxVMSupport else {
-                print("Error: Linux VM support is disabled. Enable it in GhostVM > Settings > Experimental Features.")
-                exit(1)
-            }
-            do {
-                try handleDetachISO(arguments: Array(arguments.dropFirst()))
-            } catch {
-                fail(error)
-            }
         default:
             print("Unknown command '\(arguments[0])'.")
             showHelp(exitCode: 1)
@@ -298,76 +278,13 @@ struct CLI {
         try controller.discardSuspend(bundleURL: bundleURL)
     }
 
-    private func handleCreateLinux(arguments: [String]) throws {
-        guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl create-linux <bundle-path> [--iso PATH] [--cpus N] [--memory GiB] [--disk GiB]")
-        }
-        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: false)
-        var opts = LinuxInitOptions()
-        var index = 1
-        while index < arguments.count {
-            let arg = arguments[index]
-            switch arg {
-            case "--iso":
-                index += 1
-                guard index < arguments.count else {
-                    throw VMError.message("Missing value for --iso.")
-                }
-                opts.isoPath = arguments[index]
-            case "--cpus":
-                index += 1
-                guard index < arguments.count, let value = Int(arguments[index]), value > 0 else {
-                    throw VMError.message("Invalid value for --cpus.")
-                }
-                opts.cpus = value
-            case "--memory":
-                index += 1
-                guard index < arguments.count else {
-                    throw VMError.message("Missing value for --memory.")
-                }
-                opts.memoryGiB = try parseBytes(from: arguments[index], defaultUnit: 1 << 30) >> 30
-            case "--disk":
-                index += 1
-                guard index < arguments.count else {
-                    throw VMError.message("Missing value for --disk.")
-                }
-                opts.diskGiB = try parseBytes(from: arguments[index], defaultUnit: 1 << 30) >> 30
-            default:
-                throw VMError.message("Unknown option '\(arg)'.")
-            }
-            index += 1
-        }
-        try controller.initLinuxVM(at: bundleURL, preferredName: nil, options: opts)
-    }
-
-    private func handleDetachISO(arguments: [String]) throws {
-        guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl detach-iso <bundle-path>")
-        }
-        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
-        try controller.detachISO(bundleURL: bundleURL)
-    }
-
     private func showHelp(exitCode: Int32) -> Never {
-        let linuxEnabled = FeatureFlags.shared.linuxVMSupport
-        var help = """
+        let help = """
 Usage: vmctl <command> [options]
 
-macOS VM Commands:
+Commands:
   init <bundle-path> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
   install <bundle-path>
-
-"""
-        if linuxEnabled {
-            help += """
-Linux VM Commands:
-  create-linux <bundle-path> [--iso PATH] [--cpus N] [--memory GiB] [--disk GiB]
-  detach-iso <bundle-path>
-
-"""
-        }
-        help += """
-Common Commands:
   start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
   stop <bundle-path>
   status <bundle-path>
@@ -376,24 +293,11 @@ Common Commands:
   snapshot <bundle-path> list
   snapshot <bundle-path> <create|revert|delete> <snapshot-name>
 
-macOS Examples:
+Examples:
   vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
   vmctl install ~/VMs/sandbox.GhostVM
   vmctl start ~/VMs/sandbox.GhostVM                    # GUI
   vmctl start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
-
-"""
-        if linuxEnabled {
-            help += """
-Linux Examples:
-  vmctl create-linux ~/VMs/ubuntu.GhostVM --iso ~/Downloads/ubuntu-24.04-live-server-arm64.iso --disk 50 --memory 4 --cpus 4
-  vmctl start ~/VMs/ubuntu.GhostVM                     # Boot into ISO installer
-  vmctl detach-iso ~/VMs/ubuntu.GhostVM                # Remove ISO after installation
-
-"""
-        }
-        help += """
-Common Examples:
   vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
   vmctl stop ~/VMs/sandbox.GhostVM
   vmctl status ~/VMs/sandbox.GhostVM
@@ -405,11 +309,6 @@ Common Examples:
   vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
 
 Notes:
-"""
-        if linuxEnabled {
-            help += "  - Linux VMs require ARM64 ISOs (aarch64). x86_64 ISOs will not work.\n"
-        }
-        help += """
   - After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
   - Apple's EULA requires macOS guests to run on Apple-branded hardware.
   - Use Virtual Machine > Suspend menu (Cmd+S) to suspend a running VM.

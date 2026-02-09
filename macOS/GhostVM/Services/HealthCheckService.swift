@@ -2,21 +2,33 @@ import Foundation
 import Combine
 import Virtualization
 
+public enum GuestToolsStatus: Equatable {
+    case connecting
+    case connected
+    case notFound
+}
+
 /// Persistent health check via vsock port 5002.
 /// Connects once, reads version line, then blocks on read until EOF.
 /// Connection close = unhealthy. Reconnects after a delay.
 @MainActor
 public final class HealthCheckService: ObservableObject {
-    @Published public private(set) var isConnected: Bool = false
+    @Published public private(set) var status: GuestToolsStatus = .connecting
+
+    public var isConnected: Bool { status == .connected }
 
     private var client: GhostClient?
     private var task: Task<Void, Never>?
     private let port: UInt32 = 5002
+    private var notFoundDeadline: Date?
+    private var deadlineTask: Task<Void, Never>?
 
     public init() {}
 
     public func start(client: GhostClient) {
         self.client = client
+        status = .connecting
+        startNotFoundDeadline()
         task?.cancel()
         task = Task { [weak self] in
             await self?.reconnectLoop()
@@ -26,8 +38,26 @@ public final class HealthCheckService: ObservableObject {
     public func stop() {
         task?.cancel()
         task = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
         client = nil
-        isConnected = false
+        notFoundDeadline = nil
+        status = .connecting
+    }
+
+    /// Fire a timer that flips status to .notFound after 2 minutes,
+    /// independent of how long connectRaw blocks.
+    private func startNotFoundDeadline() {
+        deadlineTask?.cancel()
+        notFoundDeadline = Date().addingTimeInterval(120)
+        deadlineTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 120_000_000_000) // 2 min
+            } catch { return }
+            guard let self = self, self.status != .connected else { return }
+            self.status = .notFound
+            NSLog("HealthCheck: deadline reached — status set to notFound")
+        }
     }
 
     private func reconnectLoop() async {
@@ -55,7 +85,10 @@ public final class HealthCheckService: ObservableObject {
 
                 if versionOK {
                     NSLog("HealthCheck: CONNECTED")
-                    isConnected = true
+                    deadlineTask?.cancel()
+                    deadlineTask = nil
+                    notFoundDeadline = nil
+                    status = .connected
 
                     // Block on read until EOF (guest disconnects or dies).
                     // `connection` is captured by the closure to keep it alive.
@@ -71,6 +104,10 @@ public final class HealthCheckService: ObservableObject {
                             continuation.resume()
                         }
                     }
+
+                    // Connection lost — restart deadline
+                    status = .connecting
+                    startNotFoundDeadline()
                 } else {
                     NSLog("HealthCheck: version read failed, closing")
                     connection.close()
@@ -79,7 +116,12 @@ public final class HealthCheckService: ObservableObject {
                 NSLog("HealthCheck: connection failed: %@", error.localizedDescription)
             }
 
-            isConnected = false
+            // Update status based on deadline (if deadline task already fired)
+            if let deadline = notFoundDeadline, Date() >= deadline {
+                status = .notFound
+            } else if status != .connected {
+                status = .connecting
+            }
 
             // Wait before retrying
             do {

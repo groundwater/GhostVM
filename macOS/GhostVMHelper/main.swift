@@ -30,6 +30,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var vmBundleURL: URL!
     private var vmName: String = ""
     private var state: State = .stopped
+    private var bootToRecovery: Bool = false
 
     private var window: NSWindow?
     private var vmView: FocusableVMView?
@@ -53,9 +54,55 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var fileTransferService: FileTransferService?
     private var eventStreamService: EventStreamService?
     private var healthCheckService: HealthCheckService?
+    private var autoPortMapService: AutoPortMapService?
+    private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
+    private var fileCountCancellable: AnyCancellable?
     private var healthCheckCancellable: AnyCancellable?
     private var windowFocusObservers: [NSObjectProtocol] = []
+
+    // Capture key state
+    private var captureQuitEnabled = false
+    private var captureHideEnabled = false
+    private var quitMenuItem: NSMenuItem?
+    private var hideMenuItem: NSMenuItem?
+
+    // Clipboard permission state (in-memory, resets on restart)
+    private var clipboardAlwaysAllowed = false
+    private var clipboardAutoDismissMonitor: Any?
+    private var lastPromptedClipboardChangeCount: Int? = nil
+
+    // Port forward notification state
+    private var newlyForwardedCancellable: AnyCancellable?
+    private var blockedPortsCancellable: AnyCancellable?
+
+    // Dynamic icon state
+    private var foregroundAppCancellable: AnyCancellable?
+    private var iconStack: [(bundleId: String, icon: NSImage)] = []
+    private let maxStackSize = 3
+    private var activeIconMode: String?  // nil = static, "stack" = animated stack, "app" = single app icon
+    private var iconAnimationTimer: Timer?
+    private var iconAnimationStartTime: Date = .distantPast
+    private let iconAnimationDuration: TimeInterval = 0.3
+    private struct IconAnimFrame {
+        let icon: NSImage
+        let fromX: CGFloat; let fromY: CGFloat; let fromOpacity: CGFloat
+        let toX: CGFloat; let toY: CGFloat; let toOpacity: CGFloat
+    }
+    private var iconAnimationFrames: [IconAnimFrame] = []
+    // Slot positions: index 0 = front, 1 = 2nd, 2 = 3rd
+    private let iconSlots: [(x: CGFloat, y: CGFloat, opacity: CGFloat)] = [
+        (0,    0,  1.00),
+        (30, -30,  0.55),
+        (55, -55,  0.30),
+    ]
+    private func centeredSlots(for count: Int) -> [(x: CGFloat, y: CGFloat, opacity: CGFloat)] {
+        guard count > 0 else { return [] }
+        let slots = Array(iconSlots.prefix(count))
+        let centerX = (slots.map(\.x).min()! + slots.map(\.x).max()!) / 2
+        let centerY = (slots.map(\.y).min()! + slots.map(\.y).max()!) / 2
+        return slots.map { (x: $0.x - centerX, y: $0.y - centerY, opacity: $0.opacity) }
+    }
 
     // MARK: - App Lifecycle
 
@@ -73,6 +120,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         vmName = vmBundleURL.deletingPathExtension().lastPathComponent
         ProcessInfo.processInfo.processName = vmName
+
+        // Parse --recovery flag
+        if args.contains("--recovery") {
+            bootToRecovery = true
+        }
 
         NSLog("GhostVMHelper: Starting VM '\(vmName)' from \(vmBundleURL.path)")
 
@@ -96,6 +148,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         return true
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        switch state {
+        case .running:
+            suspendVM()
+            return .terminateCancel
+        case .suspending, .stopping, .starting:
+            return .terminateCancel
+        case .stopped, .failed:
+            return .terminateNow
+        }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         NSLog("GhostVMHelper: Terminating for VM '\(vmName)'")
         cleanup()
@@ -117,102 +181,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let iconURL = vmBundleURL.appendingPathComponent("icon.png")
 
         guard fileManager.fileExists(atPath: iconURL.path),
-              let image = NSImage(contentsOf: iconURL),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
+              let image = NSImage(contentsOf: iconURL) else {
             NSLog("GhostVMHelper: No custom icon found")
             return
         }
 
-        // The VM bundle may have an old icon with large transparent margins.
-        // Crop to content and resize to 1024x1024 (Apple's standard icon canvas).
-        let targetSize = 1024
-
-        // Step 1: Find content bounding box
-        let srcW = cgImage.width
-        let srcH = cgImage.height
-        guard let data = cgImage.dataProvider?.data,
-              let ptr = CFDataGetBytePtr(data) else {
-            NSApp.applicationIconImage = image
-            return
-        }
-
-        let bpp = cgImage.bitsPerPixel / 8
-        let bpr = cgImage.bytesPerRow
-        let alphaFirst = cgImage.alphaInfo == .premultipliedFirst || cgImage.alphaInfo == .first
-                         || cgImage.alphaInfo == .noneSkipFirst
-        let alphaOffset = alphaFirst ? 0 : (bpp - 1)
-
-        var minX = srcW, minY = srcH, maxX = 0, maxY = 0
-        for y in 0..<srcH {
-            for x in 0..<srcW {
-                let off = y * bpr + x * bpp + alphaOffset
-                if ptr[off] > 10 {
-                    if x < minX { minX = x }
-                    if x > maxX { maxX = x }
-                    if y < minY { minY = y }
-                    if y > maxY { maxY = y }
-                }
-            }
-        }
-
-        guard maxX > minX, maxY > minY else {
-            NSApp.applicationIconImage = image
-            return
-        }
-
-        // Make a square crop centered on the IMAGE center (where the squircle sits).
-        // This handles icons with asymmetric overflow (e.g. claw arm extending upward).
-        let contentW = maxX - minX + 1
-        let contentH = maxY - minY + 1
-        let side = max(contentW, contentH)
-        let centerX = srcW / 2
-        let centerY = srcH / 2
-        let cropX = max(0, centerX - side / 2)
-        let cropY = max(0, centerY - side / 2)
-        let cropW = min(side, srcW - cropX)
-        let cropH = min(side, srcH - cropY)
-
-        guard let cropped = cgImage.cropping(to: CGRect(x: cropX, y: cropY,
-                                                        width: cropW, height: cropH)) else {
-            NSApp.applicationIconImage = image
-            return
-        }
-
-        // Step 2: Draw cropped content to fill 1024x1024
-        guard let ctx = CGContext(
-            data: nil,
-            width: targetSize, height: targetSize,
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            NSApp.applicationIconImage = image
-            return
-        }
-
-        ctx.interpolationQuality = .high
-        ctx.draw(cropped, in: CGRect(x: 0, y: 0, width: targetSize, height: targetSize))
-
-        guard let result = ctx.makeImage() else {
-            NSApp.applicationIconImage = image
-            return
-        }
-
-        // Save to temp PNG and reload so NSImage matches file-loaded behavior
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ghostvm-dock-\(ProcessInfo.processInfo.processIdentifier).png")
-        if let dest = CGImageDestinationCreateWithURL(tempURL as CFURL, "public.png" as CFString, 1, nil) {
-            CGImageDestinationAddImage(dest, result, nil)
-            CGImageDestinationFinalize(dest)
-            if let reloaded = NSImage(contentsOf: tempURL) {
-                NSApp.applicationIconImage = reloaded
-                NSWorkspace.shared.setIcon(reloaded, forFile: vmBundleURL.path, options: [])
-                NSWorkspace.shared.setIcon(reloaded, forFile: Bundle.main.bundlePath, options: [])
-                try? FileManager.default.removeItem(at: tempURL)
-                NSLog("GhostVMHelper: Loaded custom icon from \(iconURL.path)")
-                return
-            }
-        }
+        // Set logical size to 256x256pt so macOS treats the 512px image as @2x
+        image.size = NSSize(width: 256, height: 256)
 
         NSApp.applicationIconImage = image
         NSWorkspace.shared.setIcon(image, forFile: vmBundleURL.path, options: [])
@@ -237,8 +212,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         appMenu.addItem(NSMenuItem.separator())
 
+        let hideItem = NSMenuItem(title: "Hide", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(hideItem)
+        self.hideMenuItem = hideItem
+
         let quitItem = NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenu.addItem(quitItem)
+        self.quitMenuItem = quitItem
 
         // VM menu
         let vmMenuItem = NSMenuItem()
@@ -253,24 +233,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         vmMenu.addItem(NSMenuItem.separator())
 
-        // Clipboard Sync submenu
-        let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: nil, keyEquivalent: "")
-        let clipboardSubmenu = NSMenu(title: "Clipboard Sync")
-        clipboardItem.submenu = clipboardSubmenu
+        // Clipboard Sync toggle
+        let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
+        clipboardItem.target = self
         vmMenu.addItem(clipboardItem)
-
-        let syncModes = [
-            ("Bidirectional", "bidirectional"),
-            ("Host → Guest", "hostToGuest"),
-            ("Guest → Host", "guestToHost"),
-            ("Disabled", "disabled")
-        ]
-        for (title, mode) in syncModes {
-            let item = NSMenuItem(title: title, action: #selector(setClipboardSyncMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = mode
-            clipboardSubmenu.addItem(item)
-        }
 
         vmMenu.addItem(NSMenuItem.separator())
 
@@ -348,9 +314,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
-    @objc private func setClipboardSyncMode(_ sender: NSMenuItem) {
-        guard let mode = sender.representedObject as? String else { return }
-        toolbar(helperToolbar!, didSelectClipboardSyncMode: mode)
+    @objc private func toggleClipboardSyncMenu() {
+        guard let service = clipboardSyncService else { return }
+        let newMode: String = (service.syncMode == .disabled) ? "bidirectional" : "disabled"
+        toolbar(helperToolbar!, didSelectClipboardSyncMode: newMode)
     }
 
     // Menu validation
@@ -364,10 +331,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             return state == .running
         case #selector(terminateVMAction):
             return state == .running || state == .stopping || state == .suspending
-        case #selector(setClipboardSyncMode(_:)):
-            if let modeString = menuItem.representedObject as? String,
-               let currentMode = clipboardSyncService?.syncMode {
-                menuItem.state = (modeString == currentMode.rawValue) ? .on : .off
+        case #selector(toggleClipboardSyncMenu):
+            if let currentMode = clipboardSyncService?.syncMode {
+                menuItem.state = (currentMode != .disabled) ? .on : .off
             }
             return state == .running
         default:
@@ -383,13 +349,64 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Persist per-VM
         let key = "captureSystemKeys_\(vmBundleURL.path.stableHash)"
         UserDefaults.standard.set(enabled, forKey: key)
-        NSLog("GhostVMHelper: Capture system keys changed to \(enabled)")
+        NSLog("GhostVMHelper: Capture inputs changed to \(enabled)")
+
+        if enabled {
+            // Force CMD overrides off — all keys go to VM
+            captureQuitEnabled = false
+            captureHideEnabled = false
+            (NSApp as? HelperApplication)?.captureQuitEnabled = false
+            (NSApp as? HelperApplication)?.captureHideEnabled = false
+            quitMenuItem?.keyEquivalent = "q"
+            hideMenuItem?.keyEquivalent = "h"
+            helperToolbar?.setCaptureQuit(false)
+            helperToolbar?.setCaptureHide(false)
+        } else {
+            // Restore persisted CMD override preferences
+            let quitKey = "captureQuit_\(vmBundleURL.path.stableHash)"
+            let hideKey = "captureHide_\(vmBundleURL.path.stableHash)"
+            let quit = UserDefaults.standard.bool(forKey: quitKey)
+            let hide = UserDefaults.standard.bool(forKey: hideKey)
+            captureQuitEnabled = quit
+            captureHideEnabled = hide
+            (NSApp as? HelperApplication)?.captureQuitEnabled = quit
+            (NSApp as? HelperApplication)?.captureHideEnabled = hide
+            quitMenuItem?.keyEquivalent = quit ? "" : "q"
+            hideMenuItem?.keyEquivalent = hide ? "" : "h"
+            helperToolbar?.setCaptureQuit(quit)
+            helperToolbar?.setCaptureHide(hide)
+        }
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool) {
+        captureQuitEnabled = enabled
+        (NSApp as? HelperApplication)?.captureQuitEnabled = enabled
+        quitMenuItem?.keyEquivalent = enabled ? "" : "q"
+
+        let key = "captureQuit_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(enabled, forKey: key)
+        NSLog("GhostVMHelper: Capture quit changed to \(enabled)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleCaptureHide enabled: Bool) {
+        captureHideEnabled = enabled
+        (NSApp as? HelperApplication)?.captureHideEnabled = enabled
+        hideMenuItem?.keyEquivalent = enabled ? "" : "h"
+
+        let key = "captureHide_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(enabled, forKey: key)
+        NSLog("GhostVMHelper: Capture hide changed to \(enabled)")
     }
 
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String) {
         guard let syncMode = ClipboardSyncMode(rawValue: mode) else { return }
         clipboardSyncService?.setSyncMode(syncMode)
         helperToolbar?.setClipboardSyncMode(mode)
+
+        // Reset permission when clipboard is disabled
+        if syncMode == .disabled {
+            clipboardAlwaysAllowed = false
+        }
 
         // Persist per-VM
         let key = "clipboardSyncMode_\(vmBundleURL.path.stableHash)"
@@ -408,6 +425,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             try service.addForward(config)
             updateToolbarPortForwards()
             persistPortForwards()
+            autoPortMapService?.updateManualPorts(manualPortSet())
             NSLog("GhostVMHelper: Added port forward \(hostPort) -> \(guestPort)")
             return nil
         } catch {
@@ -420,7 +438,20 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         portForwardService?.removeForward(hostPort: hostPort)
         updateToolbarPortForwards()
         persistPortForwards()
+        autoPortMapService?.updateManualPorts(manualPortSet())
         NSLog("GhostVMHelper: Removed port forward with host port \(hostPort)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleAutoPortMap enabled: Bool) {
+        autoPortMapService?.setEnabled(enabled)
+        let key = "autoPortMap_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(enabled, forKey: key)
+        if !enabled {
+            helperToolbar?.closePortForwardPermissionPopover()
+            helperToolbar?.setBlockedPortDescriptions([])
+            updateToolbarPortForwards()
+        }
+        NSLog("GhostVMHelper: Auto port map changed to \(enabled)")
     }
 
     func toolbar(_ toolbar: HelperToolbar, didAddSharedFolder path: String, readOnly: Bool) {
@@ -436,6 +467,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         updateToolbarSharedFolders()
         persistSharedFolders()
         NSLog("GhostVMHelper: Removed shared folder with id \(id)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didSetSharedFolderReadOnly readOnly: Bool, forID id: UUID) {
+        folderShareService?.setReadOnly(id: id, readOnly: readOnly)
+        updateToolbarSharedFolders()
+        persistSharedFolders()
+        NSLog("GhostVMHelper: Set shared folder \(id) readOnly=\(readOnly)")
     }
 
     func toolbarDidRequestPortForwardEditor(_ toolbar: HelperToolbar) {
@@ -459,6 +497,50 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         restoreVMViewFocus()
     }
 
+    func toolbarClipboardPermissionDidDeny(_ toolbar: HelperToolbar) {
+        lastPromptedClipboardChangeCount = NSPasteboard.general.changeCount
+        removeClipboardAutoDismissMonitor()
+        restoreVMViewFocus()
+    }
+
+    func toolbarClipboardPermissionDidAllowOnce(_ toolbar: HelperToolbar) {
+        lastPromptedClipboardChangeCount = NSPasteboard.general.changeCount
+        removeClipboardAutoDismissMonitor()
+        clipboardSyncService?.windowDidBecomeKey()
+        restoreVMViewFocus()
+    }
+
+    func toolbarClipboardPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
+        lastPromptedClipboardChangeCount = NSPasteboard.general.changeCount
+        removeClipboardAutoDismissMonitor()
+        clipboardAlwaysAllowed = true
+        clipboardSyncService?.windowDidBecomeKey()
+        restoreVMViewFocus()
+    }
+
+    func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar) {
+        removeClipboardAutoDismissMonitor()
+        restoreVMViewFocus()
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16) {
+        autoPortMapService?.blockPort(port)
+        updateToolbarPortForwards()
+    }
+
+    func toolbarPortForwardPermissionPanelDidClose(_ toolbar: HelperToolbar) {
+        autoPortMapService?.acknowledgeNewlyForwarded()
+        restoreVMViewFocus()
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didUnblockPort port: UInt16) {
+        autoPortMapService?.unblockPort(port)
+    }
+
+    func toolbarDidUnblockAllPorts(_ toolbar: HelperToolbar) {
+        autoPortMapService?.unblockAll()
+    }
+
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
         Task {
             let files = (try? await fileTransferService?.listGuestFiles()) ?? []
@@ -478,6 +560,55 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
+    func toolbarDidRequestIconChooser(_ toolbar: HelperToolbar) {
+        helperToolbar?.showIconChooserPopover(bundleURL: vmBundleURL)
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didSelectIconMode mode: String?, icon: NSImage?) {
+        // Update live icon mode so handleForegroundAppChange reacts immediately
+        activeIconMode = mode
+
+        if mode == "stack" || mode == "app" {
+            // Immediately apply the cached foreground app icon
+            handleForegroundAppChange(eventStreamService?.foregroundApp)
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [vmBundleURL = self.vmBundleURL!] in
+            let layout = VMFileLayout(bundleURL: vmBundleURL)
+            let store = VMConfigStore(layout: layout)
+            do {
+                var config = try store.load()
+                config.iconMode = mode
+                try store.save(config)
+
+                if mode == "stack" || mode == "app" {
+                    // Dynamic modes — don't touch icon.png, icon already applied above
+                } else if let icon = icon,
+                          let tiff = icon.tiffRepresentation,
+                          let bitmap = NSBitmapImageRep(data: tiff),
+                          let pngData = bitmap.representation(using: .png, properties: [:]) {
+                    try pngData.write(to: layout.customIconURL)
+                    DispatchQueue.main.async {
+                        icon.size = NSSize(width: 256, height: 256)
+                        NSApp.applicationIconImage = icon
+                        NSWorkspace.shared.setIcon(icon, forFile: vmBundleURL.path, options: [])
+                        NSWorkspace.shared.setIcon(icon, forFile: Bundle.main.bundlePath, options: [])
+                    }
+                } else {
+                    // Generic mode — remove custom icon
+                    try? FileManager.default.removeItem(at: layout.customIconURL)
+                    DispatchQueue.main.async {
+                        NSApp.applicationIconImage = nil
+                        NSWorkspace.shared.setIcon(nil, forFile: vmBundleURL.path, options: [])
+                        NSWorkspace.shared.setIcon(nil, forFile: Bundle.main.bundlePath, options: [])
+                    }
+                }
+            } catch {
+                NSLog("GhostVMHelper: Failed to save icon: \(error)")
+            }
+        }
+    }
+
     func toolbarDidRequestShutDown(_ toolbar: HelperToolbar) {
         stopVM()
     }
@@ -493,10 +624,246 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         fileTransferService?.sendFiles(files)
     }
 
+    func fileTransfer(didRequestShareFolders folders: [URL], readOnly: Bool, copyFiles files: [FileWithRelativePath]) {
+        for folder in folders {
+            let config = SharedFolderConfig(path: folder.path, readOnly: readOnly)
+            folderShareService?.addFolder(config)
+            NSLog("GhostVMHelper: Shared folder via drag: \(folder.path)")
+        }
+        updateToolbarSharedFolders()
+        persistSharedFolders()
+
+        // Open the shared folders directory in the guest
+        Task {
+            do {
+                try await ghostClient?.openPath("/Volumes/My Shared Files")
+                NSLog("GhostVMHelper: Opened /Volumes/My Shared Files in guest")
+            } catch {
+                NSLog("GhostVMHelper: Failed to open shared files in guest: \(error)")
+            }
+        }
+
+        if !files.isEmpty {
+            NSLog("GhostVMHelper: Sending \(files.count) loose file(s) to guest")
+            fileTransferService?.sendFiles(files)
+        }
+    }
+
     private func restoreVMViewFocus() {
         if let vmView = vmView {
             window?.makeFirstResponder(vmView)
         }
+    }
+
+    // MARK: - Port Forward Notification Flow
+
+    private func handleNewlyForwardedPorts(_ mapping: [UInt16: UInt16]) {
+        if mapping.isEmpty {
+            helperToolbar?.closePortForwardPermissionPopover()
+            return
+        }
+
+        let sorted = mapping.sorted { $0.key < $1.key }
+            .map { (guestPort: $0.key, hostPort: $0.value, processName: autoPortMapService?.processNames[$0.key]) }
+        if helperToolbar?.isPortForwardPermissionPopoverShown == true {
+            helperToolbar?.addPortForwardPermissionMappings(sorted)
+        } else {
+            helperToolbar?.showPortForwardNotificationPopover()
+            helperToolbar?.setPortForwardPermissionMappings(sorted)
+        }
+    }
+
+    private func updateBlockedPortsDisplay(_ blocked: Set<UInt16>) {
+        let descriptions = blocked.sorted().map { "localhost:\($0)" }
+        helperToolbar?.setBlockedPortDescriptions(descriptions)
+    }
+
+    // MARK: - Clipboard Permission Flow
+
+    private func handleClipboardOnFocus() {
+        guard let service = clipboardSyncService, service.syncMode != .disabled else { return }
+
+        // Never prompt for empty clipboard
+        guard let content = NSPasteboard.general.string(forType: .string), !content.isEmpty else { return }
+
+        if clipboardAlwaysAllowed {
+            service.windowDidBecomeKey()
+            return
+        }
+
+        let currentChangeCount = NSPasteboard.general.changeCount
+
+        // Skip if we already prompted for this clipboard content (user denied or did "once")
+        if currentChangeCount == lastPromptedClipboardChangeCount { return }
+
+        // Skip if the clipboard was updated by our own guest-to-host pull
+        if currentChangeCount == service.lastHostChangeCount { return }
+
+        helperToolbar?.showClipboardPermissionPopover()
+        installClipboardAutoDismissMonitor()
+    }
+
+    private func installClipboardAutoDismissMonitor() {
+        removeClipboardAutoDismissMonitor()
+
+        clipboardAutoDismissMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { [weak self] event in
+            guard let self = self else { return event }
+            guard self.helperToolbar?.isClipboardPermissionPopoverShown == true else {
+                self.removeClipboardAutoDismissMonitor()
+                return event
+            }
+            // Don't dismiss if the click/key is inside the popover's own window
+            if let eventWindow = event.window, eventWindow != self.window {
+                return event
+            }
+            // Auto-dismiss (implicit deny) when user interacts with the VM
+            self.helperToolbar?.closeClipboardPermissionPopover()
+            self.removeClipboardAutoDismissMonitor()
+            return event
+        }
+    }
+
+    private func removeClipboardAutoDismissMonitor() {
+        if let monitor = clipboardAutoDismissMonitor {
+            NSEvent.removeMonitor(monitor)
+            clipboardAutoDismissMonitor = nil
+        }
+    }
+
+    // MARK: - Dynamic Icon
+
+    private func handleForegroundAppChange(_ app: GuestForegroundApp?) {
+        guard let mode = activeIconMode else { return }
+
+        guard let app = app, let icon = app.icon else {
+            cancelIconAnimation()
+            loadCustomIcon()
+            return
+        }
+
+        // "app" mode: just set the icon directly, no stack
+        if mode == "app" {
+            let sized = NSImage(size: NSSize(width: 256, height: 256))
+            sized.lockFocus()
+            icon.draw(in: NSRect(x: 0, y: 0, width: 256, height: 256),
+                      from: .zero, operation: .sourceOver, fraction: 1.0)
+            sized.unlockFocus()
+            NSApp.applicationIconImage = sized
+            return
+        }
+
+        // "stack" mode: animated icon stack
+        // Cancel any in-progress animation
+        cancelIconAnimation()
+
+        // Capture old stack for animation origin
+        let oldStack = iconStack
+
+        // Update stack: move-to-front deduplication
+        iconStack.removeAll { $0.bundleId == app.bundleId }
+        iconStack.insert((bundleId: app.bundleId, icon: icon), at: 0)
+        if iconStack.count > maxStackSize {
+            iconStack = Array(iconStack.prefix(maxStackSize))
+        }
+
+        // Build animation frames using centered slot positions
+        var frames: [IconAnimFrame] = []
+        let oldCentered = centeredSlots(for: oldStack.count)
+        let newCentered = centeredSlots(for: iconStack.count)
+
+        // Entrance/exit offsets relative to centered positions
+        let entrance = (x: newCentered[0].x - 60, y: newCentered[0].y + 30, opacity: CGFloat(0.0))
+        let exit: (x: CGFloat, y: CGFloat, opacity: CGFloat) = oldCentered.isEmpty
+            ? (x: 75, y: -75, opacity: 0.0)
+            : (x: oldCentered.last!.x + 20, y: oldCentered.last!.y - 20, opacity: 0.0)
+
+        // Icons in new stack: animate from old slot (or entrance) to new slot
+        for (newIdx, item) in iconStack.enumerated() {
+            let to = newCentered[newIdx]
+            if let oldIdx = oldStack.firstIndex(where: { $0.bundleId == item.bundleId }) {
+                let from = oldIdx < oldCentered.count ? oldCentered[oldIdx] : oldCentered.last!
+                frames.append(IconAnimFrame(
+                    icon: item.icon,
+                    fromX: from.x, fromY: from.y, fromOpacity: from.opacity,
+                    toX: to.x, toY: to.y, toOpacity: to.opacity
+                ))
+            } else {
+                // New icon slides in from the left
+                frames.append(IconAnimFrame(
+                    icon: item.icon,
+                    fromX: entrance.x, fromY: entrance.y, fromOpacity: entrance.opacity,
+                    toX: to.x, toY: to.y, toOpacity: to.opacity
+                ))
+            }
+        }
+
+        // Icons that fell off: animate from old slot to exit
+        for (oldIdx, item) in oldStack.enumerated() {
+            if !iconStack.contains(where: { $0.bundleId == item.bundleId }) {
+                let from = oldIdx < oldCentered.count ? oldCentered[oldIdx] : oldCentered.last!
+                frames.append(IconAnimFrame(
+                    icon: item.icon,
+                    fromX: from.x, fromY: from.y, fromOpacity: from.opacity,
+                    toX: exit.x, toY: exit.y, toOpacity: exit.opacity
+                ))
+            }
+        }
+
+        iconAnimationFrames = frames
+        iconAnimationStartTime = Date()
+        iconAnimationTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.tickIconAnimation()
+        }
+    }
+
+    private func tickIconAnimation() {
+        let elapsed = Date().timeIntervalSince(iconAnimationStartTime)
+        let rawProgress = min(elapsed / iconAnimationDuration, 1.0)
+        // Ease-out: decelerate toward end
+        let t = CGFloat(rawProgress * (2.0 - rawProgress))
+
+        let image = drawCompositeIcon(progress: t)
+        NSApp.applicationIconImage = image
+
+        if rawProgress >= 1.0 {
+            cancelIconAnimation()
+        }
+    }
+
+    private func cancelIconAnimation() {
+        iconAnimationTimer?.invalidate()
+        iconAnimationTimer = nil
+        iconAnimationFrames = []
+    }
+
+    private func drawCompositeIcon(progress t: CGFloat) -> NSImage {
+        let canvasSize = NSSize(width: 512, height: 512)
+        let image = NSImage(size: canvasSize)
+        image.lockFocus()
+
+        let iconSize: CGFloat = 400
+        let baseX = (canvasSize.width - iconSize) / 2
+        let baseY = (canvasSize.height - iconSize) / 2
+
+        // Draw from back to front: frames[0] is front, so reverse to draw back first
+        for frame in iconAnimationFrames.reversed() {
+            let offsetX = frame.fromX + (frame.toX - frame.fromX) * t
+            let offsetY = frame.fromY + (frame.toY - frame.fromY) * t
+            let opacity = frame.fromOpacity + (frame.toOpacity - frame.fromOpacity) * t
+            if opacity <= 0 { continue }
+
+            let rect = NSRect(x: baseX + offsetX, y: baseY + offsetY, width: iconSize, height: iconSize)
+            let path = NSBezierPath(roundedRect: rect, xRadius: rect.width * 185.4 / 1024, yRadius: rect.height * 185.4 / 1024)
+
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
+            frame.icon.draw(in: rect, from: .zero, operation: .sourceOver, fraction: opacity)
+            NSGraphicsContext.restoreGraphicsState()
+        }
+
+        image.unlockFocus()
+        image.size = NSSize(width: 256, height: 256)
+        return image
     }
 
     // MARK: - Notifications
@@ -576,6 +943,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 }
             }
 
+            // Check icon mode
+            activeIconMode = config.iconMode
+
             // Generate MAC address if needed
             if config.macAddress == nil {
                 config.macAddress = VZMACAddress.randomLocallyAdministered().string
@@ -610,6 +980,20 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             // Start or resume VM
             if wasSuspended {
                 resumeVM()
+            } else if bootToRecovery {
+                vmQueue!.async {
+                    let options = VZMacOSVirtualMachineStartOptions()
+                    options.startUpFromMacOSRecovery = true
+                    self.virtualMachine!.start(options: options) { error in
+                        DispatchQueue.main.async {
+                            if let error = error {
+                                self.handleStartResult(.failure(error))
+                            } else {
+                                self.handleStartResult(.success(()))
+                            }
+                        }
+                    }
+                }
             } else {
                 vmQueue!.async {
                     self.virtualMachine!.start { result in
@@ -719,12 +1103,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private func stopVM() {
         guard state == .running else { return }
 
-        state = .stopping
-        postStateChange()
-        updateWindowTitle()
-        helperToolbar?.setVMRunning(false)
-        stopServices()
-
+        // Fire-and-forget: just send the power button event.
+        // Don't change state or stop services — the guest may show a
+        // confirmation dialog and the user might cancel.  If the guest
+        // actually shuts down, guestDidStop() will call handleTermination().
         vmQueue?.async {
             do {
                 try self.virtualMachine?.requestStop()
@@ -733,6 +1115,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                     self.terminateVM()
                 }
             }
+        }
+
+        // Brief cooldown to prevent accidental double-taps
+        helperToolbar?.setShutDownEnabled(false)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self = self, self.state == .running else { return }
+            self.helperToolbar?.setShutDownEnabled(true)
         }
     }
 
@@ -813,6 +1202,20 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func handleTermination() {
+        // Snapshot current Dock icon as Finder icon for the VM bundle
+        if let icon = NSApp.applicationIconImage {
+            NSWorkspace.shared.setIcon(icon, forFile: vmBundleURL.path, options: [])
+
+            // For dynamic icon modes, persist the current dock icon as icon.png
+            // so the main app and Finder show the last active icon
+            if activeIconMode == "stack" || activeIconMode == "app",
+               let layout = self.layout,
+               let tiff = icon.tiffRepresentation,
+               let bitmap = NSBitmapImageRep(data: tiff),
+               let pngData = bitmap.representation(using: .png, properties: [:]) {
+                try? pngData.write(to: layout.customIconURL)
+            }
+        }
         cleanup()
         state = .stopped
         postStateChange()
@@ -841,11 +1244,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let hcService = HealthCheckService()
         hcService.start(client: client)
         self.healthCheckService = hcService
-        // Bind isConnected to toolbar
-        healthCheckCancellable = hcService.$isConnected
+        // Bind status to toolbar
+        healthCheckCancellable = hcService.$status
             .receive(on: RunLoop.main)
-            .sink { [weak self] connected in
-                self?.helperToolbar?.setGuestToolsConnected(connected)
+            .sink { [weak self] status in
+                self?.helperToolbar?.setGuestToolsStatus(status)
             }
 
         // 3. Port forwarding
@@ -869,12 +1272,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         cbService.configure(client: client)
         self.clipboardSyncService = cbService
 
-        // Load persisted mode
+        // Load persisted mode (normalize legacy directional modes to bidirectional)
         let key = "clipboardSyncMode_\(vmBundleURL.path.stableHash)"
-        if let storedMode = UserDefaults.standard.string(forKey: key),
-           let mode = ClipboardSyncMode(rawValue: storedMode) {
-            cbService.setSyncMode(mode)
-            helperToolbar?.setClipboardSyncMode(storedMode)
+        if let storedMode = UserDefaults.standard.string(forKey: key) {
+            let effectiveMode: ClipboardSyncMode = (storedMode == "disabled") ? .disabled : .bidirectional
+            cbService.setSyncMode(effectiveMode)
+            helperToolbar?.setClipboardSyncMode(effectiveMode.rawValue)
         }
 
         // Observe window focus/blur to trigger clipboard sync
@@ -884,7 +1287,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 object: win,
                 queue: .main
             ) { [weak self] _ in
-                self?.clipboardSyncService?.windowDidBecomeKey()
+                self?.handleClipboardOnFocus()
             }
             let resignKeyObs = NotificationCenter.default.addObserver(
                 forName: NSWindow.didResignKeyNotification,
@@ -905,23 +1308,81 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let esService = EventStreamService()
         esService.start(client: client)
         self.eventStreamService = esService
-        // Bind queued file count to toolbar
+        // Bind queued file count to toolbar (from event stream)
         fileTransferCancellable = esService.$queuedGuestFiles
             .receive(on: RunLoop.main)
             .sink { [weak self] files in
                 self?.fileTransferService?.updateQueuedFiles(files)
                 self?.helperToolbar?.setQueuedFileCount(files.count)
             }
+        // Also track when fetchAllGuestFiles resets the count (host-side clear)
+        fileCountCancellable = ftService.$queuedGuestFileCount
+            .receive(on: RunLoop.main)
+            .sink { [weak self] count in
+                self?.helperToolbar?.setQueuedFileCount(count)
+            }
+
+        // 6b. Dynamic icon — subscribe to foreground app changes
+        foregroundAppCancellable = esService.$foregroundApp
+            .receive(on: RunLoop.main)
+            .sink { [weak self] app in
+                self?.handleForegroundAppChange(app)
+            }
+
+        // 7. Auto port mapping
+        let apmService = AutoPortMapService()
+        apmService.start(
+            portForwardService: pfService,
+            eventStreamService: esService,
+            manualForwards: forwards
+        )
+        self.autoPortMapService = apmService
+
+        // Load persisted toggle
+        let autoPortMapKey = "autoPortMap_\(vmBundleURL.path.stableHash)"
+        let autoPortMapEnabled = UserDefaults.standard.object(forKey: autoPortMapKey) as? Bool ?? true
+        apmService.setEnabled(autoPortMapEnabled)
+        helperToolbar?.setAutoPortMapEnabled(autoPortMapEnabled)
+
+        // Bind auto-mapped ports to toolbar updates
+        autoPortMapCancellable = apmService.$autoMappedPorts
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.updateToolbarPortForwards()
+            }
+
+        // Bind newly forwarded ports to notification popover
+        newlyForwardedCancellable = apmService.$newlyForwardedPorts
+            .receive(on: RunLoop.main)
+            .sink { [weak self] ports in
+                self?.handleNewlyForwardedPorts(ports)
+            }
+
+        // Bind blocked ports to toolbar display
+        blockedPortsCancellable = apmService.$blockedPorts
+            .receive(on: RunLoop.main)
+            .sink { [weak self] blocked in
+                self?.updateBlockedPortsDisplay(blocked)
+            }
 
         NSLog("GhostVMHelper: Services started for '\(vmName)'")
     }
 
     private func stopServices() {
+        newlyForwardedCancellable?.cancel()
+        newlyForwardedCancellable = nil
+        blockedPortsCancellable?.cancel()
+        blockedPortsCancellable = nil
+        autoPortMapCancellable?.cancel()
+        autoPortMapCancellable = nil
+        autoPortMapService?.stop()
+        autoPortMapService = nil
+
         healthCheckCancellable?.cancel()
         healthCheckCancellable = nil
         healthCheckService?.stop()
         healthCheckService = nil
-        helperToolbar?.setGuestToolsConnected(false)
+        helperToolbar?.setGuestToolsStatus(.connecting)
 
         portForwardService?.stop()
         portForwardService = nil
@@ -939,7 +1400,17 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         fileTransferCancellable?.cancel()
         fileTransferCancellable = nil
+        fileCountCancellable?.cancel()
+        fileCountCancellable = nil
         fileTransferService = nil
+
+        foregroundAppCancellable?.cancel()
+        foregroundAppCancellable = nil
+        cancelIconAnimation()
+        iconStack = []
+        if activeIconMode != nil {
+            loadCustomIcon()
+        }
 
         eventStreamService?.stop()
         eventStreamService = nil
@@ -966,15 +1437,35 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             helperToolbar?.setPortForwardEntries([])
             return
         }
+        let autoHostPorts = autoPortMapService?.autoMappedHostPorts ?? []
         let entries = service.activeForwards.map { fwd in
-            PortForwardEntry(hostPort: fwd.hostPort, guestPort: fwd.guestPort, enabled: fwd.enabled)
+            let isAuto = autoHostPorts.contains(fwd.hostPort)
+            let procName = isAuto ? autoPortMapService?.processNames[fwd.guestPort] : nil
+            return PortForwardEntry(
+                hostPort: fwd.hostPort,
+                guestPort: fwd.guestPort,
+                enabled: fwd.enabled,
+                isAutoMapped: isAuto,
+                processName: procName
+            )
         }
+        let summary = entries.map { "\($0.processName ?? "nil"):\($0.guestPort)→\($0.hostPort)" }
+        NSLog("GhostVMHelper: updateToolbarPortForwards: %@", summary.joined(separator: ", "))
         helperToolbar?.setPortForwardEntries(entries)
+    }
+
+    /// Returns the set of host ports from manually-configured port forwards
+    /// (i.e. active forwards minus auto-mapped ones).
+    private func manualPortSet() -> Set<UInt16> {
+        let allPorts = Set(portForwardService?.activeForwards.map { $0.hostPort } ?? [])
+        let autoHostPorts = autoPortMapService?.autoMappedHostPorts ?? []
+        return allPorts.subtracting(autoHostPorts)
     }
 
     private func persistPortForwards() {
         guard let service = portForwardService else { return }
-        let activeForwards = service.activeForwards
+        let autoHostPorts = autoPortMapService?.autoMappedHostPorts ?? []
+        let activeForwards = service.activeForwards.filter { !autoHostPorts.contains($0.hostPort) }
         let bundleURL = self.vmBundleURL!
 
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1057,7 +1548,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         window.title = vmName
         window.delegate = self
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 1024, height: 640)
+        window.minSize = NSSize(width: 512, height: 512)
         window.collectionBehavior = [.fullScreenPrimary]
 
         // Setup toolbar
@@ -1085,6 +1576,36 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let captureKeys = UserDefaults.standard.object(forKey: captureKeysKey) as? Bool ?? true
         vmView.capturesSystemKeys = captureKeys
         toolbar.setCaptureSystemKeys(captureKeys)
+
+        // Load persisted capture quit/hide preferences.
+        // When capture inputs is ON, CMD overrides stay off — keys go to VM.
+        let captureQuitKey = "captureQuit_\(vmBundleURL.path.stableHash)"
+        let captureQuit = UserDefaults.standard.bool(forKey: captureQuitKey)
+        let captureHideKey = "captureHide_\(vmBundleURL.path.stableHash)"
+        let captureHide = UserDefaults.standard.bool(forKey: captureHideKey)
+
+        if captureKeys {
+            // Capture inputs is ON — force CMD overrides off
+            captureQuitEnabled = false
+            captureHideEnabled = false
+            toolbar.setCaptureQuit(false)
+            toolbar.setCaptureHide(false)
+        } else {
+            captureQuitEnabled = captureQuit
+            toolbar.setCaptureQuit(captureQuit)
+            if captureQuit {
+                (NSApp as? HelperApplication)?.captureQuitEnabled = true
+                quitMenuItem?.keyEquivalent = ""
+            }
+
+            captureHideEnabled = captureHide
+            toolbar.setCaptureHide(captureHide)
+            if captureHide {
+                (NSApp as? HelperApplication)?.captureHideEnabled = true
+                hideMenuItem?.keyEquivalent = ""
+            }
+        }
+
 
         containerView.addSubview(vmView)
 
@@ -1176,6 +1697,43 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 }
 
+// MARK: - Custom NSApplication
+
+/// Overrides sendEvent to intercept CMD+Q and CMD+H before the event
+/// reaches VZVirtualMachineView, which consumes all key events via
+/// performKeyEquivalent — preventing the normal menu-based hide/quit
+/// from ever firing.
+@objc(HelperApplication)
+final class HelperApplication: NSApplication {
+    var captureQuitEnabled = false
+    var captureHideEnabled = false
+
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .keyDown {
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if flags == .command, let chars = event.charactersIgnoringModifiers {
+                if chars == "q" {
+                    if captureQuitEnabled {
+                        terminate(nil)
+                        return
+                    }
+                    // else: let event flow to VM guest
+                }
+                if chars == "h" {
+                    if captureHideEnabled {
+                        // Explicitly hide — VZVirtualMachineView would eat
+                        // the event before the menu system can trigger hide
+                        hide(nil)
+                        return
+                    }
+                    // else: let event flow to VM guest
+                }
+            }
+        }
+        super.sendEvent(event)
+    }
+}
+
 // MARK: - Main Entry Point
 
 // IMPORTANT: Ignore SIGPIPE signal
@@ -1189,7 +1747,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 signal(SIGPIPE, SIG_IGN)
 
 MainActor.assumeIsolated {
+    let app = HelperApplication.shared
     let delegate = HelperAppDelegate()
-    NSApplication.shared.delegate = delegate
-    NSApplication.shared.run()
+    app.delegate = delegate
+    app.run()
 }
