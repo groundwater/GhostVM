@@ -176,8 +176,8 @@ dmg: tools ghosttools-icon
 	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources/"
 	@# Copy README to DMG root
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Ad-hoc sign the app
-	codesign --force --deep -s "-" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
+	@# Sign with developer identity (preserves TCC permissions across rebuilds)
+	codesign --force --deep -s "Apple Development" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
 	@# Create the DMG
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \

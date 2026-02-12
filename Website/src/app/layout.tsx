@@ -7,7 +7,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "GhostVM - Agentic Workspaces on macOS",
   description:
-    "GhostVM is a native macOS app for running multiple isolated agentic workspaces on macOS. Deep host integration, scriptable CLI, and self-contained VM bundles.",
+    "GhostVM is a native macOS app for running isolated agentic workspaces on macOS. AI agents control VMs via the built-in MCP server. Deep host integration, scriptable CLI, instant clones, and self-contained bundles.",
 };
 
 export default function RootLayout({

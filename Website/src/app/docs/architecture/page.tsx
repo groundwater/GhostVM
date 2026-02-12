@@ -64,6 +64,25 @@ export default function Architecture() {
         discovery, and health monitoring.
       </p>
 
+      <h3>Host API Service</h3>
+      <p>
+        Each running VM&apos;s Helper process exposes a Unix domain socket at{" "}
+        <code>~/Library/Application Support/GhostVM/api/</code>. The socket
+        accepts newline-delimited JSON requests and provides access to both
+        host-only operations (status, stop, suspend) and guest proxy operations
+        (clipboard, files, logs). See the{" "}
+        <a href="/docs/host-api">Host API</a> docs for details.
+      </p>
+
+      <h3>MCP Server</h3>
+      <p>
+        The <code>vmctl mcp</code> command starts a{" "}
+        <a href="https://modelcontextprotocol.io">Model Context Protocol</a>{" "}
+        server that bridges JSON-RPC on stdin/stdout to the Host API socket.
+        This allows AI assistants like Claude Desktop to control VMs
+        programmatically. See the <a href="/docs/mcp">MCP Server</a> docs.
+      </p>
+
       <h2>Services Architecture</h2>
       <p>
         All host-guest services are located in <code>GhostVM/Services/</code>{" "}

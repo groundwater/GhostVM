@@ -61,6 +61,9 @@ final class EventPushServer: @unchecked Sendable {
     private var clientFd: Int32 = -1
     private let clientLock = NSLock()
 
+    /// Serial queue for writes (preserves NDJSON line ordering)
+    private let writeQueue = DispatchQueue(label: "com.ghostvm.ghosttools.eventpush.write")
+
     /// Called on main thread when a new host client connects.
     var onClientConnected: (() -> Void)?
 
@@ -157,6 +160,7 @@ final class EventPushServer: @unchecked Sendable {
     }
 
     /// Push an event to the connected host. No-op if no client connected.
+    /// Writes are dispatched asynchronously on a serial queue to avoid blocking the caller.
     func pushEvent(_ event: PushEvent) {
         clientLock.lock()
         let fd = clientFd
@@ -165,8 +169,20 @@ final class EventPushServer: @unchecked Sendable {
         guard fd >= 0 else { return }
 
         let line = event.jsonLine + "\n"
-        line.withCString { ptr in
-            _ = Darwin.write(fd, ptr, strlen(ptr))
+        writeQueue.async { [weak self] in
+            line.withCString { ptr in
+                let len = strlen(ptr)
+                let result = Darwin.write(fd, ptr, len)
+                if result < 0 {
+                    print("[EventPushServer] Write failed (fd=\(fd)): errno \(errno)")
+                    self?.clientLock.lock()
+                    if self?.clientFd == fd { self?.clientFd = -1 }
+                    self?.clientLock.unlock()
+                    close(fd)
+                } else {
+                    print("[EventPushServer] Wrote \(result)/\(len) bytes to fd=\(fd)")
+                }
+            }
         }
     }
 

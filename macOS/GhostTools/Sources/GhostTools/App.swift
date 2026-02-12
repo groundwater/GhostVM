@@ -32,7 +32,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var healthServer: HealthServer?
     private var isServerRunning = false
     private var isFilePickerOpen = false
-    private var preferencesWindowController: PreferencesWindowController?
 
     /// Files queued for sending to host (accessor for FileService)
     private var filesToSend: [URL] {
@@ -69,8 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
-        setupGlobalShortcut()
         requestNotificationPermission()
+        PermissionsWindow.shared.showIfNeeded()
         installLaunchAgentIfNeeded()
         registerAsDefaultBrowser()
 
@@ -367,7 +366,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        GlobalShortcutService.shared.stop()
         ForegroundAppService.shared.stop()
         PortScannerService.shared.stop()
         server?.stop()
@@ -443,15 +441,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Send to Host menu item
-        let shortcut = GlobalShortcutService.shared.currentShortcut
         let sendToHostItem = NSMenuItem(
             title: "Send to Host...",
             action: #selector(sendToHost),
-            keyEquivalent: GlobalShortcutService.shared.isEnabled ? shortcut.keyEquivalentCharacter : ""
+            keyEquivalent: ""
         )
-        if GlobalShortcutService.shared.isEnabled {
-            sendToHostItem.keyEquivalentModifierMask = shortcut.keyEquivalentModifierMask
-        }
         sendToHostItem.target = self
         menu.addItem(sendToHostItem)
 
@@ -475,13 +469,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             queuedItem.submenu = queuedMenu
             menu.addItem(queuedItem)
         }
-
-        menu.addItem(NSMenuItem.separator())
-
-        // Preferences
-        let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(showPreferences), keyEquivalent: ",")
-        prefsItem.target = self
-        menu.addItem(prefsItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -519,24 +506,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.queueFilesForHost(urls)
             }
         }
-    }
-
-    @objc private func showPreferences() {
-        if preferencesWindowController == nil {
-            preferencesWindowController = PreferencesWindowController()
-            preferencesWindowController?.onSettingsChanged = { [weak self] in
-                self?.updateMenu()
-            }
-        }
-        preferencesWindowController?.showWindow(nil)
-    }
-
-    private func setupGlobalShortcut() {
-        GlobalShortcutService.shared.onShortcutTriggered = { [weak self] in
-            self?.sendToHost()
-        }
-        GlobalShortcutService.shared.start()
-        print("[GhostTools] Global shortcut setup complete")
     }
 
     private func queueFilesForHost(_ urls: [URL]) {

@@ -80,10 +80,10 @@ final class ClipboardPermissionContentViewController: NSViewController {
         container.state = .active
 
         // Title
-        let titleLabel = NSTextField(labelWithString: "Copy Clipboard")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(titleLabel)
+        // let titleLabel = NSTextField(labelWithString: "Copy Clipboard")
+        // titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        // titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        // container.addSubview(titleLabel)
 
         // Subtitle
         let subtitleLabel = NSTextField(labelWithString: "Copy clipboard to guest?")
@@ -113,10 +113,10 @@ final class ClipboardPermissionContentViewController: NSViewController {
         let padding: CGFloat = 16
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
+            // titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
+            // titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
 
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
+            subtitleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
             subtitleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
 
             alwaysButton.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 12),

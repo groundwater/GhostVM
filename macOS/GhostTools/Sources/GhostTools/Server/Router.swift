@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Router that dispatches HTTP requests to handlers
@@ -7,7 +8,8 @@ final class Router: @unchecked Sendable {
 
     /// Handles an HTTP request and returns a response
     func handle(_ request: HTTPRequest) async -> HTTPResponse {
-        let path = request.path
+        let fullPath = request.path
+        let path = fullPath.components(separatedBy: "?").first ?? fullPath
 
         // Health check
         if path == "/health" {
@@ -36,6 +38,36 @@ final class Router: @unchecked Sendable {
             return handleLogs(request)
         } else if path == "/api/v1/open" {
             return handleOpen(request)
+        } else if path == "/api/v1/apps/frontmost" {
+            return handleFrontmostApp(request)
+        } else if path == "/api/v1/apps" || path.hasPrefix("/api/v1/apps/") {
+            return handleApps(request)
+        } else if path == "/api/v1/fs" || path == "/api/v1/fs/mkdir" || path == "/api/v1/fs/delete" || path == "/api/v1/fs/move" {
+            return handleFS(request)
+        } else if path == "/api/v1/accessibility" {
+            return handleAccessibility(request)
+        } else if path == "/api/v1/accessibility/action" {
+            return handleAccessibilityAction(request)
+        } else if path == "/api/v1/accessibility/menu" {
+            return handleAccessibilityMenu(request)
+        } else if path == "/api/v1/accessibility/type" {
+            return handleAccessibilityType(request)
+        } else if path == "/api/v1/accessibility/focused" {
+            return handleAccessibilityFocused(request)
+        } else if path == "/api/v1/pointer" {
+            return await handlePointer(request)
+        } else if path == "/api/v1/input" {
+            return await handleKeyboardInput(request)
+        } else if path == "/api/v1/exec" {
+            return await handleExec(request)
+        } else if path == "/api/v1/permissions" {
+            return handlePermissions(request)
+        } else if path == "/api/v1/elements" {
+            return handleElements(request)
+        } else if path == "/api/v1/overlay/wait-show" {
+            return handleOverlayWaitShow(request)
+        } else if path == "/api/v1/overlay/wait-hide" {
+            return handleOverlayWaitHide(request)
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
@@ -301,7 +333,11 @@ final class Router: @unchecked Sendable {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = [openRequest.path]
+        var args = [openRequest.path]
+        if let app = openRequest.app {
+            args = ["-b", app, openRequest.path]
+        }
+        process.arguments = args
 
         do {
             try process.run()
@@ -310,6 +346,562 @@ final class Router: @unchecked Sendable {
             log("[Router] Failed to open: \(error)")
             return HTTPResponse.error(.internalServerError, message: "Failed to open: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - App Management
+
+    private func handleApps(_ request: HTTPRequest) -> HTTPResponse {
+        let path = request.path.components(separatedBy: "?").first ?? request.path
+
+        if path == "/api/v1/apps" && request.method == .GET {
+            let apps = AppManagementService.shared.listApps()
+            let response = AppListResponse(apps: apps)
+            guard let data = try? JSONEncoder().encode(response) else {
+                return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+            }
+            return HTTPResponse.json(data)
+        }
+
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        guard let body = request.body,
+              let payload = try? JSONDecoder().decode(AppActionRequest.self, from: body) else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON - need bundleId")
+        }
+
+        if path == "/api/v1/apps/launch" {
+            log("[Router] POST /apps/launch: \(payload.bundleId)")
+            let ok = AppManagementService.shared.launchApp(bundleId: payload.bundleId)
+            return ok ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or failed to launch")
+        }
+
+        if path == "/api/v1/apps/activate" {
+            log("[Router] POST /apps/activate: \(payload.bundleId)")
+            let ok = AppManagementService.shared.activateApp(bundleId: payload.bundleId)
+            return ok ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or not running")
+        }
+
+        if path == "/api/v1/apps/quit" {
+            log("[Router] POST /apps/quit: \(payload.bundleId)")
+            let ok = AppManagementService.shared.quitApp(bundleId: payload.bundleId)
+            return ok ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or not running")
+        }
+
+        return HTTPResponse.error(.notFound, message: "Not Found")
+    }
+
+    // MARK: - File System
+
+    private func handleFS(_ request: HTTPRequest) -> HTTPResponse {
+        let path = request.path.components(separatedBy: "?").first ?? request.path
+
+        if path == "/api/v1/fs" && request.method == .GET {
+            // List directory contents
+            let queryPath = parseQuery(request.path, key: "path") ?? NSHomeDirectory()
+            return listDirectory(at: queryPath)
+        }
+
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        if path == "/api/v1/fs/mkdir" {
+            guard let body = request.body,
+                  let payload = try? JSONDecoder().decode(FSPathRequest.self, from: body) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid JSON - need path")
+            }
+            log("[Router] POST /fs/mkdir: \(payload.path)")
+            do {
+                try FileManager.default.createDirectory(atPath: payload.path, withIntermediateDirectories: true)
+                return HTTPResponse(status: .ok)
+            } catch {
+                return HTTPResponse.error(.internalServerError, message: "Failed to create directory: \(error.localizedDescription)")
+            }
+        }
+
+        if path == "/api/v1/fs/delete" {
+            guard let body = request.body,
+                  let payload = try? JSONDecoder().decode(FSPathRequest.self, from: body) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid JSON - need path")
+            }
+            log("[Router] POST /fs/delete: \(payload.path)")
+            do {
+                try FileManager.default.removeItem(atPath: payload.path)
+                return HTTPResponse(status: .ok)
+            } catch {
+                return HTTPResponse.error(.internalServerError, message: "Failed to delete: \(error.localizedDescription)")
+            }
+        }
+
+        if path == "/api/v1/fs/move" {
+            guard let body = request.body,
+                  let payload = try? JSONDecoder().decode(FSMoveRequest.self, from: body) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid JSON - need from and to")
+            }
+            log("[Router] POST /fs/move: \(payload.from) -> \(payload.to)")
+            do {
+                try FileManager.default.moveItem(atPath: payload.from, toPath: payload.to)
+                return HTTPResponse(status: .ok)
+            } catch {
+                return HTTPResponse.error(.internalServerError, message: "Failed to move: \(error.localizedDescription)")
+            }
+        }
+
+        return HTTPResponse.error(.notFound, message: "Not Found")
+    }
+
+    private func listDirectory(at path: String) -> HTTPResponse {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else {
+            return HTTPResponse.error(.notFound, message: "Path not found")
+        }
+
+        do {
+            let contents = try fm.contentsOfDirectory(atPath: path)
+            var entries: [FSEntry] = []
+            for name in contents {
+                let fullPath = (path as NSString).appendingPathComponent(name)
+                var isDir: ObjCBool = false
+                fm.fileExists(atPath: fullPath, isDirectory: &isDir)
+                let attrs = try? fm.attributesOfItem(atPath: fullPath)
+                let size = attrs?[.size] as? Int64 ?? 0
+                let modified = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+                entries.append(FSEntry(name: name, isDir: isDir.boolValue, size: size, modified: modified))
+            }
+            let response = FSListResponse(path: path, entries: entries)
+            guard let data = try? JSONEncoder().encode(response) else {
+                return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+            }
+            return HTTPResponse.json(data)
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to list directory: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Accessibility
+
+    /// Parse target query param into AXTarget. Defaults to .front for backward compat.
+    private func parseAXTarget(_ path: String) -> AccessibilityService.AXTarget {
+        guard let value = parseQuery(path, key: "target") else { return .front }
+        return AccessibilityService.AXTarget(queryValue: value) ?? .front
+    }
+
+    private func handleAccessibility(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        let depthStr = parseQuery(request.path, key: "depth")
+        let depth = depthStr.flatMap { Int($0) } ?? 5
+        let target = parseAXTarget(request.path)
+
+        do {
+            let trees = try AccessibilityService.shared.getTree(maxDepth: depth, target: target)
+            if target.isMulti {
+                guard let data = try? JSONEncoder().encode(trees) else {
+                    return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+                }
+                return HTTPResponse.json(data)
+            } else {
+                guard let first = trees.first else {
+                    return HTTPResponse.error(.internalServerError, message: "No tree returned")
+                }
+                guard let data = try? JSONEncoder().encode(first) else {
+                    return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+                }
+                return HTTPResponse.json(data)
+            }
+        } catch AccessibilityService.AXServiceError.permissionDenied {
+            return HTTPResponse.error(.forbidden, message: "Accessibility permission required. Grant access in System Preferences > Privacy & Security > Accessibility.")
+        } catch {
+            return axErrorResponse(error)
+        }
+    }
+
+    // MARK: - Accessibility Actions
+
+    private func handleAccessibilityAction(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+        guard let body = request.body,
+              let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
+        }
+
+        let label = payload["label"] as? String
+        let role = payload["role"] as? String
+        let action = payload["action"] as? String ?? "AXPress"
+        let target = parseAXTarget(request.path)
+
+        do {
+            try AccessibilityService.shared.performAction(label: label, role: role, action: action, target: target)
+            return HTTPResponse.json(try! JSONEncoder().encode(AccessibilityService.ActionResult(ok: true, message: nil)))
+        } catch {
+            return axErrorResponse(error)
+        }
+    }
+
+    private func handleAccessibilityMenu(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+        guard let body = request.body,
+              let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let path = payload["path"] as? [String] else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON — need {\"path\": [\"Menu\", \"Item\"]}")
+        }
+
+        let target = parseAXTarget(request.path)
+
+        do {
+            try AccessibilityService.shared.triggerMenuItem(path: path, target: target)
+            return HTTPResponse.json(try! JSONEncoder().encode(AccessibilityService.ActionResult(ok: true, message: nil)))
+        } catch {
+            return axErrorResponse(error)
+        }
+    }
+
+    private func handleAccessibilityType(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+        guard let body = request.body,
+              let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let value = payload["value"] as? String else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON — need {\"value\": \"text\"}")
+        }
+
+        let label = payload["label"] as? String
+        let role = payload["role"] as? String
+        let target = parseAXTarget(request.path)
+
+        do {
+            try AccessibilityService.shared.setValue(value, label: label, role: role, target: target)
+            return HTTPResponse.json(try! JSONEncoder().encode(AccessibilityService.ActionResult(ok: true, message: nil)))
+        } catch {
+            return axErrorResponse(error)
+        }
+    }
+
+    private func handleAccessibilityFocused(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+        let target = parseAXTarget(request.path)
+        do {
+            let info = try AccessibilityService.shared.getFocusedElement(target: target)
+            guard let data = try? JSONSerialization.data(withJSONObject: info) else {
+                return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+            }
+            return HTTPResponse.json(data)
+        } catch {
+            return axErrorResponse(error)
+        }
+    }
+
+    private func axErrorResponse(_ error: Error) -> HTTPResponse {
+        if case AccessibilityService.AXServiceError.permissionDenied = error {
+            return HTTPResponse.error(.forbidden, message: "Accessibility permission required")
+        }
+        if case AccessibilityService.AXServiceError.elementNotFound(let label) = error {
+            return HTTPResponse.error(.notFound, message: "Element not found: \(label)")
+        }
+        if case AccessibilityService.AXServiceError.menuNotFound(let path) = error {
+            return HTTPResponse.error(.notFound, message: "Menu not found: \(path)")
+        }
+        if case AccessibilityService.AXServiceError.appNotFound(let id) = error {
+            return HTTPResponse.error(.notFound, message: "Application not found: \(id)")
+        }
+        if case AccessibilityService.AXServiceError.actionFailed(let detail) = error {
+            return HTTPResponse.error(.internalServerError, message: "Action failed: \(detail)")
+        }
+        if case AccessibilityService.AXServiceError.multiTargetNotAllowed = error {
+            return HTTPResponse.error(.badRequest, message: "Multi-target (--all/--visible) not allowed for actions")
+        }
+        return HTTPResponse.error(.internalServerError, message: "\(error)")
+    }
+
+    // MARK: - Pointer
+
+    private func handlePointer(_ request: HTTPRequest) async -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        guard let body = request.body,
+              let payload = try? JSONDecoder().decode(PointerService.PointerRequest.self, from: body) else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
+        }
+
+        log("[Router] POST /pointer: action=\(payload.action)")
+
+        do {
+            let diag = try PointerService.shared.sendEvent(
+                action: payload.action,
+                x: payload.x,
+                y: payload.y,
+                button: payload.button,
+                label: payload.label,
+                endX: payload.endX,
+                endY: payload.endY,
+                deltaX: payload.deltaX,
+                deltaY: payload.deltaY
+            )
+
+            guard let data = try? JSONSerialization.data(withJSONObject: diag.dict) else {
+                return HTTPResponse(status: .ok)
+            }
+            return HTTPResponse.json(data)
+        } catch PointerService.PointerError.labelNotFound(let label) {
+            return HTTPResponse.error(.notFound, message: "Element with label '\(label)' not found")
+        } catch PointerService.PointerError.permissionDenied {
+            return HTTPResponse.error(.forbidden, message: "Accessibility permission required. Grant to GhostTools in System Settings > Privacy & Security > Accessibility.")
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Pointer event failed: \(error)")
+        }
+    }
+
+    // MARK: - Keyboard Input
+
+    private func handleKeyboardInput(_ request: HTTPRequest) async -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        guard let body = request.body,
+              let payload = try? JSONDecoder().decode(KeyboardService.KeyboardRequest.self, from: body) else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
+        }
+
+        log("[Router] POST /input")
+
+        do {
+            try KeyboardService.shared.sendInput(
+                text: payload.text,
+                keys: payload.keys,
+                modifiers: payload.modifiers,
+                rate: payload.rate
+            )
+
+            return HTTPResponse(status: .ok)
+        } catch KeyboardService.KeyboardError.permissionDenied {
+            return HTTPResponse.error(.forbidden, message: "Accessibility permission required for keyboard input")
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Keyboard input failed: \(error)")
+        }
+    }
+
+    // MARK: - Shell Exec
+
+    private struct ExecRequest: Codable {
+        let command: String
+        let args: [String]?
+        let timeout: Int?  // seconds, default 30
+    }
+
+    private struct ExecResponse: Codable {
+        let exitCode: Int32
+        let stdout: String
+        let stderr: String
+    }
+
+    private func handleExec(_ request: HTTPRequest) async -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        guard let body = request.body,
+              let payload = try? JSONDecoder().decode(ExecRequest.self, from: body) else {
+            return HTTPResponse.error(.badRequest, message: "Invalid JSON — need {\"command\": \"...\", \"args\": [...]}")
+        }
+
+        log("[Router] POST /exec: \(payload.command)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: payload.command)
+        process.arguments = payload.args ?? []
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to launch: \(error.localizedDescription)")
+        }
+
+        let timeout = payload.timeout ?? 30
+        let deadline = DispatchTime.now() + .seconds(timeout)
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            group.leave()
+        }
+
+        if group.wait(timeout: deadline) == .timedOut {
+            process.terminate()
+            return HTTPResponse.error(.requestTimeout, message: "Process timed out after \(timeout)s")
+        }
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        let result = ExecResponse(
+            exitCode: process.terminationStatus,
+            stdout: String(data: stdoutData, encoding: .utf8) ?? "",
+            stderr: String(data: stderrData, encoding: .utf8) ?? ""
+        )
+
+        guard let responseData = try? JSONEncoder().encode(result) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode result")
+        }
+        return HTTPResponse.json(responseData)
+    }
+
+    // MARK: - Permissions
+
+    private func handlePermissions(_ request: HTTPRequest) -> HTTPResponse {
+        if request.method == .POST {
+            // POST: prompt for permissions (shows macOS dialogs)
+            let axOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
+            let axTrusted = AXIsProcessTrustedWithOptions(axOptions)
+
+            let result: [String: Any] = [
+                "accessibility": axTrusted,
+                "screenRecording": true,  // Screen Recording no longer needed — capture moved to host
+                "prompted": true
+            ]
+            guard let data = try? JSONSerialization.data(withJSONObject: result) else {
+                return HTTPResponse.error(.internalServerError, message: "Failed to encode")
+            }
+            return HTTPResponse.json(data)
+        }
+
+        // GET: check current permission status without prompting
+        let axTrusted = AXIsProcessTrusted()
+        let result: [String: Any] = [
+            "accessibility": axTrusted,
+            "screenRecording": true  // Screen Recording no longer needed — capture moved to host
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: result) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    // MARK: - Elements (A11y overlay + JSON, no screenshot)
+
+    private func handleElements(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        let result = AccessibilityService.shared.getInteractiveElements()
+        let elements = result.elements
+        let windowFrame = result.windowFrame
+        let scrollState = result.scrollState
+
+        // Show live overlay of discovered elements in the guest framebuffer
+        if let wf = windowFrame, !elements.isEmpty {
+            A11yElementOverlay.shared.showElements(elements, windowFrame: wf)
+        }
+
+        // Build elements array for JSON
+        let elementsJSON: [[String: Any]] = elements.map { elem in
+            var dict: [String: Any] = [
+                "id": elem.id,
+                "role": elem.role,
+                "frame": [
+                    "x": Int(elem.frame.x),
+                    "y": Int(elem.frame.y),
+                    "w": Int(elem.frame.width),
+                    "h": Int(elem.frame.height)
+                ]
+            ]
+            if let label = elem.label { dict["label"] = label }
+            if let title = elem.title { dict["title"] = title }
+            if let value = elem.value { dict["value"] = value }
+            return dict
+        }
+
+        var displayJSON: [String: Any] = [
+            "scroll": [
+                "up": scrollState.canScrollUp,
+                "down": scrollState.canScrollDown,
+                "left": scrollState.canScrollLeft,
+                "right": scrollState.canScrollRight
+            ]
+        ]
+        if let wf = windowFrame {
+            displayJSON["windowFrame"] = [
+                "x": Int(wf.x),
+                "y": Int(wf.y),
+                "w": Int(wf.width),
+                "h": Int(wf.height)
+            ]
+        }
+
+        let response: [String: Any] = [
+            "elements": elementsJSON,
+            "display": displayJSON
+        ]
+
+        guard let data = try? JSONSerialization.data(withJSONObject: response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    // MARK: - Overlay Controls
+
+    private func handleOverlayWaitShow(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+        WaitIndicatorOverlay.shared.show()
+        return HTTPResponse(status: .ok)
+    }
+
+    private func handleOverlayWaitHide(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .POST else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+        WaitIndicatorOverlay.shared.hide()
+        return HTTPResponse(status: .ok)
+    }
+
+    // MARK: - Frontmost App
+
+    private func handleFrontmostApp(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.method == .GET else {
+            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
+        }
+
+        let bundleId = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        let response: [String: Any] = ["bundleId": bundleId]
+        guard let data = try? JSONSerialization.data(withJSONObject: response) else {
+            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
+        }
+        return HTTPResponse.json(data)
+    }
+
+    // MARK: - Query Parsing
+
+    private func parseQuery(_ path: String, key: String) -> String? {
+        guard let queryStart = path.firstIndex(of: "?") else { return nil }
+        let query = String(path[path.index(after: queryStart)...])
+        for pair in query.components(separatedBy: "&") {
+            let parts = pair.components(separatedBy: "=")
+            if parts.count == 2 && parts[0] == key {
+                return parts[1].removingPercentEncoding ?? parts[1]
+            }
+        }
+        return nil
     }
 }
 
@@ -347,4 +939,44 @@ struct LogListResponse: Codable {
 
 struct OpenRequest: Codable {
     let path: String
+    let app: String?
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        path = try container.decode(String.self, forKey: .path)
+        app = try container.decodeIfPresent(String.self, forKey: .app)
+    }
+}
+
+// MARK: - App Management Types
+
+struct AppListResponse: Codable {
+    let apps: [AppManagementService.AppInfo]
+}
+
+struct AppActionRequest: Codable {
+    let bundleId: String
+}
+
+// MARK: - File System Types
+
+struct FSEntry: Codable {
+    let name: String
+    let isDir: Bool
+    let size: Int64
+    let modified: Double
+}
+
+struct FSListResponse: Codable {
+    let path: String
+    let entries: [FSEntry]
+}
+
+struct FSPathRequest: Codable {
+    let path: String
+}
+
+struct FSMoveRequest: Codable {
+    let from: String
+    let to: String
 }

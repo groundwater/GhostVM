@@ -3,6 +3,8 @@ import {
   Zap,
   Camera,
   Shield,
+  Copy,
+  Bot,
 } from "lucide-react";
 
 const features = [
@@ -30,6 +32,18 @@ const features = [
     description:
       "Files from guests are quarantined for Gatekeeper verification. Clipboard sync requires explicit permission — deny, allow once, or always allow.",
   },
+  {
+    icon: Copy,
+    title: "Instant Clone",
+    description:
+      "Duplicate any workspace with APFS copy-on-write. Fresh machine IDs and MAC addresses. Near-zero disk overhead.",
+  },
+  {
+    icon: Bot,
+    title: "MCP Integration",
+    description:
+      "AI agents see the screen, click, type, and manage files inside a workspace. Built-in MCP server — just point your client at a VM.",
+  },
 ];
 
 export default function FeatureGrid() {
@@ -39,7 +53,7 @@ export default function FeatureGrid() {
         <h2 className="text-3xl font-bold text-center mb-12">
           Built for speed, isolation, and security
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
           {features.map((feature) => (
             <div
               key={feature.title}

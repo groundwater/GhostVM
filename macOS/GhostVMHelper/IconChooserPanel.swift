@@ -51,9 +51,13 @@ final class IconChooserPanel: NSObject, NSPopoverDelegate {
 
 // MARK: - Tile Button
 
-/// A square button with rounded-rect background that supports a selection border.
+/// A square button with rounded-rect background that supports a selection border and drag-and-drop.
 private final class TileButton: NSButton {
     var isSelectedTile: Bool = false { didSet { needsDisplay = true } }
+    var isImageWell: Bool = false { didSet { needsDisplay = true } }
+    var isDragHighlighted: Bool = false { didSet { needsDisplay = true } }
+    var slotIndex: Int = -1
+    var onDrop: ((_ slotIndex: Int, _ image: NSImage) -> Void)?
 
     override func draw(_ dirtyRect: NSRect) {
         let rect = bounds.insetBy(dx: 1, dy: 1)
@@ -64,6 +68,24 @@ private final class TileButton: NSButton {
         NSColor.quaternaryLabelColor.setFill()
         bgPath.fill()
 
+        // Dashed border for empty image wells
+        if isImageWell {
+            let dashPath = NSBezierPath(roundedRect: rect.insetBy(dx: 2, dy: 2), xRadius: radius - 2, yRadius: radius - 2)
+            dashPath.lineWidth = 1.5
+            let dashPattern: [CGFloat] = [4, 3]
+            dashPath.setLineDash(dashPattern, count: 2, phase: 0)
+            NSColor.tertiaryLabelColor.setStroke()
+            dashPath.stroke()
+        }
+
+        // Drag highlight border
+        if isDragHighlighted {
+            let hlPath = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+            hlPath.lineWidth = 2.5
+            NSColor.controlAccentColor.withAlphaComponent(0.6).setStroke()
+            hlPath.stroke()
+        }
+
         // Selection border
         if isSelectedTile {
             let borderPath = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
@@ -71,6 +93,45 @@ private final class TileButton: NSButton {
             NSColor.controlAccentColor.setStroke()
             borderPath.stroke()
         }
+    }
+
+    func registerForImageDrag() {
+        registerForDraggedTypes([.fileURL, .png, .tiff])
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard imageFromDrag(sender) != nil else { return [] }
+        isDragHighlighted = true
+        return .copy
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        isDragHighlighted = false
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        isDragHighlighted = false
+        guard let image = imageFromDrag(sender) else { return false }
+        onDrop?(slotIndex, image)
+        return true
+    }
+
+    private func imageFromDrag(_ sender: NSDraggingInfo) -> NSImage? {
+        let pb = sender.draggingPasteboard
+
+        // Try file URL first
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingContentsConformToTypes: [UTType.image.identifier]
+        ]) as? [URL], let url = urls.first {
+            return NSImage(contentsOf: url)
+        }
+
+        // Try inline image data
+        if let image = NSImage(pasteboard: pb) {
+            return image
+        }
+
+        return nil
     }
 
     override var intrinsicContentSize: NSSize {
@@ -88,10 +149,9 @@ private final class IconChooserContentViewController: NSViewController {
     private var currentMode: String?
     private var customIcon: NSImage?
 
-    private var modeButtons: [TileButton] = []  // [Generic, App, Stack, Custom]
-    private var customImageView: NSImageView?    // updatable reference inside Custom button
-    private var customSymbolView: NSImageView?   // the plus.square fallback
-    private var customLabel: NSTextField?         // the "Custom" label
+    private var modeButtons: [TileButton] = []  // [Generic, Glass, App, Stack]
+    private var presetButtons: [TileButton] = []
+    private var slotImages: [Int: NSImage] = [:]
 
     private static let presetIcons: [(name: String, resource: String)] = [
         ("Hipster", "icon-hipster"),
@@ -144,6 +204,7 @@ private final class IconChooserContentViewController: NSViewController {
 
         let modes: [(title: String, symbol: String, tag: Int)] = [
             ("Generic", "desktopcomputer", 0),
+            ("Glass", "rectangle.on.rectangle.square", 4),
             ("App", "app", 1),
             ("Stack", "sparkles.rectangle.stack", 2),
         ]
@@ -153,10 +214,6 @@ private final class IconChooserContentViewController: NSViewController {
             modeButtons.append(button)
             modesStack.addArrangedSubview(button)
         }
-
-        let customButton = makeCustomButton()
-        modeButtons.append(customButton)
-        modesStack.addArrangedSubview(customButton)
 
         updateHighlightForCurrentState()
         container.addSubview(modesStack)
@@ -197,6 +254,15 @@ private final class IconChooserContentViewController: NSViewController {
         if FileManager.default.fileExists(atPath: iconURL.path) {
             customIcon = NSImage(contentsOf: iconURL)
         }
+
+        // Load persisted slot images
+        for index in 0..<12 {
+            let url = layout.slotIconURL(index: index)
+            if FileManager.default.fileExists(atPath: url.path),
+               let img = NSImage(contentsOf: url) {
+                slotImages[index] = img
+            }
+        }
     }
 
     private func updateHighlightForCurrentState() {
@@ -204,7 +270,8 @@ private final class IconChooserContentViewController: NSViewController {
         switch currentMode {
         case "app": selectedTag = 1
         case "stack": selectedTag = 2
-        case nil where customIcon != nil: selectedTag = 3
+        case "glass": selectedTag = 4
+        case nil where customIcon != nil: selectedTag = -1  // custom icon set, no mode button highlighted
         default: selectedTag = 0
         }
         for button in modeButtons {
@@ -216,39 +283,20 @@ private final class IconChooserContentViewController: NSViewController {
         for button in modeButtons {
             button.isSelectedTile = (button.tag == tag)
         }
+        // Deselect all preset tiles when a mode button is selected
+        for button in presetButtons {
+            button.isSelectedTile = false
+        }
     }
 
-    // MARK: - Custom Button Image Update
-
-    private func updateCustomButtonImage(_ icon: NSImage) {
-        // Hide symbol + label, show icon image
-        customSymbolView?.isHidden = true
-        customLabel?.isHidden = true
-
-        if let imageView = customImageView {
-            imageView.image = icon
-            imageView.isHidden = false
-        } else {
-            // First time — create the image view in the custom button
-            guard modeButtons.count > 3 else { return }
-            let button = modeButtons[3]
-
-            let imageView = NSImageView()
-            imageView.image = icon
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            imageView.wantsLayer = true
-            imageView.layer?.cornerRadius = 8
-            imageView.layer?.masksToBounds = true
-
-            button.addSubview(imageView)
-            NSLayoutConstraint.activate([
-                imageView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                imageView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                imageView.widthAnchor.constraint(equalToConstant: tileSize - 8),
-                imageView.heightAnchor.constraint(equalToConstant: tileSize - 8),
-            ])
-            customImageView = imageView
+    private func selectPreset(index: Int) {
+        // Deselect all mode buttons
+        for button in modeButtons {
+            button.isSelectedTile = false
+        }
+        // Highlight only the clicked preset tile
+        for button in presetButtons {
+            button.isSelectedTile = (button.slotIndex == index)
         }
     }
 
@@ -297,74 +345,6 @@ private final class IconChooserContentViewController: NSViewController {
         return button
     }
 
-    private func makeCustomButton() -> TileButton {
-        let button = TileButton(frame: NSRect(x: 0, y: 0, width: tileSize, height: tileSize))
-        button.isBordered = false
-        button.title = ""
-        button.tag = 3
-        button.target = self
-        button.action = #selector(modeButtonClicked(_:))
-        button.translatesAutoresizingMaskIntoConstraints = false
-
-        if let icon = customIcon {
-            let imageView = NSImageView()
-            imageView.image = icon
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            imageView.wantsLayer = true
-            imageView.layer?.cornerRadius = 8
-            imageView.layer?.masksToBounds = true
-            NSLayoutConstraint.activate([
-                imageView.widthAnchor.constraint(equalToConstant: tileSize - 8),
-                imageView.heightAnchor.constraint(equalToConstant: tileSize - 8),
-            ])
-            button.addSubview(imageView)
-            NSLayoutConstraint.activate([
-                imageView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                imageView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-            ])
-            customImageView = imageView
-        } else {
-            let stack = NSStackView()
-            stack.orientation = .vertical
-            stack.spacing = 2
-            stack.alignment = .centerX
-            stack.translatesAutoresizingMaskIntoConstraints = false
-
-            let symbolView = NSImageView()
-            symbolView.image = NSImage(systemSymbolName: "plus.square", accessibilityDescription: "Custom")?
-                .withSymbolConfiguration(.init(pointSize: 20, weight: .regular))
-            symbolView.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                symbolView.widthAnchor.constraint(equalToConstant: 28),
-                symbolView.heightAnchor.constraint(equalToConstant: 28),
-            ])
-            customSymbolView = symbolView
-
-            let label = NSTextField(labelWithString: "Custom")
-            label.font = .systemFont(ofSize: 9)
-            label.textColor = .secondaryLabelColor
-            label.alignment = .center
-            customLabel = label
-
-            stack.addArrangedSubview(symbolView)
-            stack.addArrangedSubview(label)
-
-            button.addSubview(stack)
-            NSLayoutConstraint.activate([
-                stack.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                stack.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-            ])
-        }
-
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: tileSize),
-            button.heightAnchor.constraint(equalToConstant: tileSize),
-        ])
-
-        return button
-    }
-
     @objc private func modeButtonClicked(_ sender: NSButton) {
         selectButton(tag: sender.tag)
 
@@ -372,10 +352,7 @@ private final class IconChooserContentViewController: NSViewController {
         case 0: onSelect?(nil, nil)
         case 1: onSelect?("app", nil)
         case 2: onSelect?("stack", nil)
-        case 3:
-            if let icon = customIcon {
-                onSelect?(nil, icon)
-            }
+        case 4: onSelect?("glass", nil)
         default: break
         }
     }
@@ -389,12 +366,12 @@ private final class IconChooserContentViewController: NSViewController {
         grid.alignment = .leading
 
         let columns = 4
+        let totalSlots = 12  // 10 presets + 2 blank image wells
 
-        var allItems: [(name: String, resource: String)] = Self.presetIcons
-        allItems.append(("Upload", ""))
+        presetButtons = []
 
         var row: NSStackView?
-        for (index, item) in allItems.enumerated() {
+        for index in 0..<totalSlots {
             if index % columns == 0 {
                 row = NSStackView()
                 row!.orientation = .horizontal
@@ -405,92 +382,127 @@ private final class IconChooserContentViewController: NSViewController {
             let button = TileButton(frame: NSRect(x: 0, y: 0, width: tileSize, height: tileSize))
             button.isBordered = false
             button.title = ""
+            button.slotIndex = index
             button.translatesAutoresizingMaskIntoConstraints = false
+            button.target = self
+            button.registerForImageDrag()
+            button.onDrop = { [weak self] slotIndex, image in
+                self?.handleDrop(slotIndex: slotIndex, image: image)
+            }
             NSLayoutConstraint.activate([
                 button.widthAnchor.constraint(equalToConstant: tileSize),
                 button.heightAnchor.constraint(equalToConstant: tileSize),
             ])
 
-            if item.resource.isEmpty {
-                // Upload button
-                button.target = self
-                button.action = #selector(uploadClicked)
-
-                let stack = NSStackView()
-                stack.orientation = .vertical
-                stack.spacing = 2
-                stack.alignment = .centerX
-                stack.translatesAutoresizingMaskIntoConstraints = false
-
-                let imageView = NSImageView()
-                imageView.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Upload")?
-                    .withSymbolConfiguration(.init(pointSize: 16, weight: .regular))
-                imageView.translatesAutoresizingMaskIntoConstraints = false
-                NSLayoutConstraint.activate([
-                    imageView.widthAnchor.constraint(equalToConstant: 24),
-                    imageView.heightAnchor.constraint(equalToConstant: 24),
-                ])
-
-                let label = NSTextField(labelWithString: "Upload")
-                label.font = .systemFont(ofSize: 9)
-                label.textColor = .secondaryLabelColor
-                label.alignment = .center
-
-                stack.addArrangedSubview(imageView)
-                stack.addArrangedSubview(label)
-
-                button.addSubview(stack)
-                NSLayoutConstraint.activate([
-                    stack.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                    stack.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                ])
-            } else {
-                // Preset icon button
-                button.target = self
+            if let slotImg = slotImages[index] {
+                // Slot has a persisted custom image (overrides preset or fills well)
                 button.action = #selector(presetClicked(_:))
                 button.tag = index
-                button.toolTip = item.name
+                button.toolTip = index < Self.presetIcons.count ? Self.presetIcons[index].name : "Custom icon"
+                addImageView(to: button, image: slotImg)
+            } else if index < Self.presetIcons.count {
+                // Preset icon button
+                let preset = Self.presetIcons[index]
+                button.action = #selector(presetClicked(_:))
+                button.tag = index
+                button.toolTip = preset.name
 
-                if let img = Self.loadPresetIcon(named: item.resource) {
-                    let imageView = NSImageView()
-                    imageView.image = img
-                    imageView.imageScaling = .scaleProportionallyUpOrDown
-                    imageView.translatesAutoresizingMaskIntoConstraints = false
-                    imageView.wantsLayer = true
-                    imageView.layer?.cornerRadius = (tileSize - 4) * 185.4 / 1024
-                    imageView.layer?.masksToBounds = true
-                    NSLayoutConstraint.activate([
-                        imageView.widthAnchor.constraint(equalToConstant: tileSize - 4),
-                        imageView.heightAnchor.constraint(equalToConstant: tileSize - 4),
-                    ])
-
-                    button.addSubview(imageView)
-                    NSLayoutConstraint.activate([
-                        imageView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                        imageView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                    ])
+                if let img = Self.loadPresetIcon(named: preset.resource) {
+                    addImageView(to: button, image: img)
                 }
+            } else {
+                // Blank image well
+                button.isImageWell = true
+                button.action = #selector(imageWellClicked(_:))
+                button.tag = index
+                button.toolTip = "Drop or click to add icon"
+
+                addPlusIndicator(to: button)
             }
 
+            presetButtons.append(button)
             row?.addArrangedSubview(button)
         }
 
         return grid
     }
 
+    private func addImageView(to button: TileButton, image: NSImage) {
+        // Remove existing subviews
+        button.subviews.forEach { $0.removeFromSuperview() }
+
+        let imageView = NSImageView()
+        imageView.image = image
+        imageView.imageScaling = .scaleProportionallyUpOrDown
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+        imageView.wantsLayer = true
+        imageView.layer?.cornerRadius = (tileSize - 4) * 185.4 / 1024
+        imageView.layer?.masksToBounds = true
+        // Prevent NSImageView from intercepting drag events meant for the button
+        imageView.unregisterDraggedTypes()
+        NSLayoutConstraint.activate([
+            imageView.widthAnchor.constraint(equalToConstant: tileSize - 4),
+            imageView.heightAnchor.constraint(equalToConstant: tileSize - 4),
+        ])
+
+        button.addSubview(imageView)
+        NSLayoutConstraint.activate([
+            imageView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+    }
+
+    private func addPlusIndicator(to button: TileButton) {
+        let plusImage = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add icon")?
+            .withSymbolConfiguration(.init(pointSize: 16, weight: .light))
+        let imageView = NSImageView()
+        imageView.image = plusImage
+        imageView.contentTintColor = .tertiaryLabelColor
+        imageView.translatesAutoresizingMaskIntoConstraints = false
+
+        button.addSubview(imageView)
+        NSLayoutConstraint.activate([
+            imageView.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+            imageView.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+    }
+
     @objc private func presetClicked(_ sender: NSButton) {
         let index = sender.tag
+
+        // If this slot has a custom dropped/uploaded image, use that
+        if let customImg = slotImages[index] {
+            customIcon = customImg
+            selectPreset(index: index)
+            onSelect?(nil, customImg)
+            return
+        }
+
         guard index < Self.presetIcons.count else { return }
         let preset = Self.presetIcons[index]
         guard let img = Self.loadPresetIcon(named: preset.resource) else { return }
 
         customIcon = img
-        selectButton(tag: 3)
-        updateCustomButtonImage(img)
+        selectPreset(index: index)
         onSelect?(nil, img)
     }
 
-    @objc private func uploadClicked() {
+    @objc private func imageWellClicked(_ sender: NSButton) {
+        let slotIndex = sender.tag
+
+        // If this slot already has a custom image, select it
+        if let customImg = slotImages[slotIndex] {
+            customIcon = customImg
+            selectPreset(index: slotIndex)
+            onSelect?(nil, customImg)
+            return
+        }
+
+        // Otherwise open file picker
+        openImagePicker(forSlot: slotIndex)
+    }
+
+    private func openImagePicker(forSlot slotIndex: Int) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -501,9 +513,35 @@ private final class IconChooserContentViewController: NSViewController {
         guard panel.runModal() == .OK, let url = panel.url,
               let image = NSImage(contentsOf: url) else { return }
 
+        applyImage(image, toSlot: slotIndex)
+    }
+
+    private func handleDrop(slotIndex: Int, image: NSImage) {
+        applyImage(image, toSlot: slotIndex)
+    }
+
+    private func applyImage(_ image: NSImage, toSlot slotIndex: Int) {
+        slotImages[slotIndex] = image
         customIcon = image
-        selectButton(tag: 3)
-        updateCustomButtonImage(image)
+
+        // Update tile visuals
+        if slotIndex < presetButtons.count {
+            let button = presetButtons[slotIndex]
+            button.isImageWell = false
+            addImageView(to: button, image: image)
+            // Reassign action to presetClicked since it now has an image
+            button.action = #selector(presetClicked(_:))
+        }
+
+        // Persist slot image to disk
+        let layout = VMFileLayout(bundleURL: bundleURL)
+        if let tiff = image.tiffRepresentation,
+           let bitmap = NSBitmapImageRep(data: tiff),
+           let pngData = bitmap.representation(using: .png, properties: [:]) {
+            try? pngData.write(to: layout.slotIconURL(index: slotIndex))
+        }
+
+        selectPreset(index: slotIndex)
         onSelect?(nil, image)
     }
 }

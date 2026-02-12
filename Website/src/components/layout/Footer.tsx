@@ -34,6 +34,14 @@ export default function Footer() {
                   CLI Reference
                 </Link>
               </li>
+              <li>
+                <Link
+                  href="/docs/mcp"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  MCP Server
+                </Link>
+              </li>
             </ul>
           </div>
           <div>
@@ -41,6 +49,14 @@ export default function Footer() {
               Resources
             </h3>
             <ul className="space-y-2">
+              <li>
+                <Link
+                  href="/blog"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  Blog
+                </Link>
+              </li>
               <li>
                 <a
                   href="https://github.com/groundwater/GhostVM"

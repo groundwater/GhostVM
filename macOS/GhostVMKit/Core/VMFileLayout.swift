@@ -32,6 +32,9 @@ public final class VMFileLayout {
     /// Custom icon stored in the VM bundle (PNG format)
     public var customIconURL: URL { bundleURL.appendingPathComponent("icon.png") }
 
+    /// Slot icon stored in the VM bundle (PNG format, for icon chooser grid)
+    public func slotIconURL(index: Int) -> URL { bundleURL.appendingPathComponent("slot-icon-\(index).png") }
+
     public func ensureBundleDirectory() throws {
         if !fileManager.fileExists(atPath: bundleURL.path) {
             try fileManager.createDirectory(at: bundleURL, withIntermediateDirectories: true, attributes: nil)

@@ -53,7 +53,9 @@ export default function GUIApp() {
         </li>
         <li>
           <strong>Icon Chooser</strong> &mdash; switch the workspace Dock icon
-          between Generic, App, Stack, and Custom modes, saved instantly
+          between Generic, Glass, App, and Stack modes. Glass mode renders any
+          app icon with a frosted overlay. Drag and drop icons into the icon
+          slots for quick customization
         </li>
         <li>
           <strong>Capture Inputs</strong> &mdash; toggle to send all keyboard
@@ -75,6 +77,8 @@ export default function GUIApp() {
       <ul>
         <li>Start / Boot to Recovery</li>
         <li>Stop / Terminate</li>
+        <li>Clone &mdash; duplicate the workspace with APFS copy-on-write</li>
+        <li>Rename &mdash; change the workspace name and bundle filename</li>
         <li>Edit Settings (CPU, memory, disk, shared folders, port forwards)</li>
         <li>Snapshot management (create, revert, delete)</li>
         <li>Show in Finder / Remove from List / Delete</li>

@@ -9,6 +9,7 @@ final class FileService {
 
     /// Files queued for sending to host
     private var outgoingFiles: [URL] = []
+    private let outgoingLock = NSLock()
 
     private init() {
         // Use Downloads folder for received files
@@ -79,44 +80,66 @@ final class FileService {
 
     /// Lists files queued for sending to host (full paths)
     func listOutgoingFiles() -> [String] {
-        return outgoingFiles.map { $0.path }
+        outgoingLock.lock()
+        let files = outgoingFiles.map { $0.path }
+        outgoingLock.unlock()
+        return files
     }
 
     /// Queue a file for sending to host
     func queueOutgoingFile(_ url: URL) {
+        outgoingLock.lock()
+        let added: Bool
         if !outgoingFiles.contains(url) {
             outgoingFiles.append(url)
+            added = true
+        } else {
+            added = false
+        }
+        outgoingLock.unlock()
+        if added {
             EventPushServer.shared.pushEvent(.files(listOutgoingFiles()))
         }
     }
 
     /// Queue multiple files for sending to host
     func queueOutgoingFiles(_ urls: [URL]) {
+        outgoingLock.lock()
+        var changed = false
         for url in urls {
             if !outgoingFiles.contains(url) {
                 outgoingFiles.append(url)
+                changed = true
             }
         }
-        if !urls.isEmpty {
+        outgoingLock.unlock()
+        if changed {
             EventPushServer.shared.pushEvent(.files(listOutgoingFiles()))
         }
     }
 
     /// Remove a file from the outgoing queue
     func removeOutgoingFile(_ url: URL) {
+        outgoingLock.lock()
         outgoingFiles.removeAll { $0 == url }
+        outgoingLock.unlock()
     }
 
     /// Clear all outgoing files
     func clearOutgoingFiles() {
+        outgoingLock.lock()
         outgoingFiles.removeAll()
+        outgoingLock.unlock()
         EventPushServer.shared.pushEvent(.files([]))
         NotificationCenter.default.post(name: .outgoingFilesChanged, object: nil)
     }
 
     /// Check if a path is in the outgoing queue
     func isOutgoingFile(_ path: String) -> Bool {
-        return outgoingFiles.contains { $0.path == path }
+        outgoingLock.lock()
+        let found = outgoingFiles.contains { $0.path == path }
+        outgoingLock.unlock()
+        return found
     }
 
     // MARK: - Private Helpers

@@ -15,7 +15,8 @@ export default function Hero() {
         <p className="text-lg sm:text-xl text-gray-600 dark:text-gray-400 max-w-2xl mx-auto mb-10">
           Each workspace is an isolated macOS VM with its own tools, files, and
           environment. Deep host integration means switching between them is as
-          easy as switching apps. Run as many as you need in parallel.
+          easy as switching apps. Control them with the GUI, the CLI, or let an
+          AI agent drive.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-14">
           <Link

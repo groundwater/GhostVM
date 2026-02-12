@@ -1,10 +1,6 @@
 import Foundation
-import AppKit
 import Virtualization
 import Darwin
-import ObjectiveC
-
-private var windowDelegateAssociationKey: UInt8 = 0
 
 /// Primary controller for VM operations.
 public final class VMController {
@@ -472,6 +468,161 @@ public final class VMController {
         try initVM(at: bundleURL(for: name), preferredName: name, options: options)
     }
 
+    // MARK: - Rename VM
+
+    public func renameVM(bundleURL: URL, newName: String) throws -> URL {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            throw VMError.message("VM name cannot be empty.")
+        }
+        guard trimmed != "." && trimmed != ".." else {
+            throw VMError.message("Invalid VM name.")
+        }
+        let forbidden = CharacterSet(charactersIn: "/:\\")
+        guard trimmed.rangeOfCharacter(from: forbidden) == nil else {
+            throw VMError.message("VM name cannot contain /, :, or \\ characters.")
+        }
+
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let oldName = displayName(for: bundleURL)
+
+        guard !isVMProcessRunning(layout: layout) else {
+            throw VMError.message("VM '\(oldName)' is running. Stop it before renaming.")
+        }
+
+        let parentDir = bundleURL.deletingLastPathComponent()
+        let bundleExtension = bundleURL.pathExtension
+        let newBundleName = "\(trimmed).\(bundleExtension)"
+        let newBundleURL = parentDir.appendingPathComponent(newBundleName)
+
+        guard !fileManager.fileExists(atPath: newBundleURL.path) else {
+            throw VMError.message("A VM named '\(trimmed)' already exists at that location.")
+        }
+
+        try fileManager.moveItem(at: bundleURL, to: newBundleURL)
+
+        // Rename the helper app inside the bundle so Dock/Cmd+Tab shows the new name
+        let newLayout = VMFileLayout(bundleURL: newBundleURL)
+        let oldHelperURL = newLayout.helperAppURL(vmName: oldName)
+        let newHelperURL = newLayout.helperAppURL(vmName: trimmed)
+        if oldHelperURL.path != newHelperURL.path,
+           fileManager.fileExists(atPath: oldHelperURL.path) {
+            try fileManager.moveItem(at: oldHelperURL, to: newHelperURL)
+        }
+
+        return newBundleURL
+    }
+
+    // MARK: - Clone VM
+
+    /// Clone a VM bundle using APFS copy-on-write via `clonefile()`.
+    /// Returns the URL of the newly created bundle.
+    public func cloneVM(bundleURL: URL, newName: String) throws -> URL {
+        let trimmed = newName.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else {
+            throw VMError.message("VM name cannot be empty.")
+        }
+        guard trimmed != "." && trimmed != ".." else {
+            throw VMError.message("Invalid VM name.")
+        }
+        let forbidden = CharacterSet(charactersIn: "/:\\")
+        guard trimmed.rangeOfCharacter(from: forbidden) == nil else {
+            throw VMError.message("VM name cannot contain /, :, or \\ characters.")
+        }
+
+        let sourceLayout = try layoutForExistingBundle(at: bundleURL)
+        let sourceName = displayName(for: bundleURL)
+
+        // Source must be installed
+        let sourceStore = VMConfigStore(layout: sourceLayout)
+        let sourceConfig = try sourceStore.load()
+        guard sourceConfig.installed else {
+            throw VMError.message("VM '\(sourceName)' is not installed. Only installed VMs can be cloned.")
+        }
+
+        // Source must not be running
+        guard !isVMProcessRunning(layout: sourceLayout) else {
+            throw VMError.message("VM '\(sourceName)' is running. Stop it before cloning.")
+        }
+
+        // Create new bundle in the same parent directory
+        let parentDir = bundleURL.deletingLastPathComponent()
+        let bundleExtension = bundleURL.pathExtension
+        let newBundleName = "\(trimmed).\(bundleExtension)"
+        let newBundleURL = parentDir.appendingPathComponent(newBundleName)
+
+        guard !fileManager.fileExists(atPath: newBundleURL.path) else {
+            throw VMError.message("A VM named '\(trimmed)' already exists at that location.")
+        }
+
+        let newLayout = VMFileLayout(bundleURL: newBundleURL)
+
+        do {
+            try newLayout.ensureBundleDirectory()
+
+            // Clone files using APFS COW via Darwin clonefile()
+            let filesToClone: [(source: URL, dest: URL)] = [
+                (sourceLayout.diskURL, newLayout.diskURL),
+                (sourceLayout.hardwareModelURL, newLayout.hardwareModelURL),
+                (sourceLayout.auxiliaryStorageURL, newLayout.auxiliaryStorageURL),
+            ]
+
+            for (source, dest) in filesToClone {
+                let result = Darwin.clonefile(source.path, dest.path, 0)
+                if result == -1 {
+                    let err = String(cString: strerror(errno))
+                    throw VMError.message("Clone failed for \(source.lastPathComponent): \(err). This volume may not support copy-on-write. Move your VMs to an APFS volume.")
+                }
+            }
+
+            // Generate fresh identifiers
+            let machineIdentifier = VZMacMachineIdentifier()
+            try writeData(machineIdentifier.dataRepresentation, to: newLayout.machineIdentifierURL)
+
+            let macAddress = VZMACAddress.randomLocallyAdministered()
+
+            // Create empty Snapshots directory
+            try fileManager.createDirectory(at: newLayout.snapshotsDirectoryURL, withIntermediateDirectories: true, attributes: nil)
+
+            // Write new config.json — same hardware settings, cleared per-instance state
+            let newConfig = VMStoredConfig(
+                version: sourceConfig.version,
+                createdAt: Date(),
+                modifiedAt: Date(),
+                cpus: sourceConfig.cpus,
+                memoryBytes: sourceConfig.memoryBytes,
+                diskBytes: sourceConfig.diskBytes,
+                restoreImagePath: sourceConfig.restoreImagePath,
+                hardwareModelPath: newLayout.hardwareModelURL.lastPathComponent,
+                machineIdentifierPath: newLayout.machineIdentifierURL.lastPathComponent,
+                auxiliaryStoragePath: newLayout.auxiliaryStorageURL.lastPathComponent,
+                diskPath: newLayout.diskURL.lastPathComponent,
+                sharedFolderPath: nil,
+                sharedFolderReadOnly: true,
+                sharedFolders: [],
+                installed: true,
+                lastInstallBuild: sourceConfig.lastInstallBuild,
+                lastInstallVersion: sourceConfig.lastInstallVersion,
+                lastInstallDate: sourceConfig.lastInstallDate,
+                legacyName: nil,
+                isSuspended: false,
+                macAddress: macAddress.string,
+                portForwards: [],
+                iconMode: nil
+            )
+
+            let newStore = VMConfigStore(layout: newLayout)
+            try newStore.save(newConfig)
+
+        } catch {
+            // Clean up partial clone on failure
+            try? fileManager.removeItem(at: newBundleURL)
+            throw error
+        }
+
+        return newBundleURL
+    }
+
     // MARK: - Delete VM
 
     public func moveVMToTrash(bundleURL: URL) throws {
@@ -631,261 +782,6 @@ public final class VMController {
         try store.save(config)
     }
 
-    // MARK: - Start VM (CLI mode - returns Never)
-
-    public func startVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
-        let layout = try layoutForExistingBundle(at: bundleURL)
-        let store = VMConfigStore(layout: layout)
-        var config = try store.load()
-        let vmName = displayName(for: bundleURL)
-
-        // Generate a persistent MAC address if one doesn't exist (migration for older VMs)
-        if config.macAddress == nil {
-            config.macAddress = VZMACAddress.randomLocallyAdministered().string
-            config.modifiedAt = Date()
-            try store.save(config)
-        }
-
-        if let owner = readVMLockOwner(from: layout.pidFileURL) {
-            if kill(owner.pid, 0) == 0 {
-                if owner.isEmbedded {
-                    throw VMError.message("VM '\(vmName)' is running inside GhostVM (PID \(owner.pid)). Stop it there before starting via CLI.")
-                } else {
-                    throw VMError.message("VM '\(vmName)' is already running under PID \(owner.pid).")
-                }
-            } else {
-                removeVMLock(at: layout.pidFileURL)
-            }
-        }
-
-        let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
-        let vmQueue = DispatchQueue(label: "vmctl.run.\(vmName)")
-        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
-        let pid = getpid()
-        try writeVMLockOwner(.cli(pid), to: layout.pidFileURL)
-
-        // A single closure runs all exit paths so we never leave stale pid files behind.
-        func cleanupAndExit(_ code: Int32) -> Never {
-            removeVMLock(at: layout.pidFileURL)
-            exit(code)
-        }
-
-        // Suspend handler: pause VM, save state, update config, then exit
-        func suspendAndExit() {
-            print("Suspending virtual machine...")
-            vmQueue.async {
-                virtualMachine.pause { pauseResult in
-                    switch pauseResult {
-                    case .success:
-                        virtualMachine.saveMachineStateTo(url: layout.suspendStateURL) { saveError in
-                            DispatchQueue.main.async {
-                                if let error = saveError {
-                                    print("Failed to save VM state: \(error.localizedDescription)")
-                                    // Resume the VM since we failed to save
-                                    vmQueue.async {
-                                        virtualMachine.resume { _ in }
-                                    }
-                                    return
-                                }
-                                // Update config to mark as suspended
-                                var updatedConfig = config
-                                updatedConfig.isSuspended = true
-                                updatedConfig.modifiedAt = Date()
-                                try? store.save(updatedConfig)
-                                print("VM '\(vmName)' suspended. Use 'vmctl resume \(bundleURL.path)' to continue.")
-                                cleanupAndExit(0)
-                            }
-                        }
-                    case .failure(let error):
-                        DispatchQueue.main.async {
-                            print("Failed to pause VM: \(error.localizedDescription)")
-                        }
-                    }
-                }
-            }
-        }
-
-        class Delegate: NSObject, VZVirtualMachineDelegate {
-            let stopHandler: (Int32) -> Never
-
-            init(stopHandler: @escaping (Int32) -> Never) {
-                self.stopHandler = stopHandler
-            }
-
-            func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-                print("Guest shut down gracefully.")
-                _ = stopHandler(0)
-            }
-
-            func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-                print("Virtual machine stopped with error: \(error.localizedDescription)")
-                _ = stopHandler(1)
-            }
-        }
-
-        let delegate = Delegate(stopHandler: { code in cleanupAndExit(code) })
-        virtualMachine.delegate = delegate
-
-        let startGroup = DispatchGroup()
-        startGroup.enter()
-        vmQueue.async {
-            virtualMachine.start { result in
-                switch result {
-                case .success:
-                    print("VM '\(vmName)' started. PID \(pid). Press Ctrl+C to shut down.")
-                    startGroup.leave()
-                case .failure(let error):
-                    print("Failed to start VM: \(error.localizedDescription)")
-                    startGroup.leave()
-                    cleanupAndExit(1)
-                }
-            }
-        }
-        startGroup.wait()
-
-        // Track whether the next signal should escalate from ACPI power button to a hard stop.
-        var shouldForceStop = false
-
-        SignalTrap.shared.register(signals: [SIGINT, SIGTERM, SIGHUP])
-
-        SignalTrap.shared.onSignal = { signal in
-            if signal == SIGHUP {
-                // SIGHUP triggers suspend
-                suspendAndExit()
-                return
-            }
-            vmQueue.async {
-                if shouldForceStop {
-                    print("Force stopping virtual machine...")
-                    virtualMachine.stop { error in
-                        if let error = error {
-                            print("Force stop failed: \(error.localizedDescription)")
-                            cleanupAndExit(1)
-                        } else {
-                            cleanupAndExit(0)
-                        }
-                    }
-                } else {
-                    print("Requesting guest shutdown (signal \(signal)). Repeat signal to force stop.")
-                    do {
-                        try virtualMachine.requestStop()
-                    } catch {
-                        print("Failed to request graceful shutdown: \(error.localizedDescription)")
-                    }
-                    shouldForceStop = true
-                }
-            }
-        }
-
-        let suppressDockIcon = ProcessInfo.processInfo.environment["VMCTL_SUPPRESS_DOCK_ICON"] == "1"
-
-        if headless {
-            dispatchMain()
-        } else {
-            DispatchQueue.main.async {
-                let app = NSApplication.shared
-                if suppressDockIcon {
-                    app.setActivationPolicy(.accessory)
-                } else {
-                    app.setActivationPolicy(.regular)
-                }
-                let window = NSWindow(
-                    contentRect: NSRect(x: 0, y: 0, width: 1024, height: 640),
-                    styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                    backing: .buffered,
-                    defer: false
-                )
-                window.title = "vmctl – \(vmName)"
-                let vmView = VZVirtualMachineView()
-                vmView.virtualMachine = virtualMachine
-                if #available(macOS 14.0, *) {
-                    vmView.automaticallyReconfiguresDisplay = true
-                }
-                vmView.autoresizingMask = [.width, .height]
-                window.contentView = vmView
-
-                final class VMWindowDelegate: NSObject, NSWindowDelegate {
-                    private let vmQueue: DispatchQueue
-                    private let virtualMachine: VZVirtualMachine
-                    private let vmView: VZVirtualMachineView
-                    var suspendHandler: (() -> Void)?
-
-                    init(vmQueue: DispatchQueue, virtualMachine: VZVirtualMachine, vmView: VZVirtualMachineView) {
-                        self.vmQueue = vmQueue
-                        self.virtualMachine = virtualMachine
-                        self.vmView = vmView
-                    }
-
-                    func windowShouldClose(_ sender: NSWindow) -> Bool {
-                        switch virtualMachine.state {
-                        case .stopped, .stopping:
-                            return true
-                        default:
-                            vmQueue.async {
-                                do {
-                                    try self.virtualMachine.requestStop()
-                                } catch {
-                                    print("Failed to request stop via close button: \(error.localizedDescription)")
-                                }
-                            }
-                            return false
-                        }
-                    }
-
-                    func windowWillClose(_ notification: Notification) {
-                        vmView.virtualMachine = nil
-                        NSApplication.shared.stop(nil)
-                    }
-
-                    @objc func suspendVM(_ sender: Any?) {
-                        suspendHandler?()
-                    }
-                }
-
-                let windowDelegate = VMWindowDelegate(vmQueue: vmQueue, virtualMachine: virtualMachine, vmView: vmView)
-                windowDelegate.suspendHandler = suspendAndExit
-                window.delegate = windowDelegate
-                objc_setAssociatedObject(window, &windowDelegateAssociationKey, windowDelegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-
-                // Create menu bar with Virtual Machine menu
-                let mainMenu = NSMenu()
-
-                // Application menu (required for standard macOS behavior)
-                let appMenuItem = NSMenuItem()
-                let appMenu = NSMenu()
-                appMenu.addItem(withTitle: "Quit vmctl", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-                appMenuItem.submenu = appMenu
-                mainMenu.addItem(appMenuItem)
-
-                // Virtual Machine menu
-                let vmMenuItem = NSMenuItem()
-                let vmMenu = NSMenu(title: "Virtual Machine")
-                let suspendItem = NSMenuItem(title: "Suspend", action: #selector(VMWindowDelegate.suspendVM(_:)), keyEquivalent: "s")
-                suspendItem.target = windowDelegate
-                vmMenu.addItem(suspendItem)
-                vmMenu.addItem(NSMenuItem.separator())
-                let shutdownItem = NSMenuItem(title: "Shut Down", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "")
-                vmMenu.addItem(shutdownItem)
-                vmMenuItem.submenu = vmMenu
-                mainMenu.addItem(vmMenuItem)
-
-                app.mainMenu = mainMenu
-
-                window.center()
-                window.makeKeyAndOrderFront(nil)
-                app.activate(ignoringOtherApps: true)
-            }
-            NSApplication.shared.run()
-        }
-
-        cleanupAndExit(0)
-    }
-
-    public func startVM(name: String, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
-        try startVM(bundleURL: bundleURL(for: name), headless: headless, runtimeSharedFolder: runtimeSharedFolder)
-    }
-
     // MARK: - Stop VM
 
     public func stopVM(bundleURL: URL, timeout: TimeInterval = 30) throws {
@@ -896,11 +792,6 @@ public final class VMController {
             return
         }
         let pid = owner.pid
-
-        if owner.isEmbedded {
-            print("VM '\(vmName)' is running inside GhostVM (PID \(pid)). Stop it from the app.")
-            return
-        }
 
         if kill(pid, 0) != 0 {
             print("Stale PID file detected. Cleaning up.")
@@ -1120,219 +1011,6 @@ public final class VMController {
 
     // MARK: - Suspend/Resume
 
-    /// Resumes a VM from a suspended state. Similar to startVM but restores from saved state instead of cold boot.
-    public func resumeVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
-        let layout = try layoutForExistingBundle(at: bundleURL)
-        let store = VMConfigStore(layout: layout)
-        var config = try store.load()
-        let vmName = displayName(for: bundleURL)
-
-        guard config.isSuspended else {
-            throw VMError.message("VM '\(vmName)' is not suspended. Use 'start' instead.")
-        }
-
-        guard fileManager.fileExists(atPath: layout.suspendStateURL.path) else {
-            throw VMError.message("Suspend state file missing for '\(vmName)'. Use 'discard-suspend' to reset state.")
-        }
-
-        if let owner = readVMLockOwner(from: layout.pidFileURL) {
-            if kill(owner.pid, 0) == 0 {
-                if owner.isEmbedded {
-                    throw VMError.message("VM '\(vmName)' is running inside GhostVM (PID \(owner.pid)). Stop it there before resuming via CLI.")
-                } else {
-                    throw VMError.message("VM '\(vmName)' is already running under PID \(owner.pid).")
-                }
-            } else {
-                removeVMLock(at: layout.pidFileURL)
-            }
-        }
-
-        let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
-        let vmConfiguration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: headless, runtimeSharedFolder: runtimeSharedFolder)
-        let vmQueue = DispatchQueue(label: "vmctl.resume.\(vmName)")
-        let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
-        let pid = getpid()
-        try writeVMLockOwner(.cli(pid), to: layout.pidFileURL)
-
-        func cleanupAndExit(_ code: Int32, clearSuspendState: Bool = false) -> Never {
-            removeVMLock(at: layout.pidFileURL)
-            if clearSuspendState {
-                try? fileManager.removeItem(at: layout.suspendStateURL)
-                config.isSuspended = false
-                config.modifiedAt = Date()
-                try? store.save(config)
-            }
-            exit(code)
-        }
-
-        class Delegate: NSObject, VZVirtualMachineDelegate {
-            let stopHandler: (Int32) -> Never
-
-            init(stopHandler: @escaping (Int32) -> Never) {
-                self.stopHandler = stopHandler
-            }
-
-            func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-                print("Guest shut down gracefully.")
-                _ = stopHandler(0)
-            }
-
-            func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-                print("Virtual machine stopped with error: \(error.localizedDescription)")
-                _ = stopHandler(1)
-            }
-        }
-
-        let delegate = Delegate(stopHandler: { code in cleanupAndExit(code, clearSuspendState: true) })
-        virtualMachine.delegate = delegate
-
-        // Restore state from suspend file
-        let restoreGroup = DispatchGroup()
-        restoreGroup.enter()
-        var restoreError: Error?
-        vmQueue.async {
-            virtualMachine.restoreMachineStateFrom(url: layout.suspendStateURL) { error in
-                restoreError = error
-                restoreGroup.leave()
-            }
-        }
-        restoreGroup.wait()
-
-        if let error = restoreError {
-            print("Failed to restore VM state: \(error.localizedDescription)")
-            cleanupAndExit(1)
-        }
-
-        // Resume execution
-        let resumeGroup = DispatchGroup()
-        resumeGroup.enter()
-        vmQueue.async {
-            virtualMachine.resume { result in
-                switch result {
-                case .success:
-                    print("VM '\(vmName)' resumed from suspended state. PID \(pid). Press Ctrl+C to shut down.")
-                    // Clear suspend state since we successfully resumed
-                    try? self.fileManager.removeItem(at: layout.suspendStateURL)
-                    config.isSuspended = false
-                    config.modifiedAt = Date()
-                    try? store.save(config)
-                    resumeGroup.leave()
-                case .failure(let error):
-                    print("Failed to resume VM: \(error.localizedDescription)")
-                    resumeGroup.leave()
-                    cleanupAndExit(1)
-                }
-            }
-        }
-        resumeGroup.wait()
-
-        // Track whether the next signal should escalate from ACPI power button to a hard stop.
-        var shouldForceStop = false
-
-        SignalTrap.shared.register(signals: [SIGINT, SIGTERM])
-
-        SignalTrap.shared.onSignal = { signal in
-            vmQueue.async {
-                if shouldForceStop {
-                    print("Force stopping virtual machine...")
-                    virtualMachine.stop { error in
-                        if let error = error {
-                            print("Force stop failed: \(error.localizedDescription)")
-                            cleanupAndExit(1, clearSuspendState: true)
-                        } else {
-                            cleanupAndExit(0, clearSuspendState: true)
-                        }
-                    }
-                } else {
-                    print("Requesting guest shutdown (signal \(signal)). Repeat signal to force stop.")
-                    do {
-                        try virtualMachine.requestStop()
-                    } catch {
-                        print("Failed to request graceful shutdown: \(error.localizedDescription)")
-                    }
-                    shouldForceStop = true
-                }
-            }
-        }
-
-        let suppressDockIcon = ProcessInfo.processInfo.environment["VMCTL_SUPPRESS_DOCK_ICON"] == "1"
-
-        if headless {
-            dispatchMain()
-        } else {
-            DispatchQueue.main.async {
-                let app = NSApplication.shared
-                if suppressDockIcon {
-                    app.setActivationPolicy(.accessory)
-                } else {
-                    app.setActivationPolicy(.regular)
-                }
-                let window = NSWindow(
-                    contentRect: NSRect(x: 0, y: 0, width: 1024, height: 640),
-                    styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                    backing: .buffered,
-                    defer: false
-                )
-                window.title = "vmctl – \(vmName)"
-                let vmView = VZVirtualMachineView()
-                vmView.virtualMachine = virtualMachine
-                if #available(macOS 14.0, *) {
-                    vmView.automaticallyReconfiguresDisplay = true
-                }
-                vmView.autoresizingMask = [.width, .height]
-                window.contentView = vmView
-
-                final class VMWindowDelegate: NSObject, NSWindowDelegate {
-                    private let vmQueue: DispatchQueue
-                    private let virtualMachine: VZVirtualMachine
-                    private let vmView: VZVirtualMachineView
-
-                    init(vmQueue: DispatchQueue, virtualMachine: VZVirtualMachine, vmView: VZVirtualMachineView) {
-                        self.vmQueue = vmQueue
-                        self.virtualMachine = virtualMachine
-                        self.vmView = vmView
-                    }
-
-                    func windowShouldClose(_ sender: NSWindow) -> Bool {
-                        switch virtualMachine.state {
-                        case .stopped, .stopping:
-                            return true
-                        default:
-                            vmQueue.async {
-                                do {
-                                    try self.virtualMachine.requestStop()
-                                } catch {
-                                    print("Failed to request stop via close button: \(error.localizedDescription)")
-                                }
-                            }
-                            return false
-                        }
-                    }
-
-                    func windowWillClose(_ notification: Notification) {
-                        vmView.virtualMachine = nil
-                        NSApplication.shared.stop(nil)
-                    }
-                }
-
-                let windowDelegate = VMWindowDelegate(vmQueue: vmQueue, virtualMachine: virtualMachine, vmView: vmView)
-                window.delegate = windowDelegate
-                objc_setAssociatedObject(window, &windowDelegateAssociationKey, windowDelegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-
-                window.center()
-                window.makeKeyAndOrderFront(nil)
-                app.activate(ignoringOtherApps: true)
-            }
-            NSApplication.shared.run()
-        }
-
-        cleanupAndExit(0, clearSuspendState: true)
-    }
-
-    public func resumeVM(name: String, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> Never {
-        try resumeVM(bundleURL: bundleURL(for: name), headless: headless, runtimeSharedFolder: runtimeSharedFolder)
-    }
-
     /// Discards the suspended state of a VM, allowing it to be started fresh.
     public func discardSuspend(bundleURL: URL) throws {
         let layout = try layoutForExistingBundle(at: bundleURL)
@@ -1358,6 +1036,145 @@ public final class VMController {
 
     public func discardSuspend(name: String) throws {
         try discardSuspend(bundleURL: bundleURL(for: name))
+    }
+
+    // MARK: - CLI Start/Resume (blocking)
+
+    /// Start a VM from the CLI. Blocks until the VM terminates.
+    public func startVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
+        let session = try makeWindowlessSession(bundleURL: bundleURL, runtimeSharedFolder: runtimeSharedFolder)
+        let vmName = displayName(for: bundleURL)
+
+        if session.wasSuspended {
+            print("VM '\(vmName)' has a saved suspend state. Use 'vmctl resume' to restore it, or 'vmctl discard-suspend' to discard it.")
+            throw VMError.message("VM '\(vmName)' is suspended.")
+        }
+
+        let group = DispatchGroup()
+        group.enter()
+        var vmError: Error?
+
+        session.terminationHandler = { result in
+            if case .failure(let error) = result {
+                vmError = error
+            }
+            group.leave()
+        }
+
+        // Install signal handler for graceful shutdown
+        let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        signal(SIGINT, SIG_IGN)
+        signalSource.setEventHandler {
+            print("\nStopping VM '\(vmName)'...")
+            session.requestStop()
+        }
+        signalSource.resume()
+
+        print("Starting VM '\(vmName)'...")
+        session.start { result in
+            switch result {
+            case .success:
+                print("VM '\(vmName)' is running. Press Ctrl-C to stop.")
+            case .failure(let error):
+                vmError = error
+                group.leave()
+            }
+        }
+
+        group.wait()
+        signalSource.cancel()
+
+        if let error = vmError {
+            throw error
+        }
+        print("VM '\(vmName)' stopped.")
+    }
+
+    /// Resume a suspended VM from the CLI. Blocks until the VM terminates.
+    public func resumeVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
+        let session = try makeWindowlessSession(bundleURL: bundleURL, runtimeSharedFolder: runtimeSharedFolder)
+        let vmName = displayName(for: bundleURL)
+
+        guard session.wasSuspended else {
+            print("VM '\(vmName)' is not suspended. Using 'start' instead.")
+            // Fall through to start
+            let group = DispatchGroup()
+            group.enter()
+            var vmError: Error?
+
+            session.terminationHandler = { result in
+                if case .failure(let error) = result {
+                    vmError = error
+                }
+                group.leave()
+            }
+
+            let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+            signal(SIGINT, SIG_IGN)
+            signalSource.setEventHandler {
+                print("\nStopping VM '\(vmName)'...")
+                session.requestStop()
+            }
+            signalSource.resume()
+
+            print("Starting VM '\(vmName)'...")
+            session.start { result in
+                switch result {
+                case .success:
+                    print("VM '\(vmName)' is running. Press Ctrl-C to stop.")
+                case .failure(let error):
+                    vmError = error
+                    group.leave()
+                }
+            }
+
+            group.wait()
+            signalSource.cancel()
+
+            if let error = vmError {
+                throw error
+            }
+            print("VM '\(vmName)' stopped.")
+            return
+        }
+
+        let group = DispatchGroup()
+        group.enter()
+        var vmError: Error?
+
+        session.terminationHandler = { result in
+            if case .failure(let error) = result {
+                vmError = error
+            }
+            group.leave()
+        }
+
+        let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        signal(SIGINT, SIG_IGN)
+        signalSource.setEventHandler {
+            print("\nStopping VM '\(vmName)'...")
+            session.requestStop()
+        }
+        signalSource.resume()
+
+        print("Resuming VM '\(vmName)'...")
+        session.resume { result in
+            switch result {
+            case .success:
+                print("VM '\(vmName)' resumed. Press Ctrl-C to stop.")
+            case .failure(let error):
+                vmError = error
+                group.leave()
+            }
+        }
+
+        group.wait()
+        signalSource.cancel()
+
+        if let error = vmError {
+            throw error
+        }
+        print("VM '\(vmName)' stopped.")
     }
 
     // MARK: - Embedded Session Support
@@ -1434,34 +1251,5 @@ public final class VMController {
             removeVMLock(at: layout.pidFileURL)
         }
         return false
-    }
-}
-
-// MARK: - Signal Trap Helper
-
-public final class SignalTrap {
-    /// Wrap Darwin signal handling with GCD so we can hook Ctrl+C cleanly from Swift.
-    public static let shared = SignalTrap()
-    public var onSignal: ((Int32) -> Void)?
-    private var sources: [DispatchSourceSignal] = []
-    private let accessQueue = DispatchQueue(label: "vmctl.signaltrap")
-
-    public func register(signals: [Int32]) {
-        accessQueue.sync {
-            for source in sources {
-                source.cancel()
-            }
-            sources.removeAll()
-
-            for sig in signals {
-                Darwin.signal(sig, SIG_IGN)
-                let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-                source.setEventHandler { [weak self] in
-                    self?.onSignal?(sig)
-                }
-                source.resume()
-                sources.append(source)
-            }
-        }
     }
 }

@@ -181,6 +181,382 @@ public final class GhostClient: GhostClientProtocol {
         }
     }
 
+    // MARK: - App Management
+
+    /// List running GUI apps in the guest
+    public func listApps() async throws -> AppListResponse {
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/apps", body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return try JSONDecoder().decode(AppListResponse.self, from: body)
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Launch an app by bundle identifier in the guest
+    public func launchApp(bundleId: String) async throws {
+        let body = try JSONEncoder().encode(["bundleId": bundleId])
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/launch", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Activate (bring to front) an app in the guest
+    public func activateApp(bundleId: String) async throws {
+        let body = try JSONEncoder().encode(["bundleId": bundleId])
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/activate", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Quit an app in the guest
+    public func quitApp(bundleId: String) async throws {
+        let body = try JSONEncoder().encode(["bundleId": bundleId])
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/quit", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - File System
+
+    /// List directory contents in the guest
+    public func listDirectory(path: String) async throws -> FSListResponse {
+        let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/fs?path=\(encodedPath)", body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return try JSONDecoder().decode(FSListResponse.self, from: body)
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Create a directory in the guest
+    public func mkdir(path: String) async throws {
+        let body = try JSONEncoder().encode(["path": path])
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/mkdir", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Delete a file or directory in the guest
+    public func deleteFile(path: String) async throws {
+        let body = try JSONEncoder().encode(["path": path])
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/delete", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Move/rename a file or directory in the guest
+    public func moveFile(from: String, to: String) async throws {
+        let body = try JSONEncoder().encode(["from": from, "to": to])
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/move", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Accessibility
+
+    /// Build a path with optional target query param
+    private func a11yPath(_ base: String, depth: Int? = nil, target: AXTarget = .front) -> String {
+        var parts: [String] = []
+        if let depth = depth { parts.append("depth=\(depth)") }
+        if case .front = target { /* omit for backward compat */ } else {
+            let encoded = target.queryValue.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? target.queryValue
+            parts.append("target=\(encoded)")
+        }
+        if parts.isEmpty { return base }
+        return base + "?" + parts.joined(separator: "&")
+    }
+
+    /// Get the accessibility tree of a single target app in the guest
+    public func getAccessibilityTree(depth: Int = 5, target: AXTarget = .front) async throws -> AXTreeResponse {
+        if let vm = virtualMachine {
+            let path = a11yPath("/api/v1/accessibility", depth: depth, target: target)
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw guestError(body, statusCode: statusCode)
+            }
+            return try JSONDecoder().decode(AXTreeResponse.self, from: body)
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Get accessibility trees for a multi-target query (--all, --visible)
+    public func getAccessibilityTrees(depth: Int = 5, target: AXTarget = .front) async throws -> [AXTreeResponse] {
+        if let vm = virtualMachine {
+            let path = a11yPath("/api/v1/accessibility", depth: depth, target: target)
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw guestError(body, statusCode: statusCode)
+            }
+            if target.isMulti {
+                return try JSONDecoder().decode([AXTreeResponse].self, from: body)
+            } else {
+                let single = try JSONDecoder().decode(AXTreeResponse.self, from: body)
+                return [single]
+            }
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Accessibility Actions
+
+    /// Extract error message from a guest JSON response body, or fall back to status code
+    private func guestError(_ respBody: Data?, statusCode: Int) -> GhostClientError {
+        if let respBody = respBody,
+           let json = try? JSONSerialization.jsonObject(with: respBody) as? [String: Any],
+           let msg = json["error"] as? String {
+            return .guestError(msg)
+        }
+        return .invalidResponse(statusCode)
+    }
+
+    /// Perform an action on an element in the guest (AXPress, etc.)
+    public func performAccessibilityAction(label: String? = nil, role: String? = nil, action: String = "AXPress", target: AXTarget = .front, wait: Bool = false) async throws {
+        var payload: [String: Any] = ["action": action]
+        if let label = label { payload["label"] = label }
+        if let role = role { payload["role"] = role }
+        if wait { payload["wait"] = true }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        if let vm = virtualMachine {
+            let path = a11yPath("/api/v1/accessibility/action", target: target)
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: path, body: body, contentType: "application/json")
+            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw guestError(respBody, statusCode: statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Trigger a menu item by path (e.g. ["File", "New Window"])
+    public func triggerMenuItem(path: [String], target: AXTarget = .front, wait: Bool = false) async throws {
+        var payload: [String: Any] = ["path": path]
+        if wait { payload["wait"] = true }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        if let vm = virtualMachine {
+            let urlPath = a11yPath("/api/v1/accessibility/menu", target: target)
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: urlPath, body: body, contentType: "application/json")
+            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw guestError(respBody, statusCode: statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Set the value of an element (or focused element if no label/role)
+    public func setAccessibilityValue(_ value: String, label: String? = nil, role: String? = nil, target: AXTarget = .front) async throws {
+        var payload: [String: Any] = ["value": value]
+        if let label = label { payload["label"] = label }
+        if let role = role { payload["role"] = role }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        if let vm = virtualMachine {
+            let path = a11yPath("/api/v1/accessibility/type", target: target)
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: path, body: body, contentType: "application/json")
+            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw guestError(respBody, statusCode: statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Get info about the currently focused UI element
+    public func getFocusedElement(target: AXTarget = .front) async throws -> [String: Any] {
+        if let vm = virtualMachine {
+            let path = a11yPath("/api/v1/accessibility/focused", target: target)
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return (try? JSONSerialization.jsonObject(with: body) as? [String: Any]) ?? [:]
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Pointer
+
+    /// Send a pointer/mouse event to the guest
+    @discardableResult
+    public func sendPointerEvent(action: String, x: Double?, y: Double?, button: String?, label: String?, endX: Double?, endY: Double?, deltaX: Double? = nil, deltaY: Double? = nil, wait: Bool = false) async throws -> Data? {
+        var payload: [String: Any] = ["action": action]
+        if let x = x { payload["x"] = x }
+        if let y = y { payload["y"] = y }
+        if let button = button { payload["button"] = button }
+        if let label = label { payload["label"] = label }
+        if let endX = endX { payload["endX"] = endX }
+        if let endY = endY { payload["endY"] = endY }
+        if let deltaX = deltaX { payload["deltaX"] = deltaX }
+        if let deltaY = deltaY { payload["deltaY"] = deltaY }
+        if wait { payload["wait"] = true }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/pointer", body: body, contentType: "application/json")
+            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else {
+                if statusCode == 403 {
+                    throw GhostClientError.connectionFailed("Accessibility permission required in guest")
+                }
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return respBody
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Keyboard
+
+    /// Send keyboard input to the guest
+    public func sendKeyboardInput(text: String?, keys: [String]?, modifiers: [String]?, rate: Int?, wait: Bool = false) async throws {
+        var payload: [String: Any] = [:]
+        if let text = text { payload["text"] = text }
+        if let keys = keys { payload["keys"] = keys }
+        if let modifiers = modifiers { payload["modifiers"] = modifiers }
+        if let rate = rate { payload["rate"] = rate }
+        if wait { payload["wait"] = true }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/input", body: body, contentType: "application/json")
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else {
+                if statusCode == 403 {
+                    throw GhostClientError.connectionFailed("Accessibility permission required in guest")
+                }
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Shell Exec
+
+    /// Execute a command in the guest and return stdout/stderr/exitCode
+    public func exec(command: String, args: [String]? = nil, timeout: Int? = nil) async throws -> ExecResponse {
+        var payload: [String: Any] = ["command": command]
+        if let args = args { payload["args"] = args }
+        if let timeout = timeout { payload["timeout"] = timeout }
+        let body = try JSONSerialization.data(withJSONObject: payload)
+
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/exec", body: body, contentType: "application/json")
+            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let respBody = respBody else {
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return try JSONDecoder().decode(ExecResponse.self, from: respBody)
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Elements (a11y overlay + JSON)
+
+    /// Get interactive elements from guest (shows overlays in guest, returns element JSON)
+    public func getElements() async throws -> Data {
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/elements", body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw guestError(body, statusCode: statusCode)
+            }
+            return body
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Show wait indicator overlay in guest
+    public func showWaitIndicator() async throws {
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/overlay/wait-show", body: nil)
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Hide wait indicator overlay in guest
+    public func hideWaitIndicator() async throws {
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/overlay/wait-hide", body: nil)
+            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
+            return
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Get frontmost app bundle ID from guest
+    public func getFrontmostApp() async throws -> String? {
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/apps/frontmost", body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            guard let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                  let bundleId = json["bundleId"] as? String else {
+                return nil
+            }
+            return bundleId.isEmpty ? nil : bundleId
+        }
+        throw GhostClientError.notConnected
+    }
+
+    // MARK: - Permissions
+
+    /// Check or prompt for accessibility permission in the guest
+    /// - Parameter prompt: if true, shows macOS permission dialog in the guest
+    /// - Returns: JSON data with permission status
+    public func checkPermissions(prompt: Bool = false) async throws -> Data {
+        let method = prompt ? "POST" : "GET"
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(vm: vm, method: method, path: "/api/v1/permissions", body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw GhostClientError.invalidResponse(statusCode)
+            }
+            return body
+        }
+        throw GhostClientError.notConnected
+    }
+
     // MARK: - Log Streaming
 
     /// Fetch and clear buffered logs from guest

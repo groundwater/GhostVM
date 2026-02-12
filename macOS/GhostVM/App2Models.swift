@@ -156,6 +156,43 @@ final class App2VMStore: ObservableObject {
         persistKnownVMs()
     }
 
+    func renameVM(_ vm: App2VM, to newName: String) -> String? {
+        guard let index = vms.firstIndex(where: { $0.id == vm.id }) else {
+            return "VM not found."
+        }
+        do {
+            let newURL = try controller.renameVM(bundleURL: vm.bundleURL, newName: newName)
+            vms[index] = App2VM(
+                id: vm.id,
+                name: controller.displayName(for: newURL),
+                bundlePath: newURL.path,
+                osVersion: vm.osVersion,
+                status: vm.status,
+                installed: vm.installed
+            )
+            persistKnownVMs()
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
+    func cloneVM(_ vm: App2VM, newName: String) -> String? {
+        do {
+            let newURL = try controller.cloneVM(bundleURL: vm.bundleURL, newName: newName)
+            if let newVM = try? loadVM(from: newURL) {
+                var updated = vms
+                updated.append(newVM)
+                updated.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                vms = updated
+                persistKnownVMs()
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     func deleteVM(_ vm: App2VM) {
         let url = vm.bundleURL
         let lowercasedStatus = vm.status.lowercased()

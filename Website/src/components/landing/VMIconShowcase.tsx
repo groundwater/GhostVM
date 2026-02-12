@@ -117,7 +117,8 @@ export default function VMIconShowcase() {
         <p className="text-gray-600 dark:text-gray-400 mb-10 max-w-xl mx-auto">
           Each running workspace appears in the macOS Dock as its own app.
           Pick from presets or use the toolbar icon chooser to switch between
-          Generic, App, Stack, and Custom modes on the fly.
+          Generic, Glass, App, and Stack modes on the fly. Glass mode renders
+          any app icon with a frosted overlay.
         </p>
 
         {/* Faux Desktop */}

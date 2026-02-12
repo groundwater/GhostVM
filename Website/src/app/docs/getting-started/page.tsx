@@ -91,6 +91,10 @@ vmctl start ~/VMs/sandbox.GhostVM`}
           Set up <Link href="/docs/services">host-guest services</Link> like clipboard
           sync and file transfer
         </li>
+        <li>
+          Let AI agents control VMs with the{" "}
+          <Link href="/docs/mcp">MCP Server</Link>
+        </li>
       </ul>
 
       <PrevNextNav currentHref="/docs/getting-started" />

@@ -13,6 +13,12 @@ const terminalLines = [
   { prompt: false, text: "" },
   { prompt: true, text: "vmctl snapshot ~/VMs/dev.GhostVM create clean-state" },
   { prompt: false, text: 'Snapshot "clean-state" created.' },
+  { prompt: false, text: "" },
+  { prompt: true, text: "vmctl clone ~/VMs/dev.GhostVM staging" },
+  { prompt: false, text: "Cloned to ~/VMs/staging.GhostVM (APFS copy-on-write)" },
+  { prompt: false, text: "" },
+  { prompt: true, text: "vmctl mcp ~/VMs/staging.GhostVM" },
+  { prompt: false, text: "MCP server ready (stdin/stdout)" },
 ];
 
 const bullets = [
@@ -35,6 +41,14 @@ const bullets = [
   {
     title: "CI/CD ready",
     description: "Provision isolated workspaces in build pipelines and testing workflows.",
+  },
+  {
+    title: "Instant Clone",
+    description: "Duplicate a workspace instantly with APFS copy-on-write. Fresh identity, minimal disk usage.",
+  },
+  {
+    title: "MCP Server",
+    description: "Expose tools to AI agents via JSON-RPC. Clipboard, files, and lifecycle — all programmatic.",
   },
 ];
 

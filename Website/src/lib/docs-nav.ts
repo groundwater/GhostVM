@@ -14,6 +14,7 @@ export const docsNav: NavItem[] = [
       { title: "macOS", href: "/docs/creating-vms/macos" },
     ],
   },
+  { title: "VM Clone", href: "/docs/vm-clone" },
   { title: "CLI Reference", href: "/docs/cli" },
   { title: "VM Bundles", href: "/docs/vm-bundles" },
   { title: "Snapshots", href: "/docs/snapshots" },
@@ -28,6 +29,8 @@ export const docsNav: NavItem[] = [
     ],
   },
   { title: "GhostTools", href: "/docs/ghosttools" },
+  { title: "MCP Server", href: "/docs/mcp" },
+  { title: "Host API", href: "/docs/host-api" },
   { title: "Architecture", href: "/docs/architecture" },
 ];
 

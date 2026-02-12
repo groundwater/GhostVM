@@ -45,6 +45,8 @@ targets:
     platform: macOS
     sources:
       - path: GhostVM/vmctl
+        excludes:
+          - "CEditLine"
     dependencies:
       - target: GhostVMKit
         link: true
@@ -58,6 +60,9 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: 3FGZQE8AW3
         ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhostVM/vmctl/CEditLine"
+        OTHER_LDFLAGS:
+          - "-ledit"
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
           - "@executable_path"

@@ -63,6 +63,12 @@ struct CLI {
             } catch {
                 fail(error)
             }
+        case "remote":
+            do {
+                try RemoteCommand.run(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
         default:
             print("Unknown command '\(arguments[0])'.")
             showHelp(exitCode: 1)
@@ -292,6 +298,12 @@ Commands:
   discard-suspend <bundle-path>
   snapshot <bundle-path> list
   snapshot <bundle-path> <create|revert|delete> <snapshot-name>
+  remote --name <VMName> <subcommand> [args...]
+  remote --socket <path> <subcommand> [args...]
+
+Remote subcommands (use 'vmctl remote --help' for details):
+  health, screenshot, pointer, input, launch, activate,
+  a11y, exec, clipboard, apps, interactive
 
 Examples:
   vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
@@ -307,6 +319,11 @@ Examples:
   vmctl snapshot ~/VMs/sandbox.GhostVM create clean
   vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
   vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
+  vmctl remote --name MyVM health
+  vmctl remote --name MyVM screenshot --elements -o /tmp/screen.png
+  vmctl remote --name MyVM pointer click --element 5
+  vmctl remote --name MyVM input type "hello world"
+  vmctl remote --name MyVM interactive
 
 Notes:
   - After installation, enable Remote Login (SSH) inside the guest for convenient headless access.

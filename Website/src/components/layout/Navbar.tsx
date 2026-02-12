@@ -25,6 +25,12 @@ export default function Navbar() {
               Docs
             </Link>
             <Link
+              href="/blog"
+              className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+            >
+              Blog
+            </Link>
+            <Link
               href="/download"
               className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
             >
@@ -63,6 +69,13 @@ export default function Navbar() {
             onClick={() => setMobileOpen(false)}
           >
             Docs
+          </Link>
+          <Link
+            href="/blog"
+            className="block py-2 text-sm"
+            onClick={() => setMobileOpen(false)}
+          >
+            Blog
           </Link>
           <Link
             href="/download"

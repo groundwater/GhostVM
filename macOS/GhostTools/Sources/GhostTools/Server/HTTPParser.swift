@@ -21,6 +21,7 @@ enum HTTPStatus: Int {
     case forbidden = 403
     case notFound = 404
     case methodNotAllowed = 405
+    case requestTimeout = 408
     case internalServerError = 500
 
     var reasonPhrase: String {
@@ -33,6 +34,7 @@ enum HTTPStatus: Int {
         case .forbidden: return "Forbidden"
         case .notFound: return "Not Found"
         case .methodNotAllowed: return "Method Not Allowed"
+        case .requestTimeout: return "Request Timeout"
         case .internalServerError: return "Internal Server Error"
         }
     }
@@ -78,7 +80,8 @@ struct HTTPResponse {
 
     /// Creates an error response
     static func error(_ status: HTTPStatus, message: String) -> HTTPResponse {
-        let body = Data(#"{"error":"\#(message)"}"#.utf8)
+        let payload: [String: String] = ["error": message]
+        let body = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data(#"{"error":"unknown"}"#.utf8)
         return json(body, status: status)
     }
 }

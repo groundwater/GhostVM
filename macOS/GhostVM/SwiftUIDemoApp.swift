@@ -73,6 +73,7 @@ struct GhostVMSwiftUIApp: App {
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
         .defaultSize(width: 1280, height: 800)
+        .windowToolbarStyle(.unifiedCompact)
     }
 }
 
@@ -212,6 +213,12 @@ struct VMListDemoView: View {
     @State private var vmToEdit: App2VM?
     // Install VM state
     @State private var vmToInstall: App2VM?
+    // Rename state
+    @State private var renamingVMID: App2VM.ID?
+    @State private var renameErrorMessage: String?
+    // Clone state
+    @State private var vmToClone: App2VM?
+    @State private var cloneErrorMessage: String?
 
     // Watermark
     @AppStorage("showListWatermark") private var showListWatermark: Bool = true
@@ -303,10 +310,33 @@ struct VMListDemoView: View {
                             vmToEdit = vm
                         },
                         requestTerminate: {
-                            App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                            let lowerStatus = vm.status.lowercased()
+                            if lowerStatus.contains("suspended") {
+                                let controller = VMController()
+                                try? controller.discardSuspend(bundleURL: vm.bundleURL)
+                                store.reloadVM(at: vm.bundleURL)
+                            } else {
+                                App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                            }
                         },
                         requestInstall: {
                             vmToInstall = vm
+                        },
+                        isRenaming: renamingVMID == vm.id,
+                        requestRename: {
+                            renamingVMID = vm.id
+                        },
+                        commitRename: { newName in
+                            if let error = store.renameVM(vm, to: newName) {
+                                renameErrorMessage = error
+                            }
+                            renamingVMID = nil
+                        },
+                        cancelRename: {
+                            renamingVMID = nil
+                        },
+                        requestClone: {
+                            vmToClone = vm
                         }
                     )
                     .tag(vm.id)
@@ -336,10 +366,23 @@ struct VMListDemoView: View {
                                 vmToEdit = vm
                             },
                             requestTerminate: {
-                                App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                                let lowerStatus = vm.status.lowercased()
+                                if lowerStatus.contains("suspended") {
+                                    let controller = VMController()
+                                    try? controller.discardSuspend(bundleURL: vm.bundleURL)
+                                    store.reloadVM(at: vm.bundleURL)
+                                } else {
+                                    App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                                }
                             },
                             requestInstall: {
                                 vmToInstall = vm
+                            },
+                            requestRename: {
+                                renamingVMID = vm.id
+                            },
+                            requestClone: {
+                                vmToClone = vm
                             }
                         )
                     }
@@ -408,7 +451,6 @@ struct VMListDemoView: View {
                 get: { vmToEdit != nil },
                 set: { if !$0 { vmToEdit = nil } }
             ))
-            .presentationSizing(.fitted)
         }
         // Install VM sheet
         .sheet(item: $vmToInstall) { vm in
@@ -454,6 +496,40 @@ struct VMListDemoView: View {
         } message: {
             if let (vm, name) = snapshotToDelete {
                 Text("Snapshot \"\(name)\" will be permanently deleted from \"\(vm.name)\".")
+            }
+        }
+        // Rename error
+        .alert("Unable to Rename", isPresented: Binding(
+            get: { renameErrorMessage != nil },
+            set: { if !$0 { renameErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {
+                renameErrorMessage = nil
+            }
+        } message: {
+            if let msg = renameErrorMessage {
+                Text(msg)
+            }
+        }
+        // Clone VM sheet
+        .sheet(item: $vmToClone) { vm in
+            CloneVMView(vm: vm, isPresented: Binding(
+                get: { vmToClone != nil },
+                set: { if !$0 { vmToClone = nil } }
+            ))
+            .environmentObject(store)
+        }
+        // Clone error
+        .alert("Unable to Clone", isPresented: Binding(
+            get: { cloneErrorMessage != nil },
+            set: { if !$0 { cloneErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {
+                cloneErrorMessage = nil
+            }
+        } message: {
+            if let msg = cloneErrorMessage {
+                Text(msg)
             }
         }
     }
@@ -750,6 +826,14 @@ struct VMRowView: View {
     let requestEdit: () -> Void
     let requestTerminate: () -> Void
     let requestInstall: () -> Void
+    let isRenaming: Bool
+    let requestRename: () -> Void
+    let commitRename: (String) -> Void
+    let cancelRename: () -> Void
+    let requestClone: () -> Void
+
+    @State private var editingName: String = ""
+    @FocusState private var isNameFieldFocused: Bool
 
     private var vmIcon: NSImage? {
         let iconURL = vm.bundleURL.appendingPathComponent("icon.png")
@@ -776,8 +860,35 @@ struct VMRowView: View {
             .frame(width: 64, height: 64)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(vm.name)
-                    .font(.headline)
+                if isRenaming {
+                    TextField("VM Name", text: $editingName)
+                        .font(.headline)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($isNameFieldFocused)
+                        .onAppear {
+                            editingName = vm.name
+                            isNameFieldFocused = true
+                        }
+                        .onSubmit {
+                            let trimmed = editingName.trimmingCharacters(in: .whitespaces)
+                            if !trimmed.isEmpty && trimmed != vm.name {
+                                commitRename(trimmed)
+                            } else {
+                                cancelRename()
+                            }
+                        }
+                        .onExitCommand {
+                            cancelRename()
+                        }
+                        .onChange(of: isNameFieldFocused) { focused in
+                            if !focused {
+                                cancelRename()
+                            }
+                        }
+                } else {
+                    Text(vm.name)
+                        .font(.headline)
+                }
                 Text(vm.osVersion)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -824,7 +935,9 @@ struct VMRowView: View {
                         requestDeleteSnapshot: requestDeleteSnapshot,
                         requestEdit: requestEdit,
                         requestTerminate: requestTerminate,
-                        requestInstall: requestInstall
+                        requestInstall: requestInstall,
+                        requestRename: requestRename,
+                        requestClone: requestClone
                     )
                 } label: {
                     Image(systemName: "ellipsis")
@@ -923,7 +1036,120 @@ struct CreateSnapshotView: View {
     }
 }
 
+// MARK: - Clone VM View
+
+@available(macOS 13.0, *)
+struct CloneVMView: View {
+    let vm: App2VM
+    @Binding var isPresented: Bool
+    @EnvironmentObject private var store: App2VMStore
+
+    @State private var cloneName: String = ""
+    @State private var isCloning: Bool = false
+    @State private var errorMessage: String?
+    @State private var isShowingError: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Clone \"\(vm.name)\"")
+                .font(.headline)
+
+            TextField("Clone name", text: $cloneName)
+                .textFieldStyle(.roundedBorder)
+
+            Text("Uses APFS copy-on-write — the clone is created near-instantly and shares disk blocks with the original until they diverge.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    isPresented = false
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(isCloning)
+
+                Button("Clone") {
+                    performClone()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(cloneName.trimmingCharacters(in: .whitespaces).isEmpty || isCloning)
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 400)
+        .onAppear {
+            cloneName = "\(vm.name) Clone"
+        }
+        .alert("Unable to Clone", isPresented: $isShowingError) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(errorMessage ?? "An unknown error occurred.")
+        }
+    }
+
+    private func performClone() {
+        let trimmedName = cloneName.trimmingCharacters(in: .whitespaces)
+        guard !trimmedName.isEmpty else { return }
+
+        isCloning = true
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = store.cloneVM(vm, newName: trimmedName)
+            DispatchQueue.main.async {
+                self.isCloning = false
+                if let error = result {
+                    self.errorMessage = error
+                    self.isShowingError = true
+                } else {
+                    self.isPresented = false
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Edit VM View
+
+private struct SheetContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct SheetSizeConfigurator: NSViewRepresentable {
+    let contentHeight: CGFloat
+
+    final class Coordinator {
+        var lastAppliedHeight: CGFloat = 0
+        var isConfigured = false
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSView { NSView(frame: .zero) }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        let coord = context.coordinator
+        guard contentHeight > 0,
+              abs(contentHeight - coord.lastAppliedHeight) > 1 else { return }
+        coord.lastAppliedHeight = contentHeight
+
+        DispatchQueue.main.async {
+            guard let window = nsView.window else { return }
+
+            if !coord.isConfigured {
+                window.styleMask.insert(.resizable)
+                window.contentMinSize = NSSize(width: 620, height: 300)
+                coord.isConfigured = true
+            }
+
+            let screenHeight = window.screen?.visibleFrame.height ?? 800
+            let targetHeight = min(contentHeight, screenHeight * 0.9)
+            window.setContentSize(NSSize(width: window.frame.width, height: targetHeight))
+        }
+    }
+}
 
 @available(macOS 13.0, *)
 struct EditVMView: View {
@@ -941,6 +1167,7 @@ struct EditVMView: View {
     @State private var selectedPresetIcon: String?
     @State private var isDynamicIconMode: Bool = false   // "stack" mode
     @State private var isAppIconMode: Bool = false       // "app" mode
+    @State private var isGlassIconMode: Bool = false     // "glass" mode
     @State private var showIconPopover: Bool = false
 
     private static let allPresetIcons: [(name: String, resource: String)] = [
@@ -966,6 +1193,7 @@ struct EditVMView: View {
     @State private var errorMessage: String?
     @State private var isShowingError: Bool = false
     @State private var isLoading: Bool = true
+    @State private var scrollContentHeight: CGFloat = 0
 
     private let labelWidth: CGFloat = 120
 
@@ -1028,6 +1256,11 @@ struct EditVMView: View {
                     }
                 }
                 .padding(EdgeInsets(top: 18, leading: 24, bottom: 8, trailing: 24))
+                .background(
+                    GeometryReader { geo in
+                        Color.clear.preference(key: SheetContentHeightKey.self, value: geo.size.height)
+                    }
+                )
             }
 
             HStack {
@@ -1046,7 +1279,13 @@ struct EditVMView: View {
             }
             .padding(EdgeInsets(top: 8, leading: 24, bottom: 18, trailing: 24))
         }
-        .frame(minWidth: 620, minHeight: 500, idealHeight: 780, maxHeight: 1200)
+        .frame(minWidth: 620)
+        .background(SheetSizeConfigurator(contentHeight: scrollContentHeight + 52))
+        .onPreferenceChange(SheetContentHeightKey.self) { height in
+            if !isLoading {
+                scrollContentHeight = height
+            }
+        }
         .onAppear {
             loadCurrentSettings()
         }
@@ -1066,7 +1305,7 @@ struct EditVMView: View {
 
             HStack(spacing: 8) {
                 // "Generic" tile
-                iconTile(selected: customIcon == nil && selectedPresetIcon == nil && !isDynamicIconMode && !isAppIconMode) {
+                iconTile(selected: customIcon == nil && selectedPresetIcon == nil && !isDynamicIconMode && !isAppIconMode && !isGlassIconMode) {
                     Image(systemName: "desktopcomputer")
                         .font(.system(size: 32))
                         .foregroundStyle(.secondary)
@@ -1075,8 +1314,24 @@ struct EditVMView: View {
                     selectedPresetIcon = nil
                     isDynamicIconMode = false
                     isAppIconMode = false
+                    isGlassIconMode = false
                     customIconChanged = true
                     iconRemoved = true
+                }
+
+                // "Glass" tile — app icon behind glass overlay
+                iconTile(selected: isGlassIconMode) {
+                    Image(systemName: "rectangle.on.rectangle.square")
+                        .font(.system(size: 32))
+                        .foregroundStyle(.secondary)
+                } action: {
+                    isGlassIconMode = true
+                    isAppIconMode = false
+                    isDynamicIconMode = false
+                    customIcon = nil
+                    selectedPresetIcon = nil
+                    customIconChanged = false
+                    iconRemoved = false
                 }
 
                 // "Application" tile — shows exact foreground app icon
@@ -1087,6 +1342,7 @@ struct EditVMView: View {
                 } action: {
                     isAppIconMode = true
                     isDynamicIconMode = false
+                    isGlassIconMode = false
                     customIcon = nil
                     selectedPresetIcon = nil
                     customIconChanged = false
@@ -1101,6 +1357,7 @@ struct EditVMView: View {
                 } action: {
                     isDynamicIconMode = true
                     isAppIconMode = false
+                    isGlassIconMode = false
                     customIcon = nil
                     selectedPresetIcon = nil
                     customIconChanged = false
@@ -1108,7 +1365,7 @@ struct EditVMView: View {
                 }
 
                 // "Custom" tile — shows chosen icon or plus symbol
-                let isCustomSelected = customIcon != nil && !isDynamicIconMode && !isAppIconMode
+                let isCustomSelected = customIcon != nil && !isDynamicIconMode && !isAppIconMode && !isGlassIconMode
                 iconTile(selected: isCustomSelected, showBackground: customIcon == nil) {
                     if let icon = customIcon, selectedPresetIcon == nil {
                         Image(nsImage: icon)
@@ -1160,6 +1417,7 @@ struct EditVMView: View {
                         selectedPresetIcon = preset.resource
                         isDynamicIconMode = false
                         isAppIconMode = false
+                        isGlassIconMode = false
                         customIconChanged = true
                         iconRemoved = false
                         showIconPopover = false
@@ -1265,6 +1523,7 @@ struct EditVMView: View {
                     // Load icon mode
                     self.isDynamicIconMode = config.iconMode == "stack"
                     self.isAppIconMode = config.iconMode == "app"
+                    self.isGlassIconMode = config.iconMode == "glass"
 
                     // Load custom icon
                     let layout = VMFileLayout(bundleURL: vm.bundleURL)
@@ -1315,13 +1574,15 @@ struct EditVMView: View {
                     storedConfig.iconMode = "stack"
                 } else if isAppIconMode {
                     storedConfig.iconMode = "app"
+                } else if isGlassIconMode {
+                    storedConfig.iconMode = "glass"
                 } else {
                     storedConfig.iconMode = nil
                 }
                 try store.save(storedConfig)
 
                 // Save or remove custom icon
-                if isDynamicIconMode || isAppIconMode {
+                if isDynamicIconMode || isAppIconMode || isGlassIconMode {
                     // Dynamic modes — don't touch icon.png
                 } else if customIconChanged {
                     if iconRemoved {
@@ -1364,6 +1625,7 @@ struct EditVMView: View {
             selectedPresetIcon = nil
             isDynamicIconMode = false
             isAppIconMode = false
+            isGlassIconMode = false
             customIconChanged = true
             iconRemoved = false
         }
@@ -1380,6 +1642,7 @@ struct EditVMView: View {
                         self.selectedPresetIcon = nil
                         self.isDynamicIconMode = false
                         self.isAppIconMode = false
+                        self.isGlassIconMode = false
                         self.customIconChanged = true
                         self.iconRemoved = false
                     } else if let data = item as? Data, let image = NSImage(data: data) {
@@ -1387,6 +1650,7 @@ struct EditVMView: View {
                         self.selectedPresetIcon = nil
                         self.isDynamicIconMode = false
                         self.isAppIconMode = false
+                        self.isGlassIconMode = false
                         self.customIconChanged = true
                         self.iconRemoved = false
                     }
@@ -1465,6 +1729,8 @@ struct VMContextMenu: View {
     let requestEdit: () -> Void
     let requestTerminate: () -> Void
     let requestInstall: () -> Void
+    let requestRename: () -> Void
+    let requestClone: () -> Void
     @EnvironmentObject private var store: App2VMStore
 
     init(
@@ -1477,7 +1743,9 @@ struct VMContextMenu: View {
         requestDeleteSnapshot: @escaping (String) -> Void,
         requestEdit: @escaping () -> Void = {},
         requestTerminate: @escaping () -> Void = {},
-        requestInstall: @escaping () -> Void = {}
+        requestInstall: @escaping () -> Void = {},
+        requestRename: @escaping () -> Void = {},
+        requestClone: @escaping () -> Void = {}
     ) {
         self.vm = vm
         self.play = play
@@ -1489,11 +1757,14 @@ struct VMContextMenu: View {
         self.requestEdit = requestEdit
         self.requestTerminate = requestTerminate
         self.requestInstall = requestInstall
+        self.requestRename = requestRename
+        self.requestClone = requestClone
     }
 
     var body: some View {
         let lowerStatus = vm.status.lowercased()
         let isRunning = lowerStatus.contains("running") || lowerStatus.contains("starting") || lowerStatus.contains("stopping")
+        let isSuspended = lowerStatus.contains("suspended")
 
         // Show Install for macOS VMs that need installation
         if vm.needsInstall {
@@ -1522,12 +1793,22 @@ struct VMContextMenu: View {
         Button("Terminate") {
             requestTerminate()
         }
-        .disabled(!isRunning)
+        .disabled(!isRunning && !isSuspended)
 
         Button("Edit Settings…") {
             requestEdit()
         }
         .disabled(isRunning)
+
+        Button("Rename…") {
+            requestRename()
+        }
+        .disabled(isRunning)
+
+        Button("Clone…") {
+            requestClone()
+        }
+        .disabled(isRunning || !vm.installed)
 
         Divider()
 

@@ -37,16 +37,20 @@ Options:
 
       <h2>Common Commands</h2>
 
+      <h3>clone</h3>
+      <p>
+        Duplicate a VM using APFS copy-on-write. The clone gets a fresh machine
+        identity and MAC address. Near-zero disk overhead.
+      </p>
+      <CodeBlock language="bash">{`vmctl clone <source-bundle> <new-name>`}</CodeBlock>
+
       <h3>start</h3>
       <p>Launch a VM.</p>
       <CodeBlock language="bash">
         {`vmctl start <bundle-path> [options]
 
 Options:
-  --headless             Run without GUI window
-  --shared-folder PATH   Host folder to share
-  --writable             Writable shared folder
-  --read-only            Read-only shared folder (default)`}
+  --recovery             Boot to Recovery mode`}
       </CodeBlock>
 
       <h3>stop</h3>
@@ -59,15 +63,7 @@ Options:
 
       <h3>resume</h3>
       <p>Resume from suspended state.</p>
-      <CodeBlock language="bash">
-        {`vmctl resume <bundle-path> [options]
-
-Options:
-  --headless             Run without GUI window
-  --shared-folder PATH   Host folder to share
-  --writable             Writable shared folder
-  --read-only            Read-only shared folder (default)`}
-      </CodeBlock>
+      <CodeBlock language="bash">{`vmctl resume <bundle-path>`}</CodeBlock>
 
       <h3>discard-suspend</h3>
       <p>Discard the suspended state so the VM boots fresh.</p>
@@ -82,6 +78,14 @@ vmctl snapshot <bundle-path> revert <name>
 vmctl snapshot <bundle-path> delete <name>`}
       </CodeBlock>
 
+      <h3>mcp</h3>
+      <p>
+        Start an MCP server for the given VM. Reads JSON-RPC from stdin,
+        writes responses to stdout. See the{" "}
+        <a href="/docs/mcp">MCP Server</a> docs for full details.
+      </p>
+      <CodeBlock language="bash">{`vmctl mcp <bundle-path>`}</CodeBlock>
+
       <h2>Examples</h2>
       <CodeBlock language="bash" title="Full macOS workflow">
         {`# Create and install a macOS VM
@@ -94,6 +98,15 @@ vmctl snapshot ~/VMs/dev.GhostVM create clean-state
 
 # Later: revert to clean state
 vmctl snapshot ~/VMs/dev.GhostVM revert clean-state`}
+      </CodeBlock>
+
+      <CodeBlock language="bash" title="Clone and automate">
+        {`# Clone an existing workspace
+vmctl clone ~/VMs/dev.GhostVM staging
+vmctl start ~/VMs/staging.GhostVM
+
+# Start an MCP server for AI agent control
+vmctl mcp ~/VMs/staging.GhostVM`}
       </CodeBlock>
       <PrevNextNav currentHref="/docs/cli" />
     </>

@@ -1,4 +1,5 @@
 import Hero from "@/components/landing/Hero";
+import MCPSection from "@/components/landing/MCPSection";
 import ScreenshotShowcase from "@/components/landing/ScreenshotShowcase";
 import AutomationSection from "@/components/landing/AutomationSection";
 import IntegrationSection from "@/components/landing/IntegrationSection";
@@ -13,10 +14,11 @@ export default function Home() {
       <Hero />
       <IntegrationSection />
       <ScreenshotShowcase />
-      <AutomationSection />
       <FeatureGrid />
       <SecuritySection />
       <VMIconShowcase />
+      <AutomationSection />
+      <MCPSection />
       <DownloadCTA />
     </>
   );
