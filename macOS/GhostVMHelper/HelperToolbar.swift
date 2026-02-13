@@ -343,6 +343,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Icon"
         item.paletteLabel = "Change Icon"
         item.toolTip = "Change VM icon"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: NSImage(systemSymbolName: "photo", accessibilityDescription: "Icon")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(iconChooserClicked))
         button.bezelStyle = .toolbar
@@ -358,6 +360,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Ports"
         item.paletteLabel = "Port Forwards"
         item.toolTip = "Manage port forwards"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: portForwardsIcon()!, target: self, action: #selector(portForwardsClicked))
         button.bezelStyle = .toolbar
@@ -376,7 +380,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.paletteLabel = "Shared Folders"
         item.toolTip = "Manage shared folders"
         item.image = NSImage(systemSymbolName: "folder.badge.gearshape", accessibilityDescription: "Shared Folders")?.withSymbolConfiguration(iconConfig)
-        item.showsIndicator = true
+        item.showsIndicator = false
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         sharedFoldersItem = item
         rebuildSharedFoldersMenu()
@@ -389,6 +395,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Clipboard"
         item.paletteLabel = "Clipboard Sync"
         item.toolTip = "Toggle clipboard sync"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Clipboard Sync")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(toggleClipboardSync))
         button.bezelStyle = .toolbar
@@ -406,6 +414,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Capture Inputs"
         item.paletteLabel = "Capture Inputs"
         item.toolTip = "Toggle input capture"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: NSImage(systemSymbolName: "cursorarrow.square.fill", accessibilityDescription: "Capture Inputs")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(toggleCaptureSystemKeys))
         button.bezelStyle = .toolbar
@@ -424,7 +434,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.paletteLabel = "Capture Commands"
         item.toolTip = "Command key capture settings"
         item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Capture Commands")?.withSymbolConfiguration(iconConfig)
-        item.showsIndicator = true
+        item.showsIndicator = false
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         captureCommandsItem = item
         rebuildCaptureCommandsMenu()
@@ -437,6 +449,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Files"
         item.paletteLabel = "Queued Files"
         item.toolTip = "Receive files from guest"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: NSImage(systemSymbolName: "arrow.down.doc", accessibilityDescription: "Receive Files")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(receiveQueuedFiles))
         button.bezelStyle = .toolbar
@@ -454,6 +468,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Shut Down"
         item.paletteLabel = "Shut Down"
         item.toolTip = "Shut down the guest OS gracefully"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: NSImage(systemSymbolName: "power", accessibilityDescription: "Shut Down")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(shutDownVM))
         button.bezelStyle = .toolbar
@@ -469,6 +485,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Terminate"
         item.paletteLabel = "Terminate"
         item.toolTip = "Force terminate VM immediately"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
         let button = NSButton(image: NSImage(systemSymbolName: "xmark.circle", accessibilityDescription: "Terminate")!.withSymbolConfiguration(iconConfig)!, target: self, action: #selector(terminateVM))
         button.bezelStyle = .toolbar

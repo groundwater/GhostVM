@@ -36,6 +36,37 @@ final class AccessibilityService {
         let message: String?
     }
 
+    /// Lightweight snapshot for detecting a11y tree changes
+    struct A11ySnapshot {
+        let elementCount: Int
+        let windowTitle: String?
+        let hasWebAreaWithChildren: Bool
+        let timestamp: Date
+
+        func hasLargeChangeTo(_ other: A11ySnapshot) -> Bool {
+            // Element count changed by 5+ OR
+            // Web area with children appeared OR
+            // Window title changed (different app/page)
+            let countDelta = abs(other.elementCount - self.elementCount)
+            return countDelta >= 5
+                || (other.hasWebAreaWithChildren && !self.hasWebAreaWithChildren)
+                || other.windowTitle != self.windowTitle
+        }
+
+        func hasAnyChangeTo(_ other: A11ySnapshot) -> Bool {
+            return other.elementCount != self.elementCount
+                || other.windowTitle != self.windowTitle
+                || other.hasWebAreaWithChildren != self.hasWebAreaWithChildren
+        }
+    }
+
+    /// Expected type of change after an action
+    enum ExpectChange {
+        case navigation  // Large change + stabilization (launch, navigate URL, etc.)
+        case update      // Any change (type text, click button)
+        case none        // No wait (queries, mouse move)
+    }
+
     /// Specifies which process(es) to target for accessibility queries/actions.
     enum AXTarget: Equatable {
         case front
@@ -107,19 +138,44 @@ final class AccessibilityService {
             }
             return apps.map { ($0.processIdentifier, $0) }
         case .visible:
-            guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-                return []
+            guard let frontApp = NSWorkspace.shared.frontmostApplication else {
+                throw AXServiceError.noFocusedApp
             }
+            let frontPID = frontApp.processIdentifier
+
+            guard let windowList = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+            ) as? [[String: Any]] else {
+                return [(frontPID, frontApp)]
+            }
+
             var seen = Set<pid_t>()
             var results: [(pid: pid_t, app: NSRunningApplication?)] = []
+            var foundFront = false
+
             for info in windowList {
-                guard let layer = info[kCGWindowLayer as String] as? Int, layer == 0,
-                      let pid = info[kCGWindowOwnerPID as String] as? pid_t else { continue }
+                guard let pid = info[kCGWindowOwnerPID as String] as? pid_t else { continue }
+
+                let layer = info[kCGWindowLayer as String] as? Int ?? 0
+                // Skip high-layer system chrome (menu bar extras, notification center, etc.)
+                // but keep layers 0-24 which include normal windows and system dialogs (TCC, auth)
+                if layer >= 25 && pid != frontPID { continue }
+
                 if seen.insert(pid).inserted {
                     let app = NSRunningApplication(processIdentifier: pid)
                     results.append((pid, app))
                 }
+
+                if pid == frontPID { foundFront = true; break }
             }
+
+            // If frontmost app wasn't in the window list (rare), add it explicitly
+            if !foundFront {
+                if seen.insert(frontPID).inserted {
+                    results.append((frontPID, frontApp))
+                }
+            }
+
             return results
         case .all:
             return NSWorkspace.shared.runningApplications
@@ -152,15 +208,17 @@ final class AccessibilityService {
                 } else if !target.isMulti {
                     // For single-target, no window is an error
                     throw AXServiceError.noWindow
+                } else {
+                    // For multi-target, include app element even if no window
+                    results.append(buildResponse(pid: pid, app: app, windowElement: appElement, maxDepth: maxDepth))
                 }
-                // For multi-target, skip apps with no window
             }
         }
 
         return results
     }
 
-    /// Find an element by its accessibility label and return its center point (window-relative)
+    /// Find an element by its accessibility label and return its center point (screen-absolute)
     func findElementCenter(label: String, target: AXTarget = .front) throws -> (x: Double, y: Double)? {
         guard AXIsProcessTrusted() else {
             throw AXServiceError.permissionDenied
@@ -183,9 +241,6 @@ final class AccessibilityService {
             throw AXServiceError.noWindow
         }
 
-        let windowFrame = getFrame(windowElement as! AXUIElement)
-        let windowOrigin = windowFrame.map { CGPoint(x: $0.x, y: $0.y) } ?? .zero
-
         var foundElement: AXUIElement? = findElement(in: windowElement as! AXUIElement, label: label, depth: 0, maxDepth: 10)
 
         // If not found in window, also search app-level elements (catches popup menus)
@@ -194,8 +249,8 @@ final class AccessibilityService {
         }
 
         if let element = foundElement, let frame = getFrame(element) {
-            let centerX = frame.x + frame.width / 2.0 - Double(windowOrigin.x)
-            let centerY = frame.y + frame.height / 2.0 - Double(windowOrigin.y)
+            let centerX = frame.x + frame.width / 2.0
+            let centerY = frame.y + frame.height / 2.0
             return (centerX, centerY)
         }
 
@@ -207,9 +262,8 @@ final class AccessibilityService {
     private func buildResponse(pid: pid_t, app: NSRunningApplication?, windowElement: AXUIElement, maxDepth: Int) -> AXTreeResponse {
         let windowTitle = getStringAttribute(windowElement, kAXTitleAttribute)
         let windowFrame = getFrame(windowElement)
-        let windowOrigin = windowFrame.map { CGPoint(x: $0.x, y: $0.y) } ?? .zero
 
-        let tree = buildNode(element: windowElement, depth: 0, maxDepth: maxDepth, windowOrigin: windowOrigin)
+        let tree = buildNode(element: windowElement, depth: 0, maxDepth: maxDepth)
 
         return AXTreeResponse(
             app: app?.localizedName ?? app?.bundleIdentifier ?? "PID \(pid)",
@@ -221,19 +275,12 @@ final class AccessibilityService {
         )
     }
 
-    private func buildNode(element: AXUIElement, depth: Int, maxDepth: Int, windowOrigin: CGPoint) -> AXNode {
+    private func buildNode(element: AXUIElement, depth: Int, maxDepth: Int) -> AXNode {
         let role = getStringAttribute(element, kAXRoleAttribute)
         let title = getStringAttribute(element, kAXTitleAttribute)
         let label = getStringAttribute(element, kAXDescriptionAttribute)
         let value = getValueString(element)
-        let frame = getFrame(element).map { f in
-            AXFrame(
-                x: f.x - Double(windowOrigin.x),
-                y: f.y - Double(windowOrigin.y),
-                width: f.width,
-                height: f.height
-            )
-        }
+        let frame = getFrame(element)
 
         var children: [AXNode]? = nil
         if depth < maxDepth {
@@ -241,7 +288,7 @@ final class AccessibilityService {
             let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
             if result == .success, let childElements = childrenValue as? [AXUIElement] {
                 children = childElements.map {
-                    buildNode(element: $0, depth: depth + 1, maxDepth: maxDepth, windowOrigin: windowOrigin)
+                    buildNode(element: $0, depth: depth + 1, maxDepth: maxDepth)
                 }
                 if children?.isEmpty == true { children = nil }
             }
@@ -312,6 +359,44 @@ final class AccessibilityService {
         return AXFrame(x: Double(point.x), y: Double(point.y), width: Double(size.width), height: Double(size.height))
     }
 
+    private func getWindowTitle(target: AXTarget) -> String? {
+        guard case .front = target,
+              let frontApp = NSWorkspace.shared.frontmostApplication else {
+            return nil
+        }
+
+        let appElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+        var windowValue: CFTypeRef?
+
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success
+            || AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowValue) == .success {
+            let windowElement = windowValue as! AXUIElement
+            return getStringAttribute(windowElement, kAXTitleAttribute)
+        }
+
+        return nil
+    }
+
+    private func treeHasWebAreaWithChildren(_ node: AXNode?) -> Bool {
+        guard let node = node else { return false }
+
+        if node.role == "AXWebArea",
+           let children = node.children,
+           !children.isEmpty {
+            return true
+        }
+
+        if let children = node.children {
+            for child in children {
+                if treeHasWebAreaWithChildren(child) {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
     // MARK: - Interactive Elements
 
     /// Roles considered interactive (buttons, fields, links, etc.)
@@ -328,7 +413,7 @@ final class AccessibilityService {
         let label: String?
         let title: String?
         let value: String?
-        let frame: AXFrame  // window-relative, in points
+        let frame: AXFrame  // screen-absolute, in points
     }
 
     struct ScrollState: Codable {
@@ -395,191 +480,134 @@ final class AccessibilityService {
         return nil
     }
 
-    /// Returns a flat list of interactive elements in the frontmost window.
-    /// Frames are window-relative in points (same coord system as batch click x,y).
+    /// Returns a flat list of interactive elements from visible windows.
+    /// Frames are screen-absolute in points.
     struct InteractiveElementsResult {
         let elements: [InteractiveElement]
-        let windowFrame: AXFrame?
         let scrollState: ScrollState
     }
 
-    func getInteractiveElements(maxDepth: Int = 15, target: AXTarget = .front) -> InteractiveElementsResult {
+    func getInteractiveElements(maxDepth: Int = 15, target: AXTarget = .visible) -> InteractiveElementsResult {
         let noResult = InteractiveElementsResult(
-            elements: [], windowFrame: nil,
+            elements: [],
             scrollState: ScrollState(canScrollUp: false, canScrollDown: false, canScrollLeft: false, canScrollRight: false)
         )
         guard AXIsProcessTrusted() else {
             return noResult
         }
 
-        let pid: pid_t
-        if case .front = target {
-            guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-                return noResult
-            }
-            pid = frontApp.processIdentifier
-        } else if case .pid(let p) = target {
-            pid = p
-        } else if case .app(let bundleId) = target {
-            guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId).first else {
-                return noResult
-            }
-            pid = app.processIdentifier
+        // Get screen bounds for clipping
+        let screenBounds: (width: Double, height: Double)?
+        if let screen = NSScreen.main {
+            screenBounds = (width: Double(screen.frame.width), height: Double(screen.frame.height))
         } else {
-            // Multi-target not supported for interactive elements
-            return noResult
+            screenBounds = nil
         }
-
-        let appElement = AXUIElementCreateApplication(pid)
-
-        var windowValue: CFTypeRef?
-        let windowResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue)
-        if windowResult != .success {
-            let mainResult = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowValue)
-            guard mainResult == .success, windowValue != nil else {
-                return noResult
-            }
-        }
-
-        let windowElement = windowValue as! AXUIElement
-        let windowFrame = getFrame(windowElement)
-        let windowOrigin = windowFrame.map { CGPoint(x: $0.x, y: $0.y) } ?? .zero
-        let windowSize = windowFrame.map { (width: $0.width, height: $0.height) }
 
         var elements: [InteractiveElement] = []
         var nextId = 1
-        collectInteractiveElements(
-            element: windowElement,
-            depth: 0,
-            maxDepth: maxDepth,
-            windowOrigin: windowOrigin,
-            windowSize: windowSize,
-            elements: &elements,
-            nextId: &nextId
-        )
 
-        let scrollState = detectScrollState(window: windowElement)
+        // Resolve target PIDs
+        let targets: [(pid: pid_t, app: NSRunningApplication?)]
+        do {
+            targets = try resolveTarget(target)
+        } catch {
+            return noResult
+        }
 
-        // Check for modal dialogs from other processes (e.g. Gatekeeper, auth prompts).
-        // The system-wide focused element may belong to a different PID than the frontmost app.
-        if case .front = target {
-            let modalResult = collectModalDialogElements(
-                frontPID: pid, nextId: &nextId, maxDepth: maxDepth
+        // Collect elements from each target's focused/main window
+        for (pid, _) in targets {
+            let appElement = AXUIElementCreateApplication(pid)
+
+            var windowValue: CFTypeRef?
+            let windowResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue)
+            if windowResult != .success {
+                let mainResult = AXUIElementCopyAttributeValue(appElement, kAXMainWindowAttribute as CFString, &windowValue)
+                if mainResult != .success || windowValue == nil {
+                    continue
+                }
+            }
+
+            let windowElement = windowValue as! AXUIElement
+            collectInteractiveElements(
+                element: windowElement,
+                depth: 0,
+                maxDepth: maxDepth,
+                screenBounds: screenBounds,
+                clipRect: nil,
+                elements: &elements,
+                nextId: &nextId
             )
-            if let modal = modalResult {
-                // Modal dialog takes priority — return its elements + frame instead
-                return InteractiveElementsResult(
-                    elements: elements + modal.elements,
-                    windowFrame: modal.windowFrame ?? windowFrame,
-                    scrollState: scrollState
-                )
+        }
+
+        // Scroll state always queries frontmost window
+        let scrollState: ScrollState
+        if let frontApp = NSWorkspace.shared.frontmostApplication {
+            let frontAppElement = AXUIElementCreateApplication(frontApp.processIdentifier)
+            var frontWindowValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(frontAppElement, kAXFocusedWindowAttribute as CFString, &frontWindowValue) == .success
+                || AXUIElementCopyAttributeValue(frontAppElement, kAXMainWindowAttribute as CFString, &frontWindowValue) == .success,
+               let fw = frontWindowValue {
+                scrollState = detectScrollState(window: fw as! AXUIElement)
+            } else {
+                scrollState = ScrollState(canScrollUp: false, canScrollDown: false, canScrollLeft: false, canScrollRight: false)
             }
+        } else {
+            scrollState = ScrollState(canScrollUp: false, canScrollDown: false, canScrollLeft: false, canScrollRight: false)
         }
 
-        return InteractiveElementsResult(elements: elements, windowFrame: windowFrame, scrollState: scrollState)
-    }
-
-    /// Check if a system modal dialog (from a different process) is showing.
-    /// Returns elements from that dialog's window, or nil if none found.
-    private func collectModalDialogElements(
-        frontPID: pid_t, nextId: inout Int, maxDepth: Int
-    ) -> (elements: [InteractiveElement], windowFrame: AXFrame?)? {
-        let systemWide = AXUIElementCreateSystemWide()
-        var focusedValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focusedValue) == .success,
-              focusedValue != nil else {
-            return nil
-        }
-        let focusedElement = focusedValue as! AXUIElement
-
-        // Get the PID of the focused element
-        var focusedPID: pid_t = 0
-        guard AXUIElementGetPid(focusedElement, &focusedPID) == .success else {
-            return nil
-        }
-
-        // Only interesting if focused element is from a DIFFERENT process
-        guard focusedPID != frontPID else {
-            return nil
-        }
-
-        // Get the focused window of that process
-        let modalApp = AXUIElementCreateApplication(focusedPID)
-        var modalWindowValue: CFTypeRef?
-        let result = AXUIElementCopyAttributeValue(modalApp, kAXFocusedWindowAttribute as CFString, &modalWindowValue)
-        if result != .success {
-            let mainResult = AXUIElementCopyAttributeValue(modalApp, kAXMainWindowAttribute as CFString, &modalWindowValue)
-            guard mainResult == .success, modalWindowValue != nil else {
-                return nil
-            }
-        }
-
-        let modalWindow = modalWindowValue as! AXUIElement
-        let modalFrame = getFrame(modalWindow)
-        let modalOrigin = modalFrame.map { CGPoint(x: $0.x, y: $0.y) } ?? .zero
-        let modalSize = modalFrame.map { (width: $0.width, height: $0.height) }
-
-        var elements: [InteractiveElement] = []
-        collectInteractiveElements(
-            element: modalWindow,
-            depth: 0,
-            maxDepth: maxDepth,
-            windowOrigin: modalOrigin,
-            windowSize: modalSize,
-            elements: &elements,
-            nextId: &nextId
-        )
-
-        guard !elements.isEmpty else {
-            return nil
-        }
-
-        return (elements: elements, windowFrame: modalFrame)
+        return InteractiveElementsResult(elements: elements, scrollState: scrollState)
     }
 
     private func collectInteractiveElements(
         element: AXUIElement,
         depth: Int,
         maxDepth: Int,
-        windowOrigin: CGPoint,
-        windowSize: (width: Double, height: Double)?,
+        screenBounds: (width: Double, height: Double)?,
+        clipRect: AXFrame?,
         elements: inout [InteractiveElement],
         nextId: inout Int
     ) {
         let role = getStringAttribute(element, kAXRoleAttribute)
 
+        // Narrow clip rect when entering a scroll area
+        var childClipRect = clipRect
+        if role == "AXScrollArea", let frame = getFrame(element) {
+            childClipRect = intersectFrames(clipRect, frame)
+        }
+
         if let role = role, AccessibilityService.interactiveRoles.contains(role) {
             if let frame = getFrame(element) {
-                let windowRelativeFrame = AXFrame(
-                    x: frame.x - Double(windowOrigin.x),
-                    y: frame.y - Double(windowOrigin.y),
-                    width: frame.width,
-                    height: frame.height
-                )
                 // Skip zero-size elements
-                guard windowRelativeFrame.width > 0 && windowRelativeFrame.height > 0 else {
-                    // fall through to child recursion
+                guard frame.width > 0 && frame.height > 0 else {
                     return collectInteractiveElementsChildren(
                         element: element, depth: depth, maxDepth: maxDepth,
-                        windowOrigin: windowOrigin, windowSize: windowSize,
+                        screenBounds: screenBounds, clipRect: childClipRect,
                         elements: &elements, nextId: &nextId
                     )
                 }
-                // Skip elements entirely outside the visible window area
-                if let ws = windowSize {
+                // Skip elements entirely outside the visible screen area
+                if let sb = screenBounds {
                     let outOfBounds =
-                        windowRelativeFrame.x + windowRelativeFrame.width < 0 ||
-                        windowRelativeFrame.y + windowRelativeFrame.height < 0 ||
-                        windowRelativeFrame.x > ws.width ||
-                        windowRelativeFrame.y > ws.height
+                        frame.x + frame.width < 0 ||
+                        frame.y + frame.height < 0 ||
+                        frame.x > sb.width ||
+                        frame.y > sb.height
                     if outOfBounds {
-                        // Still recurse — container may be clipped but children visible
                         return collectInteractiveElementsChildren(
                             element: element, depth: depth, maxDepth: maxDepth,
-                            windowOrigin: windowOrigin, windowSize: windowSize,
+                            screenBounds: screenBounds, clipRect: childClipRect,
                             elements: &elements, nextId: &nextId
                         )
                     }
+                }
+                // Skip elements outside the scroll viewport
+                if !frameIntersectsClip(frame, clipRect: clipRect) {
+                    return collectInteractiveElementsChildren(
+                        element: element, depth: depth, maxDepth: maxDepth,
+                        screenBounds: screenBounds, clipRect: childClipRect,
+                        elements: &elements, nextId: &nextId
+                    )
                 }
                 let elem = InteractiveElement(
                     id: nextId,
@@ -587,7 +615,7 @@ final class AccessibilityService {
                     label: getStringAttribute(element, kAXDescriptionAttribute),
                     title: getStringAttribute(element, kAXTitleAttribute),
                     value: getValueString(element),
-                    frame: windowRelativeFrame
+                    frame: frame
                 )
                 elements.append(elem)
                 nextId += 1
@@ -596,7 +624,7 @@ final class AccessibilityService {
 
         collectInteractiveElementsChildren(
             element: element, depth: depth, maxDepth: maxDepth,
-            windowOrigin: windowOrigin, windowSize: windowSize,
+            screenBounds: screenBounds, clipRect: childClipRect,
             elements: &elements, nextId: &nextId
         )
     }
@@ -605,8 +633,8 @@ final class AccessibilityService {
         element: AXUIElement,
         depth: Int,
         maxDepth: Int,
-        windowOrigin: CGPoint,
-        windowSize: (width: Double, height: Double)?,
+        screenBounds: (width: Double, height: Double)?,
+        clipRect: AXFrame?,
         elements: inout [InteractiveElement],
         nextId: inout Int
     ) {
@@ -615,18 +643,156 @@ final class AccessibilityService {
         var childrenValue: CFTypeRef?
         let result = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &childrenValue)
         if result == .success, let children = childrenValue as? [AXUIElement] {
+            // Check if any child is an overlay (popover, sheet, dialog)
+            let overlayRoles: Set<String> = ["AXPopover", "AXSheet", "AXDialog"]
+            var overlay: AXUIElement?
+            var toolbars: [AXUIElement] = []
+
             for child in children {
+                if let role = getStringAttribute(child, kAXRoleAttribute) {
+                    if overlayRoles.contains(role) {
+                        overlay = child
+                    } else if role == "AXToolbar" {
+                        toolbars.append(child)
+                    }
+                }
+            }
+
+            if let overlay = overlay {
+                // Overlay present: only walk overlay + toolbars
                 collectInteractiveElements(
-                    element: child,
-                    depth: depth + 1,
-                    maxDepth: maxDepth,
-                    windowOrigin: windowOrigin,
-                    windowSize: windowSize,
-                    elements: &elements,
-                    nextId: &nextId
+                    element: overlay, depth: depth + 1, maxDepth: maxDepth,
+                    screenBounds: screenBounds, clipRect: clipRect, elements: &elements, nextId: &nextId
                 )
+                for toolbar in toolbars {
+                    collectInteractiveElements(
+                        element: toolbar, depth: depth + 1, maxDepth: maxDepth,
+                        screenBounds: screenBounds, clipRect: clipRect, elements: &elements, nextId: &nextId
+                    )
+                }
+            } else {
+                // No overlay: walk all children normally
+                for child in children {
+                    collectInteractiveElements(
+                        element: child, depth: depth + 1, maxDepth: maxDepth,
+                        screenBounds: screenBounds, clipRect: clipRect, elements: &elements, nextId: &nextId
+                    )
+                }
             }
         }
+    }
+
+    // MARK: - Clip Rect Helpers
+
+    /// Intersect two frames, or return the non-nil one if only one is provided.
+    private func intersectFrames(_ a: AXFrame?, _ b: AXFrame) -> AXFrame {
+        guard let a = a else { return b }
+        let x1 = max(a.x, b.x)
+        let y1 = max(a.y, b.y)
+        let x2 = min(a.x + a.width, b.x + b.width)
+        let y2 = min(a.y + a.height, b.y + b.height)
+        let w = max(0, x2 - x1)
+        let h = max(0, y2 - y1)
+        return AXFrame(x: x1, y: y1, width: w, height: h)
+    }
+
+    /// Check if an element frame intersects the clip rect. Returns true when clipRect is nil.
+    private func frameIntersectsClip(_ frame: AXFrame, clipRect: AXFrame?) -> Bool {
+        guard let clip = clipRect else { return true }
+        return frame.x + frame.width > clip.x
+            && frame.y + frame.height > clip.y
+            && frame.x < clip.x + clip.width
+            && frame.y < clip.y + clip.height
+    }
+
+    // MARK: - Change Detection & Waiting
+
+    /// Create a lightweight snapshot of current a11y state for change detection
+    func createSnapshot(target: AXTarget = .front) -> A11ySnapshot {
+        let elements = getInteractiveElements(target: target)
+
+        // Check for AXWebArea with children
+        var hasWebArea = false
+        if case .front = target {
+            let trees = (try? getTree(maxDepth: 8, target: target)) ?? []
+            hasWebArea = trees.contains { treeHasWebAreaWithChildren($0.tree) }
+        }
+
+        return A11ySnapshot(
+            elementCount: elements.elements.count,
+            windowTitle: getWindowTitle(target: target),
+            hasWebAreaWithChildren: hasWebArea,
+            timestamp: Date()
+        )
+    }
+
+    /// Wait for a large change in the a11y tree (navigation)
+    /// Returns true if large change detected, false if timeout
+    @discardableResult
+    func waitForLargeChange(before: A11ySnapshot, timeout: TimeInterval = 5.0) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            let current = createSnapshot()
+
+            if before.hasLargeChangeTo(current) {
+                NSLog("✓ Large change detected: \(before.elementCount) → \(current.elementCount) elements")
+                return true
+            }
+
+            Thread.sleep(forTimeInterval: 0.5)
+        }
+
+        NSLog("⚠️ No large change detected within \(timeout)s timeout")
+        return false
+    }
+
+    /// Wait for a11y tree to stabilize (no changes for N consecutive polls)
+    func waitForStabilization(polls: Int = 2, interval: TimeInterval = 0.5, timeout: TimeInterval = 5.0) {
+        var stableCount = 0
+        var prev = createSnapshot()
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while stableCount < polls && Date() < deadline {
+            Thread.sleep(forTimeInterval: interval)
+            let current = createSnapshot()
+
+            if current.elementCount == prev.elementCount {
+                stableCount += 1
+            } else {
+                stableCount = 0
+                NSLog("🔄 Tree changed: \(prev.elementCount) → \(current.elementCount) elements")
+            }
+
+            prev = current
+        }
+
+        if stableCount >= polls {
+            NSLog("✓ Tree stabilized at \(prev.elementCount) elements")
+        } else {
+            NSLog("⚠️ Tree did not stabilize within timeout")
+        }
+    }
+
+    /// Wait for any change in the a11y tree (update)
+    /// Returns true if change detected, false if timeout
+    @discardableResult
+    func waitForAnyChange(before: A11ySnapshot, timeout: TimeInterval = 2.0) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while Date() < deadline {
+            let current = createSnapshot()
+
+            if before.hasAnyChangeTo(current) {
+                NSLog("✓ Change detected: \(before.elementCount) → \(current.elementCount) elements")
+                return true
+            }
+
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+
+        NSLog("⚠️ No change detected within \(timeout)s timeout (might be ok)")
+        return false
     }
 
     // MARK: - Actions

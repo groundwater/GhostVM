@@ -1,4 +1,5 @@
 import Link from "next/link"
+import { siteConfig } from "@/config/site"
 
 export default function Footer() {
   return (
@@ -59,7 +60,7 @@ export default function Footer() {
               </li>
               <li>
                 <a
-                  href="https://github.com/groundwater/GhostVM"
+                  href={siteConfig.repo}
                   className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -69,7 +70,7 @@ export default function Footer() {
               </li>
               <li>
                 <a
-                  href="https://github.com/groundwater/GhostVM/issues"
+                  href={`${siteConfig.repo}/issues`}
                   className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
                   target="_blank"
                   rel="noopener noreferrer"

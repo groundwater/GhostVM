@@ -14,7 +14,7 @@ let package = Package(
         .executableTarget(
             name: "GhostTools",
             dependencies: [],
-            exclude: ["Resources/Info.plist"],
+            exclude: ["Resources/Info.plist", "Resources/entitlements.plist"],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "Sources/GhostTools/Resources/Info.plist"], .when(configuration: .release))
             ]

@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   output: "export",
-  basePath: "/GhostVM",
+  basePath: "/ghostvm",
   images: {
     loader: "custom",
     loaderFile: "./image-loader.ts",

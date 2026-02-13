@@ -4,5 +4,6 @@
 build/
 *.local.json
 *.xcodeproj/
+*.profraw
 .claude/
 .vscode/

@@ -136,7 +136,8 @@ struct UnixSocketClient {
             throw VMError.message(resp.errorMessage)
         }
         guard let json = resp.bodyJSON else {
-            throw VMError.message("Invalid JSON response")
+            let preview = resp.bodyString?.prefix(500) ?? "<empty>"
+            throw VMError.message("Invalid JSON response. Body: \(preview)")
         }
         return json
     }
@@ -148,7 +149,8 @@ struct UnixSocketClient {
             throw VMError.message(resp.errorMessage)
         }
         guard let json = resp.bodyJSON else {
-            throw VMError.message("Invalid JSON response")
+            let preview = resp.bodyString?.prefix(500) ?? "<empty>"
+            throw VMError.message("Invalid JSON response. Body: \(preview)")
         }
         return json
     }

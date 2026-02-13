@@ -1,37 +1,34 @@
 GhostTools - Guest Agent for GhostVM
 =====================================
 
-GhostTools is a guest agent that enables enhanced features when running
-inside a GhostVM virtual machine, including:
+GhostTools is a guest agent that runs inside a GhostVM virtual machine,
+enabling enhanced host-guest integration:
 
 - Clipboard synchronization between host and guest
-- File transfer support via drag-and-drop
+- File transfer via drag-and-drop (bidirectional)
+- URL forwarding (guest links open on host)
+- Port scanning and auto-discovery
+- Accessibility tree inspection and UI automation
+- Pointer and keyboard input injection
+- Screenshot capture with element overlays
+- Log streaming to host
 
 Installation
 ------------
 
-1. Copy GhostTools to /usr/local/bin in your guest VM:
+GhostTools is automatically installed to /Applications in the guest VM
+when the GhostTools DMG is attached. It auto-updates when a newer version
+is available from the host.
 
-   sudo cp /Volumes/GhostTools/GhostTools /usr/local/bin/
-   sudo chmod +x /usr/local/bin/GhostTools
+To install manually:
 
-2. Run GhostTools to start the guest agent:
+   sudo cp /Volumes/GhostTools/GhostTools.app /Applications/
 
-   /usr/local/bin/GhostTools
-
-3. (Optional) To start GhostTools automatically at login, add it to your
-   Login Items in System Settings > General > Login Items.
-
-Usage
------
-
-GhostTools runs as a background service listening for requests from the
-host. Once running, features like clipboard sync will work automatically
-when enabled in GhostVM's VM menu.
+GhostTools requires Accessibility permission in the guest to enable
+pointer, keyboard, and UI automation features. Grant this in
+System Settings > Privacy & Security > Accessibility.
 
 Requirements
 ------------
 
 - macOS 14.0 or later (running as a guest in GhostVM)
-
-For more information, visit: https://github.com/groundwater/GhostVM

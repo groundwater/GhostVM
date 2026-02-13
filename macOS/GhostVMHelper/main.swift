@@ -55,6 +55,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var eventStreamService: EventStreamService?
     private var healthCheckService: HealthCheckService?
     private var autoPortMapService: AutoPortMapService?
+    private var hostAPIService: HostAPIService?
     private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
     private var fileCountCancellable: AnyCancellable?
@@ -79,30 +80,50 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // Dynamic icon state
     private var foregroundAppCancellable: AnyCancellable?
     private var iconStack: [(bundleId: String, icon: NSImage)] = []
-    private let maxStackSize = 3
+    private let maxStackSize = 2
     private var activeIconMode: String?  // nil = static, "stack" = animated stack, "app" = single app icon
     private var iconAnimationTimer: Timer?
     private var iconAnimationStartTime: Date = .distantPast
     private let iconAnimationDuration: TimeInterval = 0.3
     private struct IconAnimFrame {
         let icon: NSImage
-        let fromX: CGFloat; let fromY: CGFloat; let fromOpacity: CGFloat
-        let toX: CGFloat; let toY: CGFloat; let toOpacity: CGFloat
+        let fromX: CGFloat; let fromY: CGFloat; let fromOpacity: CGFloat; let fromSize: CGFloat
+        let toX: CGFloat; let toY: CGFloat; let toOpacity: CGFloat; let toSize: CGFloat
     }
     private var iconAnimationFrames: [IconAnimFrame] = []
-    // Slot positions: index 0 = front, 1 = 2nd, 2 = 3rd
-    private let iconSlots: [(x: CGFloat, y: CGFloat, opacity: CGFloat)] = [
-        (0,    0,  1.00),
-        (30, -30,  0.55),
-        (55, -55,  0.30),
+    // Slot positions: index 0 = front (top-left), 1 = 2nd (bottom-right)
+    private let iconSlots: [(x: CGFloat, y: CGFloat, opacity: CGFloat, size: CGFloat)] = [
+        (-30,  30,  1.00, 1.0),  // Top-left (foreground) at 100% size
+        ( 35, -35,  0.60, 0.9),  // Bottom-right (background) at 80% size
     ]
-    private func centeredSlots(for count: Int) -> [(x: CGFloat, y: CGFloat, opacity: CGFloat)] {
+    private func centeredSlots(for count: Int) -> [(x: CGFloat, y: CGFloat, opacity: CGFloat, size: CGFloat)] {
         guard count > 0 else { return [] }
         let slots = Array(iconSlots.prefix(count))
         let centerX = (slots.map(\.x).min()! + slots.map(\.x).max()!) / 2
         let centerY = (slots.map(\.y).min()! + slots.map(\.y).max()!) / 2
-        return slots.map { (x: $0.x - centerX, y: $0.y - centerY, opacity: $0.opacity) }
+        return slots.map { (x: $0.x - centerX, y: $0.y - centerY, opacity: $0.opacity, size: $0.size) }
     }
+
+    // Placeholder icon for Finder-only mode
+    private lazy var placeholderIcon: NSImage = {
+        let size = NSSize(width: 512, height: 512)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        // Draw rounded rect (400x400) centered in canvas to match real app icons
+        let iconSize: CGFloat = 400  // Match composite icon draw size
+        let offset = (512 - iconSize) / 2
+        let rect = NSRect(x: offset, y: offset, width: iconSize, height: iconSize)
+        let cornerRadius: CGFloat = iconSize * 185.4 / 1024  // Match macOS icon rounding
+        let path = NSBezierPath(roundedRect: rect, xRadius: cornerRadius, yRadius: cornerRadius)
+
+        // Subtle gray fill with transparency
+        NSColor(white: 0.95, alpha: 0.3).setFill()
+        path.fill()
+
+        image.unlockFocus()
+        return image
+    }()
 
     // MARK: - App Lifecycle
 
@@ -736,10 +757,24 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private func handleForegroundAppChange(_ app: GuestForegroundApp?) {
         guard let mode = activeIconMode else { return }
 
-        guard let app = app, let icon = app.icon else {
+        guard let app = app else {
             cancelIconAnimation()
             loadCustomIcon()
             return
+        }
+
+        // If guest didn't provide icon, try to fetch from NSWorkspace (for common system apps)
+        let icon: NSImage
+        if let guestIcon = app.icon {
+            icon = guestIcon
+        } else {
+            // Try to get icon from NSWorkspace for known system apps
+            if app.bundleId == "com.apple.finder" {
+                icon = NSWorkspace.shared.icon(forFile: "/System/Library/CoreServices/Finder.app")
+            } else {
+                // For other apps without icons, fall back to generic app icon
+                icon = NSWorkspace.shared.icon(forFileType: "app")
+            }
         }
 
         // "app" mode: just set the icon directly, no stack
@@ -763,14 +798,26 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Update stack: move-to-front deduplication
         iconStack.removeAll { $0.bundleId == app.bundleId }
         iconStack.insert((bundleId: app.bundleId, icon: icon), at: 0)
+
+        // Remove placeholder if a real second app exists
+        if iconStack.count > 1 {
+            iconStack.removeAll { $0.bundleId == "com.ghostvm.placeholder" }
+        }
+
+        // Trim to maxStackSize (now 2)
         if iconStack.count > maxStackSize {
             iconStack = Array(iconStack.prefix(maxStackSize))
         }
 
+        // Insert placeholder if only one real app in stack
+        if iconStack.count < maxStackSize {
+            iconStack.append((bundleId: "com.ghostvm.placeholder", icon: placeholderIcon))
+        }
+
         // Build animation frames using centered slot positions
         var frames: [IconAnimFrame] = []
-        let oldCentered = centeredSlots(for: oldStack.count)
-        let newCentered = centeredSlots(for: iconStack.count)
+        let oldCentered = centeredSlots(for: max(2, oldStack.count))
+        let newCentered = centeredSlots(for: max(2, iconStack.count))
 
         // Entrance/exit offsets relative to centered positions
         let entrance = (x: newCentered[0].x - 60, y: newCentered[0].y + 30, opacity: CGFloat(0.0))
@@ -785,15 +832,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 let from = oldIdx < oldCentered.count ? oldCentered[oldIdx] : oldCentered.last!
                 frames.append(IconAnimFrame(
                     icon: item.icon,
-                    fromX: from.x, fromY: from.y, fromOpacity: from.opacity,
-                    toX: to.x, toY: to.y, toOpacity: to.opacity
+                    fromX: from.x, fromY: from.y, fromOpacity: from.opacity, fromSize: from.size,
+                    toX: to.x, toY: to.y, toOpacity: to.opacity, toSize: to.size
                 ))
             } else {
                 // New icon slides in from the left
                 frames.append(IconAnimFrame(
                     icon: item.icon,
-                    fromX: entrance.x, fromY: entrance.y, fromOpacity: entrance.opacity,
-                    toX: to.x, toY: to.y, toOpacity: to.opacity
+                    fromX: entrance.x, fromY: entrance.y, fromOpacity: entrance.opacity, fromSize: to.size,
+                    toX: to.x, toY: to.y, toOpacity: to.opacity, toSize: to.size
                 ))
             }
         }
@@ -804,8 +851,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 let from = oldIdx < oldCentered.count ? oldCentered[oldIdx] : oldCentered.last!
                 frames.append(IconAnimFrame(
                     icon: item.icon,
-                    fromX: from.x, fromY: from.y, fromOpacity: from.opacity,
-                    toX: exit.x, toY: exit.y, toOpacity: exit.opacity
+                    fromX: from.x, fromY: from.y, fromOpacity: from.opacity, fromSize: from.size,
+                    toX: exit.x, toY: exit.y, toOpacity: exit.opacity, toSize: from.size
                 ))
             }
         }
@@ -842,16 +889,19 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let image = NSImage(size: canvasSize)
         image.lockFocus()
 
-        let iconSize: CGFloat = 400
-        let baseX = (canvasSize.width - iconSize) / 2
-        let baseY = (canvasSize.height - iconSize) / 2
+        let baseIconSize: CGFloat = 400  // Renamed from iconSize
 
         // Draw from back to front: frames[0] is front, so reverse to draw back first
         for frame in iconAnimationFrames.reversed() {
             let offsetX = frame.fromX + (frame.toX - frame.fromX) * t
             let offsetY = frame.fromY + (frame.toY - frame.fromY) * t
             let opacity = frame.fromOpacity + (frame.toOpacity - frame.fromOpacity) * t
+            let sizeMultiplier = frame.fromSize + (frame.toSize - frame.fromSize) * t  // NEW
             if opacity <= 0 { continue }
+
+            let iconSize = baseIconSize * sizeMultiplier  // NEW: dynamic size
+            let baseX = (canvasSize.width - iconSize) / 2   // MOVED: per-icon centering
+            let baseY = (canvasSize.height - iconSize) / 2  // MOVED: per-icon centering
 
             let rect = NSRect(x: baseX + offsetX, y: baseY + offsetY, width: iconSize, height: iconSize)
             let path = NSBezierPath(roundedRect: rect, xRadius: rect.width * 185.4 / 1024, yRadius: rect.height * 185.4 / 1024)
@@ -1241,6 +1291,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let client = GhostClient(virtualMachine: vm, vmQueue: queue)
         self.ghostClient = client
 
+        // 1b. Host API service (Unix domain socket for vmctl/MCP)
+        let apiService = HostAPIService(vmName: vmName)
+        apiService.start(client: client, vmWindow: self.window)
+        self.hostAPIService = apiService
+
         // 2. Persistent health check (vsock port 5002)
         let hcService = HealthCheckService()
         hcService.start(client: client)
@@ -1415,6 +1470,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         eventStreamService?.stop()
         eventStreamService = nil
+
+        hostAPIService?.stop()
+        hostAPIService = nil
 
         ghostClient = nil
     }

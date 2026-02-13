@@ -5,6 +5,7 @@ import { useState } from "react";
 import { Menu, X } from "lucide-react";
 import Logo from "@/components/shared/Logo";
 import ThemeToggle from "./ThemeToggle";
+import { siteConfig } from "@/config/site";
 
 export default function Navbar() {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -37,7 +38,7 @@ export default function Navbar() {
               Download
             </Link>
             <a
-              href="https://github.com/groundwater/GhostVM"
+              href={siteConfig.repo}
               className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
               target="_blank"
               rel="noopener noreferrer"
@@ -85,7 +86,7 @@ export default function Navbar() {
             Download
           </Link>
           <a
-            href="https://github.com/groundwater/GhostVM"
+            href={siteConfig.repo}
             className="block py-2 text-sm"
             target="_blank"
             rel="noopener noreferrer"

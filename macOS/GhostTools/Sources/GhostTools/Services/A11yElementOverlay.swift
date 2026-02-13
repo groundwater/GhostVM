@@ -9,9 +9,12 @@ final class A11yElementOverlay {
     private var containerLayer: CALayer?
     private var fadeWorkItem: DispatchWorkItem?
 
-    /// Show element bounding boxes. Element frames are window-relative points;
-    /// windowFrame provides the window's absolute screen position for conversion.
-    func showElements(_ elements: [AccessibilityService.InteractiveElement], windowFrame: AccessibilityService.AXFrame) {
+    /// Show element bounding boxes. Element frames are screen-absolute points.
+    /// When `changeAges` is provided, elements are colored by recency tier.
+    func showElements(
+        _ elements: [AccessibilityService.InteractiveElement],
+        changeAges: [Int: Int]? = nil
+    ) {
         DispatchQueue.main.async { [self] in
             guard let root = OverlayWindowManager.shared.ensureRootLayer() else { return }
             guard !elements.isEmpty else { return }
@@ -25,10 +28,14 @@ final class A11yElementOverlay {
             let scale = NSScreen.main?.backingScaleFactor ?? 2.0
 
             for elem in elements {
-                // Convert window-relative to absolute screen coords (top-left origin)
+                let (strokeColor, fillColor, badgeColor) = ScreenshotService.colorsForAge(
+                    changeAges?[elem.id]
+                )
+
+                // Elements are already screen-absolute (top-left origin)
                 let absRect = CGRect(
-                    x: Double(windowFrame.x) + elem.frame.x,
-                    y: Double(windowFrame.y) + elem.frame.y,
+                    x: elem.frame.x,
+                    y: elem.frame.y,
                     width: elem.frame.width,
                     height: elem.frame.height
                 )
@@ -36,11 +43,11 @@ final class A11yElementOverlay {
                 // Convert to view coords (bottom-left origin)
                 let viewRect = OverlayWindowManager.shared.screenRectToView(absRect)
 
-                // Red bounding box
+                // Bounding box
                 let box = CAShapeLayer()
                 box.path = CGPath(rect: viewRect, transform: nil)
-                box.strokeColor = CGColor(red: 1, green: 0, blue: 0, alpha: 0.8)
-                box.fillColor = CGColor(red: 1, green: 0, blue: 0, alpha: 0.05)
+                box.strokeColor = strokeColor
+                box.fillColor = fillColor
                 box.lineWidth = 1.5
                 container.addSublayer(box)
 
@@ -49,7 +56,7 @@ final class A11yElementOverlay {
                 let badge = CALayer()
                 badge.bounds = CGRect(x: 0, y: 0, width: badgeSize, height: badgeSize)
                 badge.cornerRadius = badgeSize / 2
-                badge.backgroundColor = CGColor(red: 1, green: 0, blue: 0, alpha: 0.85)
+                badge.backgroundColor = badgeColor
                 badge.position = CGPoint(x: viewRect.minX + badgeSize / 2,
                                           y: viewRect.maxY - badgeSize / 2)
                 container.addSublayer(badge)

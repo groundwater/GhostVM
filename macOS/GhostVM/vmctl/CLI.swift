@@ -15,6 +15,12 @@ struct CLI {
         switch arguments[0] {
         case "--help", "-h":
             showHelp(exitCode: 0)
+        case "list", "ls":
+            do {
+                try handleList()
+            } catch {
+                fail(error)
+            }
         case "init":
             do {
                 try handleInit(arguments: Array(arguments.dropFirst()))
@@ -69,6 +75,12 @@ struct CLI {
             } catch {
                 fail(error)
             }
+        case "socket":
+            do {
+                try handleSocket(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
         default:
             print("Unknown command '\(arguments[0])'.")
             showHelp(exitCode: 1)
@@ -93,6 +105,35 @@ struct CLI {
         }
 
         return url
+    }
+
+    private func handleList() throws {
+        let entries = try controller.listVMs()
+        if entries.isEmpty {
+            print("No VMs found in \(controller.currentRootDirectory.path)")
+            return
+        }
+
+        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let apiDir = supportDir.appendingPathComponent("GhostVM/api")
+
+        for entry in entries {
+            let path = entry.bundleURL.path
+            let status: String
+            if entry.isRunning {
+                let socketPath = apiDir.appendingPathComponent("\(entry.name).GhostVM.sock").path
+                if FileManager.default.fileExists(atPath: socketPath) {
+                    status = socketPath
+                } else {
+                    status = "RUNNING"
+                }
+            } else if entry.isSuspended {
+                status = "SUSPENDED"
+            } else {
+                status = "STOPPED"
+            }
+            print("\(path)  \(status)")
+        }
     }
 
     private func handleInit(arguments: [String]) throws {
@@ -193,7 +234,11 @@ struct CLI {
         }
 
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
-        try controller.startVM(bundleURL: bundleURL, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
+        if headless {
+            try controller.startVM(bundleURL: bundleURL, headless: true, runtimeSharedFolder: runtimeSharedFolder)
+        } else {
+            try launchViaHelper(bundleURL: bundleURL)
+        }
     }
 
     private func handleStop(arguments: [String]) throws {
@@ -273,7 +318,11 @@ struct CLI {
         }
 
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
-        try controller.resumeVM(bundleURL: bundleURL, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
+        if headless {
+            try controller.resumeVM(bundleURL: bundleURL, headless: true, runtimeSharedFolder: runtimeSharedFolder)
+        } else {
+            try launchViaHelper(bundleURL: bundleURL)
+        }
     }
 
     private func handleDiscardSuspend(arguments: [String]) throws {
@@ -284,11 +333,126 @@ struct CLI {
         try controller.discardSuspend(bundleURL: bundleURL)
     }
 
+    private func handleSocket(arguments: [String]) throws {
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl socket <bundle-path>")
+        }
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
+
+        // Find the VM in the list to check if it's running
+        let entries = try controller.listVMs()
+        guard let entry = entries.first(where: { $0.bundleURL == bundleURL }) else {
+            throw VMError.message("VM not found")
+        }
+
+        guard entry.isRunning else {
+            throw VMError.message("VM is not running")
+        }
+
+        // Construct socket path
+        let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let apiDir = supportDir.appendingPathComponent("GhostVM/api")
+        let socketPath = apiDir.appendingPathComponent("\(entry.name).GhostVM.sock").path
+
+        // Verify socket exists
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            throw VMError.message("VM is running but socket not found at \(socketPath)")
+        }
+
+        // Output just the socket path (for command substitution)
+        print(socketPath)
+    }
+
+    // MARK: - Helper App Launch
+
+    /// Find GhostVMHelper.app relative to the vmctl executable.
+    /// Searches: 1) Parent app bundle (when vmctl is embedded in GhostVM.app)
+    ///           2) Same directory as vmctl (standalone build)
+    private func findHelperApp() -> URL? {
+        let vmctlURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+
+        // When embedded in GhostVM.app/Contents/MacOS/vmctl:
+        // Helper is at GhostVM.app/Contents/PlugIns/Helpers/GhostVMHelper.app
+        let appContents = vmctlURL
+            .deletingLastPathComponent()  // MacOS/
+            .deletingLastPathComponent()  // Contents/
+        let embeddedHelper = appContents
+            .appendingPathComponent("PlugIns")
+            .appendingPathComponent("Helpers")
+            .appendingPathComponent("GhostVMHelper.app")
+        if FileManager.default.fileExists(atPath: embeddedHelper.path) {
+            return embeddedHelper
+        }
+
+        // Standalone: same directory as vmctl
+        let standaloneHelper = vmctlURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("GhostVMHelper.app")
+        if FileManager.default.fileExists(atPath: standaloneHelper.path) {
+            return standaloneHelper
+        }
+
+        return nil
+    }
+
+    /// Launch a VM via GhostVMHelper (GUI mode with window + Dock icon).
+    /// Copies the helper into the VM bundle, launches it, and waits for exit.
+    private func launchViaHelper(bundleURL: URL) throws {
+        guard let sourceHelper = findHelperApp() else {
+            throw VMError.message("GhostVMHelper.app not found. Use --headless or run vmctl from within GhostVM.app.")
+        }
+
+        let helperManager = VMHelperBundleManager()
+        let helperURL = try helperManager.copyHelperApp(vmBundleURL: bundleURL, sourceHelperAppURL: sourceHelper)
+
+        let vmName = controller.displayName(for: bundleURL)
+        let bundlePath = bundleURL.standardizedFileURL.path
+
+        print("Starting VM '\(vmName)'...")
+
+        // Launch helper via open(1) — works from CLI without NSApplication
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [
+            "-n",           // new instance
+            "-a", helperURL.path,
+            "-W",           // wait for app to exit
+            "--args", "--vm-bundle", bundlePath
+        ]
+
+        // Forward SIGINT to the helper process
+        let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        signal(SIGINT, SIG_IGN)
+        signalSource.setEventHandler {
+            // Send terminate notification to helper
+            let hash = bundlePath.stableHash
+            DistributedNotificationCenter.default().postNotificationName(
+                NSNotification.Name("com.ghostvm.helper.terminate.\(hash)"),
+                object: nil,
+                userInfo: nil,
+                deliverImmediately: true
+            )
+        }
+        signalSource.resume()
+
+        try process.run()
+        process.waitUntilExit()
+
+        signalSource.cancel()
+        signal(SIGINT, SIG_DFL)
+
+        if process.terminationStatus != 0 {
+            throw VMError.message("Helper exited with status \(process.terminationStatus)")
+        }
+    }
+
     private func showHelp(exitCode: Int32) -> Never {
         let help = """
 Usage: vmctl <command> [options]
 
 Commands:
+  list                                   List VMs and their state
+  socket <bundle-path>                   Get socket path for running VM
   init <bundle-path> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
   install <bundle-path>
   start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
@@ -298,12 +462,30 @@ Commands:
   discard-suspend <bundle-path>
   snapshot <bundle-path> list
   snapshot <bundle-path> <create|revert|delete> <snapshot-name>
-  remote --name <VMName> <subcommand> [args...]
-  remote --socket <path> <subcommand> [args...]
+  remote --name <VMName> [--json] <subcommand> [args...]
+  remote --socket <path> [--json] <subcommand> [args...]
 
-Remote subcommands (use 'vmctl remote --help' for details):
-  health, screenshot, pointer, input, launch, activate,
-  a11y, exec, clipboard, apps, interactive
+Remote flags:
+  --json                                 Output JSON (default: human-readable if TTY)
+
+Remote subcommands (use 'vmctl remote --help' for full details):
+  health                                      Check VM connection
+  screenshot [-o file] [--elements]           Capture VM screen
+  pointer <left|right|middle|double>click     Click at element or coords
+  pointer drag X1 Y1 -- X2 Y2                Drag between points
+  pointer scroll X Y --dy N [--dx N]          Scroll at position
+  input type <text> | key [--meta] <key>      Type text or key combos
+  launch|activate <bundleId>                  Launch or activate app
+  a11y [--front|--all|--app B] [--depth N]    Accessibility tree
+  a11y focused | elements                     Focused element / interactive list
+  a11y click <label> [--role R]               Click element by label
+  a11y action <label> --action AXFoo          Perform any AX action
+  a11y menu <item1> <item2>...                Trigger menu item
+  a11y type <value> [--label L]               Set field value
+  exec <command> [args...]                    Run command in guest
+  clipboard get | set <text>                  Guest clipboard
+  apps                                        List running apps
+  interactive                                 Start interactive REPL
 
 Examples:
   vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
@@ -319,10 +501,17 @@ Examples:
   vmctl snapshot ~/VMs/sandbox.GhostVM create clean
   vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
   vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
+  vmctl socket ~/VMs/sandbox.GhostVM                   # Get socket path for running VM
+  vmctl remote --socket $(vmctl socket Aria) interactive  # Use with command substitution
   vmctl remote --name MyVM health
   vmctl remote --name MyVM screenshot --elements -o /tmp/screen.png
-  vmctl remote --name MyVM pointer click --element 5
+  vmctl remote --name MyVM pointer leftclick --element 5
+  vmctl remote --name MyVM pointer doubleclick --element 5
   vmctl remote --name MyVM input type "hello world"
+  vmctl remote --name MyVM a11y --front --depth 3
+  vmctl remote --name MyVM a11y elements
+  vmctl remote --name MyVM a11y click "OK" --role AXButton
+  vmctl remote --name MyVM a11y menu File "New Window"
   vmctl remote --name MyVM interactive
 
 Notes:

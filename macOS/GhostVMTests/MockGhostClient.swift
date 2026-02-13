@@ -54,4 +54,39 @@ final class MockGhostClient: GhostClientProtocol {
         checkHealthCallCount += 1
         return healthResult
     }
+
+    // MARK: - App management stubs
+    func listApps() async throws -> AppListResponse { throw MockError.notImplemented }
+    func launchApp(bundleId: String) async throws {}
+    func activateApp(bundleId: String) async throws {}
+    func quitApp(bundleId: String) async throws {}
+
+    // MARK: - File system stubs
+    func listDirectory(path: String) async throws -> FSListResponse { throw MockError.notImplemented }
+    func mkdir(path: String) async throws {}
+    func deleteFile(path: String) async throws {}
+    func moveFile(from: String, to: String) async throws {}
+
+    // MARK: - Accessibility stubs
+    func getAccessibilityTree(depth: Int, target: AXTarget) async throws -> AXTreeResponse { throw MockError.notImplemented }
+    func getAccessibilityTrees(depth: Int, target: AXTarget) async throws -> [AXTreeResponse] { throw MockError.notImplemented }
+    func performAccessibilityAction(label: String?, role: String?, action: String, target: AXTarget, wait: Bool) async throws {}
+    func triggerMenuItem(path: [String], target: AXTarget, wait: Bool) async throws {}
+    func setAccessibilityValue(_ value: String, label: String?, role: String?, target: AXTarget) async throws {}
+    func getFocusedElement(target: AXTarget) async throws -> [String: Any] { [:] }
+
+    // MARK: - Pointer & keyboard stubs
+    func sendPointerEvent(action: String, x: Double?, y: Double?, button: String?, label: String?, endX: Double?, endY: Double?, deltaX: Double?, deltaY: Double?, wait: Bool) async throws -> Data? { nil }
+    func sendKeyboardInput(text: String?, keys: [String]?, modifiers: [String]?, rate: Int?, wait: Bool) async throws {}
+
+    // MARK: - Shell exec stub
+    func exec(command: String, args: [String]?, timeout: Int?) async throws -> ExecResponse { throw MockError.notImplemented }
+
+    // MARK: - Elements stubs
+    func getElements() async throws -> Data { Data() }
+    func showWaitIndicator() async throws {}
+    func hideWaitIndicator() async throws {}
+    func getFrontmostApp() async throws -> String? { nil }
+
+    private enum MockError: Error { case notImplemented }
 }

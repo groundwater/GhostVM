@@ -54,13 +54,13 @@ enum InteractiveREPL {
     private static func dispatch(client: UnixSocketClient, command: String, arguments: [String]) throws {
         switch command {
         // Shorthand mappings
-        case "click":
-            // click N → pointer click --element N
-            // click X Y → pointer click X Y
+        case "click", "leftclick":
+            // click N → pointer leftclick --element N
+            // click X Y → pointer leftclick X Y
             if let first = arguments.first, let id = Int(first), arguments.count == 1 {
-                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["click", "--element", first])
+                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["leftclick", "--element", first])
             } else {
-                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["click"] + arguments)
+                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["leftclick"] + arguments)
             }
 
         case "dclick", "doubleclick":
@@ -72,9 +72,16 @@ enum InteractiveREPL {
 
         case "rclick", "rightclick":
             if let first = arguments.first, let _ = Int(first), arguments.count == 1 {
-                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["click", "--right", "--element", first])
+                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["rightclick", "--element", first])
             } else {
-                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["click", "--right"] + arguments)
+                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["rightclick"] + arguments)
+            }
+
+        case "mclick", "middleclick":
+            if let first = arguments.first, let _ = Int(first), arguments.count == 1 {
+                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["middleclick", "--element", first])
+            } else {
+                try RemoteCommand.dispatchSubcommand(client: client, subcommand: "pointer", arguments: ["middleclick"] + arguments)
             }
 
         case "type":
@@ -136,25 +143,33 @@ enum InteractiveREPL {
         let help = """
 Interactive commands (shortcuts):
   screenshot [--elements] [-o file]    Capture screenshot
-  click N                              Click element by ID
-  click X Y                            Click at coordinates
+  click N                              Left-click element by ID
+  click X Y                            Left-click at coordinates
   dclick N                             Double-click element
   rclick N                             Right-click element
+  mclick N                             Middle-click element
   type <text>                          Type text
   key [--meta] [--shift] <key>         Press key combo
   drag X1 Y1 -- X2 Y2                 Drag between points
   scroll X Y --dy N                    Scroll at position
   launch <bundleId>                    Launch app
   activate <bundleId>                  Activate app
-  a11y [--front] [--depth N]           Show accessibility tree
-  a11y click <label>                   Click by a11y label
+  a11y [--front|--all|--app B] [--depth N]   Accessibility tree
+  a11y focused                         Show focused element
+  a11y elements                        List interactive elements
+  a11y click <label> [--role R]        Click by a11y label
+  a11y action <label> --action AXFoo   Perform any AX action
   a11y menu <item1> <item2>            Trigger menu item
+  a11y type <value> [--label L]        Set field value
   exec <command> [args...]             Run command in guest
   clipboard get|set                    Guest clipboard
   apps                                 List running apps
   health                               Check connection
   help                                 Show this help
   quit                                 Exit REPL
+
+Note: Interactive mode is not compatible with --json flag.
+      For JSON output, use individual commands directly.
 """
         print(help)
     }

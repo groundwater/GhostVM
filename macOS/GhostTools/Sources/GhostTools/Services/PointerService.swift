@@ -12,6 +12,7 @@ final class PointerService {
         case click
         case doubleClick
         case rightClick
+        case middleClick
         case move
         case drag
         case scroll
@@ -24,7 +25,6 @@ final class PointerService {
 
     enum PointerError: Error {
         case permissionDenied
-        case windowNotFound
         case labelNotFound(String)
         case invalidAction
     }
@@ -45,7 +45,6 @@ final class PointerService {
     struct PointerDiagnostics {
         let absPoint: CGPoint
         let screenFrame: CGRect?
-        let windowOrigin: CGPoint?
         let frontApp: String?
 
         var dict: [String: Any] {
@@ -58,10 +57,6 @@ final class PointerService {
                 d["screenWidth"] = sf.width
                 d["screenHeight"] = sf.height
             }
-            if let wo = windowOrigin {
-                d["windowX"] = wo.x
-                d["windowY"] = wo.y
-            }
             if let fa = frontApp {
                 d["frontApp"] = fa
             }
@@ -69,7 +64,8 @@ final class PointerService {
         }
     }
 
-    /// Send a pointer event. Returns diagnostics about the computed coordinates.
+    /// Send a pointer event. Coordinates are screen-absolute.
+    /// Returns diagnostics about the coordinates.
     func sendEvent(action: String, x: Double?, y: Double?, button: String?, label: String?, endX: Double?, endY: Double?, deltaX: Double? = nil, deltaY: Double? = nil) throws -> PointerDiagnostics {
         // Check Accessibility permission — CGEvent.post silently fails without it
         guard AXIsProcessTrusted() else {
@@ -79,7 +75,7 @@ final class PointerService {
         var targetX: Double
         var targetY: Double
 
-        // If label is provided, use accessibility to find the element
+        // If label is provided, use accessibility to find the element (returns screen-absolute)
         if let label = label {
             guard let center = try AccessibilityService.shared.findElementCenter(label: label) else {
                 throw PointerError.labelNotFound(label)
@@ -94,14 +90,13 @@ final class PointerService {
             targetY = y
         }
 
-        // Convert window-relative to absolute screen coordinates
-        let (absPoint, windowOrigin, frontAppName) = try windowRelativeToAbsolute(x: targetX, y: targetY)
+        let absPoint = CGPoint(x: targetX, y: targetY)
         let screenFrame = NSScreen.main?.frame
+        let frontAppName = NSWorkspace.shared.frontmostApplication?.localizedName
 
         let diag = PointerDiagnostics(
             absPoint: absPoint,
             screenFrame: screenFrame,
-            windowOrigin: windowOrigin,
             frontApp: frontAppName
         )
 
@@ -111,11 +106,10 @@ final class PointerService {
 
         switch parsedAction {
         case .click:
-            let isRight = button == "right"
             postMove(to: absPoint)
             ClickOverlayService.shared.animateClick(at: absPoint)
             usleep(50_000)
-            postClick(at: absPoint, right: isRight)
+            postClick(at: absPoint, button: .left)
         case .doubleClick:
             postMove(to: absPoint)
             ClickOverlayService.shared.animateClick(at: absPoint)
@@ -125,22 +119,22 @@ final class PointerService {
             postMove(to: absPoint)
             ClickOverlayService.shared.animateClick(at: absPoint)
             usleep(50_000)
-            postClick(at: absPoint, right: true)
+            postClick(at: absPoint, button: .right)
+        case .middleClick:
+            postMove(to: absPoint)
+            ClickOverlayService.shared.animateClick(at: absPoint)
+            usleep(50_000)
+            postClick(at: absPoint, button: .center)
         case .move:
             postMove(to: absPoint)
             ClickOverlayService.shared.animateClick(at: absPoint)
         case .drag:
-            let endAbsX: Double
-            let endAbsY: Double
+            let dragEnd: CGPoint
             if let ex = endX, let ey = endY {
-                let (endAbs, _, _) = try windowRelativeToAbsolute(x: ex, y: ey)
-                endAbsX = Double(endAbs.x)
-                endAbsY = Double(endAbs.y)
+                dragEnd = CGPoint(x: ex, y: ey)
             } else {
-                endAbsX = Double(absPoint.x)
-                endAbsY = Double(absPoint.y)
+                dragEnd = absPoint
             }
-            let dragEnd = CGPoint(x: endAbsX, y: endAbsY)
             DragPathOverlay.shared.showDrag(from: absPoint, to: dragEnd)
             postMove(to: absPoint)
             ClickOverlayService.shared.animateClick(at: absPoint)
@@ -161,44 +155,29 @@ final class PointerService {
 
     // MARK: - Private
 
-    private func windowRelativeToAbsolute(x: Double, y: Double) throws -> (CGPoint, CGPoint?, String?) {
-        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else {
-            return (CGPoint(x: x, y: y), nil, nil)
+    private func postClick(at point: CGPoint, button: CGMouseButton) {
+        let mouseType: CGEventType
+        let mouseUpType: CGEventType
+        switch button {
+        case .left:
+            mouseType = .leftMouseDown
+            mouseUpType = .leftMouseUp
+        case .right:
+            mouseType = .rightMouseDown
+            mouseUpType = .rightMouseUp
+        case .center:
+            mouseType = .otherMouseDown
+            mouseUpType = .otherMouseUp
+        @unknown default:
+            mouseType = .leftMouseDown
+            mouseUpType = .leftMouseUp
         }
 
-        guard let frontApp = NSWorkspace.shared.frontmostApplication else {
-            return (CGPoint(x: x, y: y), nil, nil)
-        }
-
-        let frontPID = frontApp.processIdentifier
-        let frontAppName = frontApp.localizedName
-
-        let windowInfo = windowList.first(where: {
-            ($0[kCGWindowOwnerPID as String] as? Int32) == frontPID &&
-            ($0[kCGWindowLayer as String] as? Int) == 0
-        })
-
-        if let windowInfo = windowInfo,
-           let bounds = windowInfo[kCGWindowBounds as String] as? [String: Any],
-           let winX = bounds["X"] as? Double,
-           let winY = bounds["Y"] as? Double {
-            return (CGPoint(x: winX + x, y: winY + y), CGPoint(x: winX, y: winY), frontAppName)
-        } else {
-            // No window — treat as absolute coords (desktop clicks, fullscreen, etc.)
-            return (CGPoint(x: x, y: y), nil, frontAppName)
-        }
-    }
-
-    private func postClick(at point: CGPoint, right: Bool) {
-        let mouseType: CGEventType = right ? .rightMouseDown : .leftMouseDown
-        let mouseUpType: CGEventType = right ? .rightMouseUp : .leftMouseUp
-        let mouseButton: CGMouseButton = right ? .right : .left
-
-        if let down = CGEvent(mouseEventSource: eventSource, mouseType: mouseType, mouseCursorPosition: point, mouseButton: mouseButton) {
+        if let down = CGEvent(mouseEventSource: eventSource, mouseType: mouseType, mouseCursorPosition: point, mouseButton: button) {
             down.post(tap: .cgSessionEventTap)
         }
         usleep(10_000) // 10ms between down and up
-        if let up = CGEvent(mouseEventSource: eventSource, mouseType: mouseUpType, mouseCursorPosition: point, mouseButton: mouseButton) {
+        if let up = CGEvent(mouseEventSource: eventSource, mouseType: mouseUpType, mouseCursorPosition: point, mouseButton: button) {
             up.post(tap: .cgSessionEventTap)
         }
     }
@@ -208,15 +187,17 @@ final class PointerService {
             down1.setIntegerValueField(.mouseEventClickState, value: 1)
             down1.post(tap: .cgSessionEventTap)
         }
+        usleep(10_000)
         if let up1 = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
             up1.setIntegerValueField(.mouseEventClickState, value: 1)
             up1.post(tap: .cgSessionEventTap)
         }
-        usleep(5_000)
+        usleep(50_000)
         if let down2 = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left) {
             down2.setIntegerValueField(.mouseEventClickState, value: 2)
             down2.post(tap: .cgSessionEventTap)
         }
+        usleep(10_000)
         if let up2 = CGEvent(mouseEventSource: eventSource, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
             up2.setIntegerValueField(.mouseEventClickState, value: 2)
             up2.post(tap: .cgSessionEventTap)
@@ -231,7 +212,7 @@ final class PointerService {
 
     private func postScroll(at point: CGPoint, deltaX: Int32, deltaY: Int32) {
         // Click at position first to ensure focus and cursor placement
-        postClick(at: point, right: false)
+        postClick(at: point, button: .left)
         usleep(50_000)
 
         // macOS clamps large scroll deltas in a single event, so break into

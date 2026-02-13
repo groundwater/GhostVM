@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { Download, Monitor, Cpu, Terminal } from "lucide-react";
+import { siteConfig } from "@/config/site";
 
 export const metadata: Metadata = {
   title: "Download - GhostVM",
@@ -17,7 +18,7 @@ export default function DownloadPage() {
 
       <div className="max-w-md mx-auto mb-12">
         <a
-          href="https://github.com/groundwater/GhostVM/releases/latest"
+          href={`${siteConfig.repo}/releases/latest`}
           className="flex items-center justify-center gap-3 px-8 py-4 rounded-xl bg-ghost-600 hover:bg-ghost-700 text-white font-semibold transition-colors shadow-lg w-full"
           target="_blank"
           rel="noopener noreferrer"
@@ -28,7 +29,7 @@ export default function DownloadPage() {
         <p className="text-center text-sm text-gray-500 mt-3">
           or{" "}
           <a
-            href="https://github.com/groundwater/GhostVM/releases"
+            href={`${siteConfig.repo}/releases`}
             className="text-ghost-600 dark:text-ghost-400 hover:underline"
             target="_blank"
             rel="noopener noreferrer"
@@ -65,8 +66,8 @@ export default function DownloadPage() {
             <pre className="terminal-text bg-gray-100 dark:bg-gray-900 rounded-lg p-3 overflow-x-auto text-xs">
               <code>
                 {`brew install xcodegen
-git clone https://github.com/groundwater/GhostVM
-cd GhostVM
+git clone ${siteConfig.repo}
+cd ghostvm
 make app`}
               </code>
             </pre>

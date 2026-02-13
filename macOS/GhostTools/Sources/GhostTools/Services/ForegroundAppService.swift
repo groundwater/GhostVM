@@ -20,8 +20,14 @@ final class ForegroundAppService {
         // Push the current frontmost app immediately
         pushCurrentApp()
 
+        // Also try again after a short delay (in case workspace isn't ready yet)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.pushCurrentApp()
+        }
+
         // Re-push when a new host client connects (they missed the initial push)
         EventPushServer.shared.onClientConnected = { [weak self] in
+            print("[ForegroundAppService] Client connected, pushing current app")
             self?.pushCurrentApp()
         }
 
@@ -48,8 +54,36 @@ final class ForegroundAppService {
 
     private func pushCurrentApp() {
         previousBundleId = nil  // Force re-push even if same app
-        if let app = NSWorkspace.shared.frontmostApplication {
+
+        var app = NSWorkspace.shared.frontmostApplication
+
+        // If no frontmost app or it's GhostTools itself, try to find Finder
+        if app == nil || app?.bundleIdentifier == ownBundleId {
+            app = NSWorkspace.shared.runningApplications.first {
+                $0.bundleIdentifier == "com.apple.finder"
+            }
+        }
+
+        if let app = app {
+            print("[ForegroundAppService] Pushing app: \(app.localizedName ?? "unknown") (\(app.bundleIdentifier ?? ""))")
+
+            // If foreground app is NOT Finder, send Finder first (as background)
+            if app.bundleIdentifier != "com.apple.finder" {
+                if let finder = NSWorkspace.shared.runningApplications.first(where: {
+                    $0.bundleIdentifier == "com.apple.finder"
+                }) {
+                    // Temporarily clear previousBundleId to allow Finder push
+                    let savedPrevious = previousBundleId
+                    previousBundleId = nil
+                    pushApp(finder)
+                    previousBundleId = savedPrevious
+                }
+            }
+
+            // Push the actual foreground app (will become index 0)
             pushApp(app)
+        } else {
+            print("[ForegroundAppService] No frontmost app found")
         }
     }
 

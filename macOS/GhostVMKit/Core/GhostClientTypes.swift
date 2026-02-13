@@ -342,14 +342,16 @@ public struct BatchElement: Codable {
     public let title: String?
     public let value: String?
     public let frame: BatchElementFrame
+    public let changeAge: Int?
 
-    public init(id: Int, role: String, label: String?, title: String?, value: String?, frame: BatchElementFrame) {
+    public init(id: Int, role: String, label: String?, title: String?, value: String?, frame: BatchElementFrame, changeAge: Int? = nil) {
         self.id = id
         self.role = role
         self.label = label
         self.title = title
         self.value = value
         self.frame = frame
+        self.changeAge = changeAge
     }
 }
 

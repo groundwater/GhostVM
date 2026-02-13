@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import CodeBlock from "@/components/docs/CodeBlock";
+import { siteConfig } from "@/config/site";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
@@ -25,7 +26,7 @@ export default function GettingStarted() {
       <h2>Installation</h2>
       <p>
         Download the latest DMG from the{" "}
-        <a href="https://github.com/groundwater/GhostVM/releases/latest">
+        <a href={`${siteConfig.repo}/releases/latest`}>
           releases page
         </a>
         , open it, and drag GhostVM.app into your Applications folder.
@@ -33,8 +34,8 @@ export default function GettingStarted() {
       <p>Or build from source:</p>
       <CodeBlock language="bash">
         {`brew install xcodegen
-git clone https://github.com/groundwater/GhostVM
-cd GhostVM
+git clone ${siteConfig.repo}
+cd ghostvm
 make app`}
       </CodeBlock>
 

@@ -500,6 +500,57 @@ public final class GhostClient: GhostClientProtocol {
         throw GhostClientError.notConnected
     }
 
+    // MARK: - Guest Screenshot / Batch
+
+    /// Capture a screenshot inside the guest (always full-screen).
+    public func captureGuestScreenshot(format: String = "png", scale: Double = 1.0) async throws -> (data: Data, contentType: String) {
+        if let vm = virtualMachine {
+            let path = "/vm/screenshot?format=\(format)&scale=\(scale)"
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let (statusCode, headers, body) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
+            guard statusCode == 200, let body = body else {
+                throw guestError(body, statusCode: statusCode)
+            }
+            let contentType = headers["Content-Type"] ?? "application/octet-stream"
+            return (body, contentType)
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Capture annotated screenshot (image + elements) inside the guest.
+    public func captureGuestAnnotatedScreenshot(scale: Double = 0.5) async throws -> Data {
+        if let vm = virtualMachine {
+            let path = "/vm/screenshot/annotated?scale=\(scale)"
+            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let body = body else {
+                throw guestError(body, statusCode: statusCode)
+            }
+            return body
+        }
+        throw GhostClientError.notConnected
+    }
+
+    /// Execute automation batch in the guest.
+    public func executeGuestBatch(_ request: BatchRequest) async throws -> Data {
+        let body = try JSONEncoder().encode(request)
+        if let vm = virtualMachine {
+            let responseData = try await sendHTTPRequest(
+                vm: vm,
+                method: "POST",
+                path: "/api/v1/batch",
+                body: body,
+                contentType: "application/json"
+            )
+            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            guard statusCode == 200, let respBody = respBody else {
+                throw guestError(respBody, statusCode: statusCode)
+            }
+            return respBody
+        }
+        throw GhostClientError.notConnected
+    }
+
     /// Show wait indicator overlay in guest
     public func showWaitIndicator() async throws {
         if let vm = virtualMachine {
@@ -633,10 +684,10 @@ public final class GhostClient: GhostClientProtocol {
         let fd = connection.fileDescriptor
         let result: Bool = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                // Send HTTP health check
-                let request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
-                request.withCString { ptr in
-                    _ = Darwin.write(fd, ptr, strlen(ptr))
+                // Send HTTP health check using HTTPUtilities
+                let requestData = HTTPUtilities.buildRequest(method: "GET", path: "/health")
+                requestData.withUnsafeBytes { ptr in
+                    _ = Darwin.write(fd, ptr.baseAddress!, requestData.count)
                 }
                 Darwin.shutdown(fd, SHUT_WR)
 
@@ -1016,20 +1067,29 @@ public final class GhostClient: GhostClientProtocol {
 
         let fd = connection.fileDescriptor
 
-        // Build and send HTTP headers - use relativePath to preserve folder structure
+        // Build HTTP headers using HTTPUtilities - use relativePath to preserve folder structure
+        var headers: [String: String] = [
+            "Content-Type": "application/octet-stream",
+            "X-Filename": relativePath
+        ]
+
+        if let batchID = batchID {
+            headers["X-Batch-ID"] = batchID
+        }
+        if isLastInBatch {
+            headers["X-Batch-Last"] = "true"
+        }
+        if let permissions = permissions {
+            headers["X-Permissions"] = String(permissions, radix: 8)
+        }
+
+        // Note: We manually construct this since HTTPUtilities.buildRequest includes Content-Length
+        // but we need to stream the body separately in chunks below
         var httpHeaders = "POST /api/v1/files/receive HTTP/1.1\r\n"
         httpHeaders += "Host: localhost\r\n"
         httpHeaders += "Connection: close\r\n"
-        httpHeaders += "Content-Type: application/octet-stream\r\n"
-        httpHeaders += "X-Filename: \(relativePath)\r\n"
-        if let batchID = batchID {
-            httpHeaders += "X-Batch-ID: \(batchID)\r\n"
-        }
-        if isLastInBatch {
-            httpHeaders += "X-Batch-Last: true\r\n"
-        }
-        if let permissions = permissions {
-            httpHeaders += "X-Permissions: \(String(permissions, radix: 8))\r\n"
+        for (key, value) in headers {
+            httpHeaders += "\(key): \(value)\r\n"
         }
         httpHeaders += "Content-Length: \(fileSize)\r\n"
         httpHeaders += "\r\n"
@@ -1247,36 +1307,27 @@ public final class GhostClient: GhostClientProtocol {
             }
         }
 
-        // Build HTTP request
-        var httpRequest = "\(method) \(path) HTTP/1.1\r\n"
-        httpRequest += "Host: localhost\r\n"
-        httpRequest += "Connection: close\r\n"
+        // Build HTTP request using HTTPUtilities
+        var headers: [String: String] = [:]
 
         if let token = authToken {
-            httpRequest += "Authorization: Bearer \(token)\r\n"
+            headers["Authorization"] = "Bearer \(token)"
         }
 
         if let contentType = contentType {
-            httpRequest += "Content-Type: \(contentType)\r\n"
+            headers["Content-Type"] = contentType
         }
 
-        if let headers = extraHeaders {
-            for (key, value) in headers {
-                httpRequest += "\(key): \(value)\r\n"
-            }
+        if let extraHeaders = extraHeaders {
+            headers.merge(extraHeaders) { _, new in new }
         }
 
-        if let body = body {
-            httpRequest += "Content-Length: \(body.count)\r\n"
-        }
-
-        httpRequest += "\r\n"
-
-        // Convert to data and append body if present
-        var requestData = Data(httpRequest.utf8)
-        if let body = body {
-            requestData.append(body)
-        }
+        let requestData = HTTPUtilities.buildRequest(
+            method: method,
+            path: path,
+            headers: headers,
+            body: body
+        )
 
         // Get file descriptor
         let fd = connection.fileDescriptor

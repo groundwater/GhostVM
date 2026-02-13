@@ -5,7 +5,8 @@
 -include .env
 export
 
-CODESIGN_ID ?= -
+CODESIGN_ID ?= Apple Development
+GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
 
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
@@ -58,12 +59,17 @@ app: $(XCODE_PROJECT) dmg ghostvm-icon
 	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
-# Build the SwiftUI app in Debug configuration
+# Build the SwiftUI app in Debug configuration (ad-hoc signing)
 debug: $(XCODE_PROJECT) dmg ghostvm-icon
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration Debug \
 		-derivedDataPath $(BUILD_DIR) \
+		CODE_SIGN_STYLE=Manual \
+		CODE_SIGN_IDENTITY=- \
+		DEVELOPMENT_TEAM= \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGNING_REQUIRED=NO \
 		build
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources"
@@ -72,8 +78,9 @@ debug: $(XCODE_PROJECT) dmg ghostvm-icon
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Copy GhostTools.dmg into app bundle Resources
 	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
-	@# Re-sign after adding resources
-	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
+	@# Sign helper and app ad-hoc with entitlements
+	codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"
+	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 	@echo "Debug app built at: $(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 
 # Build and run the app (attached to terminal)
@@ -96,6 +103,12 @@ GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
 # Build GhostTools guest agent
 tools:
 	@echo "Building GhostTools..."
+	@echo "Injecting build timestamp..."
+	@TIMESTAMP=$$(date +%s); \
+	plutil -replace CFBundleVersion -string "$$TIMESTAMP" \
+		"$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist"
+	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
+	@rm -f "$(GHOSTTOOLS_DIR)/.build/release/GhostTools"
 	cd $(GHOSTTOOLS_DIR) && swift build -c release
 	@echo "GhostTools built at: $(GHOSTTOOLS_DIR)/.build/release/GhostTools"
 
@@ -176,8 +189,8 @@ dmg: tools ghosttools-icon
 	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources/"
 	@# Copy README to DMG root
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Sign with developer identity (preserves TCC permissions across rebuilds)
-	codesign --force --deep -s "Apple Development" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
+	@# Sign GhostTools (Apple Development preserves TCC; ad-hoc for debug)
+	codesign --force --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
 	@# Create the DMG
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
@@ -264,7 +277,7 @@ dist: app cli
 	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/"
 	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/Resources/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
-	codesign --force --options runtime --timestamp --deep -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
+	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
 	hdiutil makehybrid -o "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" \
 		-hfs -hfs-volume-name "GhostTools" \
@@ -345,7 +358,7 @@ help:
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
 	@echo "Variables:"
-	@echo "  CODESIGN_ID   - Code signing identity (default: - for ad-hoc)"
+	@echo "  CODESIGN_ID   - Code signing identity (default: Apple Development)"
 	@echo "  XCODE_CONFIG  - Xcode build configuration (default: Release)"
 	@echo "  VERSION       - Version for DMG (default: git describe)"
 	@echo ""

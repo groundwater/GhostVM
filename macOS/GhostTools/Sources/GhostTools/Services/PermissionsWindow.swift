@@ -1,6 +1,9 @@
 import AppKit
 import CoreGraphics
 
+/// UserDefaults key for auto-start preference (must match App.swift)
+private let kAutoStartEnabledKey = "com.ghostvm.ghosttools.autoStartEnabled"
+
 /// Onboarding window that shows required permissions and their status.
 /// Shown on startup if any permission is missing. Auto-dismisses when all granted.
 ///
@@ -15,6 +18,7 @@ final class PermissionsWindow {
     private var window: NSWindow?
     private var pollTimer: Timer?
     private var rows: [PermissionRow] = []
+    private var autoStartObserver: Any?
 
     struct Permission {
         let name: String
@@ -45,8 +49,39 @@ final class PermissionsWindow {
         }
     }
 
-    private static let permissions: [Permission] = [
-        Permission(
+    /// Check Full Disk Access by testing root directory read
+    private static func checkFullDiskAccess() -> Bool {
+        let fm = FileManager.default
+        do {
+            _ = try fm.contentsOfDirectory(atPath: "/")
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Check if launch agent is installed
+    private static func isLaunchAgentInstalled() -> Bool {
+        // Access AppDelegate through the shared NSApplication
+        // Use MainActor.assumeIsolated since we're always on main thread for UI
+        return MainActor.assumeIsolated {
+            guard let appDelegate = NSApplication.shared.delegate as? AppDelegate else {
+                return false
+            }
+            return appDelegate.isLaunchAgentInstalled()
+        }
+    }
+
+    /// Enable auto-start by posting notification to AppDelegate
+    private static func enableAutoStart() {
+        NotificationCenter.default.post(name: .autoStartEnableRequested, object: nil)
+    }
+
+    private static func permissions() -> [Permission] {
+        var perms: [Permission] = []
+
+        // Accessibility (always shown)
+        perms.append(Permission(
             name: "Accessibility",
             description: "Pointer clicks, keyboard input, and UI element reading",
             check: { AXIsProcessTrusted() },
@@ -54,19 +89,41 @@ final class PermissionsWindow {
                 let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
                 AXIsProcessTrustedWithOptions(opts)
             }
-        ),
-        Permission(
+        ))
+
+        // Screen Recording (always shown)
+        perms.append(Permission(
             name: "Screen Recording",
             description: "Screenshots and screen stability detection",
             check: { CGPreflightScreenCaptureAccess() },
             request: { openPrivacyPane("Privacy_ScreenCapture") }
-        ),
-    ]
+        ))
+
+        // Full Disk Access (always shown)
+        perms.append(Permission(
+            name: "Full Disk Access",
+            description: "Access protected files for complete VM automation",
+            check: { checkFullDiskAccess() },
+            request: { openPrivacyPane("Privacy_AllFiles") }
+        ))
+
+        // Auto Start (only if not explicitly disabled)
+        if UserDefaults.standard.object(forKey: kAutoStartEnabledKey) as? Bool != false {
+            perms.append(Permission(
+                name: "Auto Start",
+                description: "Launch GhostTools automatically at login",
+                check: { isLaunchAgentInstalled() },
+                request: { enableAutoStart() }
+            ))
+        }
+
+        return perms
+    }
 
     /// Show the permissions window if any permission is missing.
     @discardableResult
     func showIfNeeded() -> Bool {
-        let allGranted = Self.permissions.allSatisfy { $0.check() }
+        let allGranted = Self.permissions().allSatisfy { $0.check() }
         if allGranted {
             print("[GhostTools] All permissions granted")
             return false
@@ -83,7 +140,8 @@ final class PermissionsWindow {
         let rowH: CGFloat = 64
         let headerH: CGFloat = 76
         let footerH: CGFloat = 48
-        let h = headerH + CGFloat(Self.permissions.count) * rowH + footerH
+        let perms = Self.permissions()
+        let h = headerH + CGFloat(perms.count) * rowH + footerH
         let pad: CGFloat = 28
 
         let win = NSWindow(
@@ -112,7 +170,7 @@ final class PermissionsWindow {
 
         // Rows
         rows = []
-        for (i, perm) in Self.permissions.enumerated() {
+        for (i, perm) in perms.enumerated() {
             let rowY = h - headerH - CGFloat(i + 1) * rowH + 8
             let granted = perm.check()
 
@@ -157,7 +215,7 @@ final class PermissionsWindow {
             rows.append(PermissionRow(index: i, dot: dot, button: btn, grantedLabel: gl))
 
             // Separator
-            if i < Self.permissions.count - 1 {
+            if i < perms.count - 1 {
                 let sep = NSBox()
                 sep.boxType = .separator
                 sep.frame = NSRect(x: pad, y: rowY + 2, width: w - pad * 2, height: 1)
@@ -180,13 +238,19 @@ final class PermissionsWindow {
             self?.updateStatus()
         }
 
+        // Observe auto-start preference changes
+        autoStartObserver = NotificationCenter.default.addObserver(forName: .autoStartPreferenceChanged, object: nil, queue: .main) { [weak self] _ in
+            self?.rebuild()
+        }
+
         win.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func enableClicked(_ sender: NSButton) {
         let i = sender.tag
-        guard i >= 0 && i < Self.permissions.count else { return }
+        let perms = Self.permissions()
+        guard i >= 0 && i < perms.count else { return }
 
         guard let row = rows.first(where: { $0.index == i }) else { return }
 
@@ -196,7 +260,7 @@ final class PermissionsWindow {
         } else {
             // First click = open Settings
             row.hasClickedEnable = true
-            Self.permissions[i].request()
+            perms[i].request()
             // Change button to "Restart" for next click
             sender.title = "Restart"
         }
@@ -206,10 +270,19 @@ final class PermissionsWindow {
         cleanup()
     }
 
+    /// Rebuild the window when permissions list changes (e.g., auto-start disabled)
+    private func rebuild() {
+        guard window != nil else { return }
+        cleanup()
+        show()
+    }
+
     private func updateStatus() {
+        let perms = Self.permissions()
         var allGranted = true
         for row in rows {
-            let granted = Self.permissions[row.index].check()
+            guard row.index < perms.count else { continue }
+            let granted = perms[row.index].check()
             row.dot.layer?.backgroundColor = granted ? NSColor.systemGreen.cgColor : NSColor.tertiaryLabelColor.cgColor
             row.button.isHidden = granted
             row.grantedLabel.isHidden = !granted
@@ -237,6 +310,10 @@ final class PermissionsWindow {
     private func cleanup() {
         pollTimer?.invalidate()
         pollTimer = nil
+        if let observer = autoStartObserver {
+            NotificationCenter.default.removeObserver(observer)
+            autoStartObserver = nil
+        }
         window?.close()
         window = nil
         rows = []

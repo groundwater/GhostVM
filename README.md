@@ -1,92 +1,84 @@
 # GhostVM
 
-GhostVM is a native macOS app and CLI tool for provisioning and managing macOS virtual machines on Apple Silicon using Apple's `Virtualization.framework`. VMs are stored as self-contained `.GhostVM` bundles.
+GhostVM is a native macOS app for creating and managing macOS virtual machines on Apple Silicon using Apple's `Virtualization.framework`. VMs are stored as self-contained `.GhostVM` bundles.
+
+## Features
+
+- Create macOS VMs with customizable CPU, memory, and disk
+- Download and manage restore images (IPSW) with built-in feed
+- Start, stop, suspend, and resume VMs
+- Create, revert, and delete snapshots
+- Shared folders between host and guest
+- Clipboard sync, file transfer, and URL forwarding via the GhostTools guest agent
+- Port forwarding through vsock tunnels
+- Per-VM Dock icons with a helper-per-VM architecture
+- `vmctl` CLI for headless VM management and scripting
+- `vmctl remote` for programmatic guest control (accessibility, pointer, keyboard)
 
 ## Requirements
 
 - macOS 15+ on Apple Silicon (arm64)
-- Xcode 15+ and XcodeGen for building (`brew install xcodegen`)
-- `com.apple.security.virtualization` entitlement (included in builds)
+- Xcode 15+ and XcodeGen (`brew install xcodegen`)
 
 ## Building
 
 ```bash
 make              # Show available targets
+make app          # Build GhostVM.app
 make cli          # Build vmctl CLI
-make app          # Build GhostVM.app via xcodebuild
+make test         # Run unit tests
 make run          # Build and run attached to terminal
 make launch       # Build and launch detached
-make test         # Run unit tests
-make dist         # Create distribution DMG with app + vmctl
-make clean        # Remove build artifacts and generated project
+make dist         # Create distribution DMG
+make clean        # Remove build artifacts
 ```
 
-Builds are ad-hoc signed by default. Override `CODESIGN_ID` for a different identity.
+## Project Structure
 
-## GUI App
-
-The GhostVM.app provides a SwiftUI interface for managing VMs:
-
-- Create macOS VMs with customizable CPU, memory, and disk
-- Manage restore images (IPSW) with built-in download support
-- Start, stop, suspend, and resume VMs
-- Create, revert, and delete snapshots
-- Configure shared folders (read-only or writable)
-- VM menu with keyboard shortcuts for Start, Suspend, Shut Down, and Terminate
+```
+.
+├── Makefile              # Build orchestration
+├── macOS/
+│   ├── project.yml       # XcodeGen project definition
+│   ├── GhostVM/          # Main SwiftUI app (VM manager/launcher)
+│   ├── GhostVMHelper/    # Per-VM helper process (display, toolbar, services)
+│   ├── GhostVMKit/       # Shared framework (types, VM controller, utilities)
+│   ├── GhostTools/       # Guest agent (runs inside VM, vsock communication)
+│   ├── GhostVMTests/     # Unit tests
+│   └── GhostVMUITests/   # UI tests
+└── Website/              # GitHub Pages site
+```
 
 ## CLI Usage
 
 ```bash
-./vmctl --help
+vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+vmctl install ~/VMs/sandbox.GhostVM
+vmctl start ~/VMs/sandbox.GhostVM
+vmctl stop ~/VMs/sandbox.GhostVM
 ```
 
 **Commands:**
 
-- `init <bundle-path>` – Create a new macOS VM bundle
-  - Options: `--cpus N`, `--memory GiB`, `--disk GiB`, `--restore-image PATH`, `--shared-folder PATH`, `--writable`
-- `install <bundle-path>` – Install macOS from restore image
-- `start <bundle-path>` – Launch the VM (GUI by default)
-  - Options: `--headless`, `--shared-folder PATH`, `--writable|--read-only`
-- `stop <bundle-path>` – Graceful shutdown
-- `status <bundle-path>` – Report running state and config
-- `resume <bundle-path>` – Resume from suspended state
-  - Options: `--headless`, `--shared-folder PATH`, `--writable|--read-only`
-- `discard-suspend <bundle-path>` – Discard suspended state
-- `snapshot <bundle-path> list` – List snapshots
-- `snapshot <bundle-path> create|revert|delete <name>` – Manage snapshots
-
-Restore images are auto-discovered from `~/Downloads/*.ipsw` and `/Applications/Install macOS*.app`.
-
-## Examples
-
-```bash
-make cli
-./vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
-./vmctl install ~/VMs/sandbox.GhostVM
-./vmctl start ~/VMs/sandbox.GhostVM
-./vmctl stop ~/VMs/sandbox.GhostVM
-```
-
-**Suspend and Resume:**
-
-```bash
-# Use VM > Suspend menu (Cmd+Option+S) in the app, then:
-./vmctl resume ~/VMs/sandbox.GhostVM
-```
-
-**Snapshots:**
-
-```bash
-./vmctl snapshot ~/VMs/sandbox.GhostVM list
-./vmctl snapshot ~/VMs/sandbox.GhostVM create clean
-./vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
-./vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
-```
+| Command | Description |
+|---------|-------------|
+| `init <bundle>` | Create a new VM bundle (`--cpus`, `--memory`, `--disk`, `--restore-image`) |
+| `install <bundle>` | Install macOS from a restore image |
+| `start <bundle>` | Launch the VM (`--headless`, `--shared-folder`) |
+| `stop <bundle>` | Graceful shutdown |
+| `suspend` / `resume` | Suspend and resume VM state |
+| `status <bundle>` | Report running state and config |
+| `snapshot <bundle> list\|create\|revert\|delete` | Manage snapshots |
+| `list` | List all VMs and their status |
+| `remote <vm> screenshot` | Capture guest screenshot |
+| `remote <vm> elements` | Inspect accessibility tree |
+| `remote <vm> leftclick --label <text>` | Click a UI element |
+| `remote <vm> type --text <text>` | Type text into the guest |
 
 ## Notes
 
-- Disk images are raw sparse files (default 64 GiB)
-- NAT networking via `VZNATNetworkDeviceAttachment`
-- Shared folders use `VZVirtioFileSystemDeviceConfiguration` (read-only by default)
-- Enable Remote Login (SSH) in guest for headless use
+- VMs use `VZNATNetworkDeviceAttachment` for networking
+- Shared folders use `VZVirtioFileSystemDeviceConfiguration`
+- GhostTools auto-installs to `/Applications` in the guest and auto-updates
+- Enable Remote Login (SSH) in the guest for headless use
 - Apple's EULA requires macOS guests to run on Apple-branded hardware
