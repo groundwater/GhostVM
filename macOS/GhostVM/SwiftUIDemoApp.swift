@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 import Combine
 import GhostVMKit
+import Sparkle
 
 @main
 @available(macOS 13.0, *)
@@ -40,12 +41,17 @@ struct GhostVMSwiftUIApp: App {
                 }
         }
         .commands {
-            DemoAppCommands(store: store, restoreStore: restoreStore)
+            DemoAppCommands(
+                store: store,
+                restoreStore: restoreStore,
+                updater: appDelegate.updaterController.updater
+            )
         }
 
         // Separate settings window (not a sheet or panel).
         WindowGroup("Settings", id: "settings") {
             SettingsDemoView()
+                .environment(\.sparkleUpdater, appDelegate.updaterController.updater)
         }
 
         WindowGroup("Restore Images", id: "restoreImages") {
@@ -89,19 +95,59 @@ extension FocusedValues {
     }
 }
 
+// MARK: - Sparkle Updater
+
+private struct UpdaterKey: EnvironmentKey {
+    static let defaultValue: SPUUpdater? = nil
+}
+
+extension EnvironmentValues {
+    var sparkleUpdater: SPUUpdater? {
+        get { self[UpdaterKey.self] }
+        set { self[UpdaterKey.self] = newValue }
+    }
+}
+
+final class CheckForUpdatesViewModel: ObservableObject {
+    @Published var canCheckForUpdates = false
+    private let updater: SPUUpdater
+
+    init(updater: SPUUpdater) {
+        self.updater = updater
+        updater.publisher(for: \.canCheckForUpdates)
+            .assign(to: &$canCheckForUpdates)
+    }
+
+    func checkForUpdates() {
+        updater.checkForUpdates()
+    }
+}
+
 @available(macOS 13.0, *)
 struct DemoAppCommands: Commands {
     @ObservedObject var store: App2VMStore
     @ObservedObject var restoreStore: App2RestoreImageStore
+    @ObservedObject private var checkForUpdatesVM: CheckForUpdatesViewModel
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.vmSession) private var activeSession
 
+    init(store: App2VMStore, restoreStore: App2RestoreImageStore, updater: SPUUpdater) {
+        self.store = store
+        self.restoreStore = restoreStore
+        self.checkForUpdatesVM = CheckForUpdatesViewModel(updater: updater)
+    }
+
     var body: some Commands {
         CommandGroup(replacing: .appSettings) {
-            Button("Settings…") {
+            Button("Settings\u{2026}") {
                 openWindow(id: "settings")
             }
             .keyboardShortcut(",", modifiers: [.command])
+            Divider()
+            Button("Check for Updates\u{2026}") {
+                checkForUpdatesVM.checkForUpdates()
+            }
+            .disabled(!checkForUpdatesVM.canCheckForUpdates)
         }
 
         CommandMenu("VM") {
@@ -2219,12 +2265,14 @@ struct VMWindowView: View {
 
 @available(macOS 13.0, *)
 struct SettingsDemoView: View {
+    @Environment(\.sparkleUpdater) private var updater
     @State private var vmPath: String
     @State private var ipswPath: String
     @State private var feedURLString: String
     @State private var verificationMessage: String? = nil
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
+    @State private var autoCheckForUpdates: Bool = true
 
     private let labelWidth: CGFloat = 130
 
@@ -2301,6 +2349,16 @@ struct SettingsDemoView: View {
                 .frame(maxWidth: 260, alignment: .leading)
             }
 
+            if updater != nil {
+                labeledRow("Updates") {
+                    Toggle("Automatically check for updates", isOn: $autoCheckForUpdates)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: autoCheckForUpdates) { _, newValue in
+                            updater?.automaticallyChecksForUpdates = newValue
+                        }
+                }
+            }
+
             #if DEBUG
             Divider()
 
@@ -2328,6 +2386,11 @@ struct SettingsDemoView: View {
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 320)
+        .onAppear {
+            if let updater = updater {
+                autoCheckForUpdates = updater.automaticallyChecksForUpdates
+            }
+        }
     }
 
     @ViewBuilder

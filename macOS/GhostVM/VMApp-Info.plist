@@ -66,5 +66,9 @@
 			</dict>
 		</dict>
 	</array>
+	<key>SUFeedURL</key>
+	<string>https://ghostvm.org/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>kM9Hv12r/NHKd7mB/ymaYLwPKvK6G1wW7Qd2tl7C+0U=</string>
 </dict>
 </plist>
