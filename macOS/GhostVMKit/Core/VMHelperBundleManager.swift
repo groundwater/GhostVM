@@ -36,8 +36,13 @@ public final class VMHelperBundleManager {
         // Copy the entire app bundle unmodified (preserves code signature)
         try fileManager.copyItem(at: sourceHelperAppURL, to: tempHelperURL)
 
-        // Copy GhostTools.dmg into the helper's Resources so the helper process can find it
-        copyGhostToolsDMG(into: tempHelperURL)
+        // Strip extended attributes (com.apple.FinderInfo etc.) that copyfile(3) carries over.
+        // These aren't part of the code seal and cause --strict codesign verification to fail.
+        stripExtendedAttributes(from: tempHelperURL)
+
+        // Copy GhostTools.dmg as a sibling of the helper .app (not inside it)
+        // so the signed bundle remains unmodified after copy.
+        copyGhostToolsDMG(into: layout.helperDirectoryURL)
 
         // Rename to VM-named .app folder for Dock/CMD+TAB label
         try fileManager.moveItem(at: tempHelperURL, to: finalHelperURL)
@@ -96,19 +101,33 @@ public final class VMHelperBundleManager {
 
     // MARK: - Private helpers
 
-    /// Copies GhostTools.dmg from the main GhostVM.app bundle into the helper app's Resources.
+    /// Copies GhostTools.dmg from the main GhostVM.app bundle into the helper directory
+    /// (as a sibling of the .app, not inside it, to preserve the code signature).
     /// Fails silently if the DMG is not found (it's optional in project.yml).
-    private func copyGhostToolsDMG(into helperAppURL: URL) {
+    private func copyGhostToolsDMG(into helperDirectoryURL: URL) {
         guard let dmgURL = Bundle.main.url(forResource: "GhostTools", withExtension: "dmg") else {
             return
         }
 
-        let destURL = helperAppURL
-            .appendingPathComponent("Contents")
-            .appendingPathComponent("Resources")
-            .appendingPathComponent("GhostTools.dmg")
+        let destURL = helperDirectoryURL.appendingPathComponent("GhostTools.dmg")
+
+        // Remove existing DMG if present (e.g. from a previous copy)
+        if fileManager.fileExists(atPath: destURL.path) {
+            try? fileManager.removeItem(at: destURL)
+        }
 
         try? fileManager.copyItem(at: dmgURL, to: destURL)
+    }
+
+    /// Strips all extended attributes from a bundle recursively.
+    /// This removes com.apple.FinderInfo and similar detritus that copyfile(3)
+    /// carries over, which would otherwise cause strict codesign verification to fail.
+    private func stripExtendedAttributes(from url: URL) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        process.arguments = ["-cr", url.path]
+        try? process.run()
+        process.waitUntilExit()
     }
 
     /// Finds the GhostVMHelper.app in the main app bundle.

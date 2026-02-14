@@ -138,11 +138,18 @@ public final class VMConfigurationBuilder {
         return config
     }
 
-    /// Finds GhostTools.dmg in the app bundle or build output directory.
+    /// Finds GhostTools.dmg in the app bundle, sibling directory, or build output directory.
     private static func findGhostToolsDMG() -> URL? {
         // Check app bundle Resources first
         if let bundleURL = Bundle.main.url(forResource: "GhostTools", withExtension: "dmg") {
             return bundleURL
+        }
+        // Check sibling of the running app bundle (Helper directory layout)
+        let siblingDMG = Bundle.main.bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("GhostTools.dmg")
+        if FileManager.default.fileExists(atPath: siblingDMG.path) {
+            return siblingDMG
         }
         // Check build output directory for development
         let buildDMG = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
