@@ -15,7 +15,7 @@ export default function Navbar() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex items-center justify-between h-14">
           <Link href="/" className="flex items-center gap-2">
-            <Logo className="h-7 w-auto" />
+            <Logo className="h-7 w-auto dark:invert" />
           </Link>
 
           <div className="hidden md:flex items-center gap-6">
