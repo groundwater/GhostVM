@@ -44,36 +44,8 @@ final class Router: @unchecked Sendable {
             return handleApps(request)
         } else if path == "/api/v1/fs" || path == "/api/v1/fs/mkdir" || path == "/api/v1/fs/delete" || path == "/api/v1/fs/move" {
             return handleFS(request)
-        } else if path == "/api/v1/accessibility" {
-            return handleAccessibility(request)
-        } else if path == "/api/v1/accessibility/action" {
-            return handleAccessibilityAction(request)
-        } else if path == "/api/v1/accessibility/menu" {
-            return handleAccessibilityMenu(request)
-        } else if path == "/api/v1/accessibility/type" {
-            return handleAccessibilityType(request)
-        } else if path == "/api/v1/accessibility/focused" {
-            return handleAccessibilityFocused(request)
-        } else if path == "/api/v1/pointer" {
-            return await handlePointer(request)
-        } else if path == "/api/v1/input" {
-            return await handleKeyboardInput(request)
         } else if path == "/api/v1/exec" {
             return await handleExec(request)
-        } else if path == "/vm/screenshot" {
-            return handleScreenshot(request)
-        } else if path == "/vm/screenshot/annotated" {
-            return await handleAnnotatedScreenshot(request)
-        } else if path == "/api/v1/batch" {
-            return await handleBatch(request)
-        } else if path == "/api/v1/permissions" {
-            return handlePermissions(request)
-        } else if path == "/api/v1/elements" {
-            return handleElements(request)
-        } else if path == "/api/v1/overlay/wait-show" {
-            return handleOverlayWaitShow(request)
-        } else if path == "/api/v1/overlay/wait-hide" {
-            return handleOverlayWaitHide(request)
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
@@ -360,7 +332,7 @@ final class Router: @unchecked Sendable {
         let path = request.path.components(separatedBy: "?").first ?? request.path
 
         if path == "/api/v1/apps" && request.method == .GET {
-            let apps = AppManagementService.shared.listApps()
+            let apps = listApps()
             let response = AppListResponse(apps: apps)
             guard let data = try? JSONEncoder().encode(response) else {
                 return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
@@ -377,65 +349,56 @@ final class Router: @unchecked Sendable {
             return HTTPResponse.error(.badRequest, message: "Invalid JSON - need bundleId")
         }
 
-        // Launch and quit default to navigation mode (can be overridden with ?expect=none)
-        let expect = parseExpectChange(request.path)
-        let defaultExpect: AccessibilityService.ExpectChange = (path.contains("/quit")) ? .navigation : .navigation
-        let finalExpect = (expect == .none && request.path.contains("expect=")) ? .none : defaultExpect
-
         if path.hasPrefix("/api/v1/apps/launch") {
-            log("[Router] POST /apps/launch: \(payload.bundleId) expect=\(finalExpect)")
-            let before = AccessibilityService.shared.createSnapshot()
-            let ok = AppManagementService.shared.launchApp(bundleId: payload.bundleId)
-
-            if ok {
-                switch finalExpect {
-                case .navigation:
-                    AccessibilityService.shared.waitForLargeChange(before: before)
-                    AccessibilityService.shared.waitForStabilization()
-                case .update:
-                    AccessibilityService.shared.waitForAnyChange(before: before)
-                case .none:
-                    break
-                }
+            log("[Router] POST /apps/launch: \(payload.bundleId)")
+            guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: payload.bundleId) else {
+                return HTTPResponse.error(.notFound, message: "App not found or failed to launch")
             }
-
-            return ok ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or failed to launch")
+            let config = NSWorkspace.OpenConfiguration()
+            let semaphore = DispatchSemaphore(value: 0)
+            var success = false
+            NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
+                success = error == nil
+                semaphore.signal()
+            }
+            semaphore.wait()
+            return success ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or failed to launch")
         }
 
         if path.hasPrefix("/api/v1/apps/activate") {
-            log("[Router] POST /apps/activate: \(payload.bundleId) expect=\(finalExpect)")
-            let before = AccessibilityService.shared.createSnapshot()
-            let ok = AppManagementService.shared.activateApp(bundleId: payload.bundleId)
-
-            if ok && finalExpect != .none {
-                switch finalExpect {
-                case .navigation:
-                    AccessibilityService.shared.waitForLargeChange(before: before, timeout: 3.0)
-                    AccessibilityService.shared.waitForStabilization(timeout: 3.0)
-                case .update:
-                    AccessibilityService.shared.waitForAnyChange(before: before)
-                case .none:
-                    break
-                }
+            log("[Router] POST /apps/activate: \(payload.bundleId)")
+            guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == payload.bundleId }) else {
+                return HTTPResponse.error(.notFound, message: "App not found or not running")
             }
-
+            let ok = app.activate()
             return ok ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or not running")
         }
 
         if path.hasPrefix("/api/v1/apps/quit") {
-            log("[Router] POST /apps/quit: \(payload.bundleId) expect=\(finalExpect)")
-            let before = AccessibilityService.shared.createSnapshot()
-            let ok = AppManagementService.shared.quitApp(bundleId: payload.bundleId)
-
-            if ok && finalExpect != .none {
-                // Quit: wait for app to disappear
-                Thread.sleep(forTimeInterval: 1.0)
+            log("[Router] POST /apps/quit: \(payload.bundleId)")
+            guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == payload.bundleId }) else {
+                return HTTPResponse.error(.notFound, message: "App not found or not running")
             }
-
+            let ok = app.terminate()
             return ok ? HTTPResponse(status: .ok) : HTTPResponse.error(.notFound, message: "App not found or not running")
         }
 
         return HTTPResponse.error(.notFound, message: "Not Found")
+    }
+
+    /// List running GUI apps (those with a Dock icon)
+    private func listApps() -> [AppInfo] {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        return NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .map { app in
+                AppInfo(
+                    name: app.localizedName ?? app.bundleIdentifier ?? "Unknown",
+                    bundleId: app.bundleIdentifier ?? "",
+                    pid: app.processIdentifier,
+                    isActive: app.processIdentifier == frontmost
+                )
+            }
     }
 
     // MARK: - File System
@@ -526,264 +489,6 @@ final class Router: @unchecked Sendable {
         }
     }
 
-    // MARK: - Accessibility
-
-    /// Parse target query param into AXTarget. Defaults to .front for backward compat.
-    private func parseAXTarget(_ path: String) -> AccessibilityService.AXTarget {
-        guard let value = parseQuery(path, key: "target") else { return .front }
-        return AccessibilityService.AXTarget(queryValue: value) ?? .front
-    }
-
-    private func parseExpectChange(_ path: String) -> AccessibilityService.ExpectChange {
-        guard let value = parseQuery(path, key: "expect") else { return .none }
-        switch value.lowercased() {
-        case "navigation", "nav": return .navigation
-        case "update", "upd": return .update
-        case "none": return .none
-        default: return .none
-        }
-    }
-
-    private func handleAccessibility(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        let depthStr = parseQuery(request.path, key: "depth")
-        let depth = depthStr.flatMap { Int($0) } ?? 5
-        let target = parseAXTarget(request.path)
-
-        do {
-            let trees = try AccessibilityService.shared.getTree(maxDepth: depth, target: target)
-            if target.isMulti {
-                guard let data = try? JSONEncoder().encode(trees) else {
-                    return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-                }
-                return HTTPResponse.json(data)
-            } else {
-                guard let first = trees.first else {
-                    return HTTPResponse.error(.internalServerError, message: "No tree returned")
-                }
-                guard let data = try? JSONEncoder().encode(first) else {
-                    return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-                }
-                return HTTPResponse.json(data)
-            }
-        } catch AccessibilityService.AXServiceError.permissionDenied {
-            return HTTPResponse.error(.forbidden, message: "Accessibility permission required. Grant access in System Preferences > Privacy & Security > Accessibility.")
-        } catch {
-            return axErrorResponse(error)
-        }
-    }
-
-    // MARK: - Accessibility Actions
-
-    private func handleAccessibilityAction(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        guard let body = request.body,
-              let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
-        }
-
-        let label = payload["label"] as? String
-        let role = payload["role"] as? String
-        let action = payload["action"] as? String ?? "AXPress"
-        let target = parseAXTarget(request.path)
-
-        do {
-            try AccessibilityService.shared.performAction(label: label, role: role, action: action, target: target)
-            return HTTPResponse.json(try! JSONEncoder().encode(AccessibilityService.ActionResult(ok: true, message: nil)))
-        } catch {
-            return axErrorResponse(error)
-        }
-    }
-
-    private func handleAccessibilityMenu(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        guard let body = request.body,
-              let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let path = payload["path"] as? [String] else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON — need {\"path\": [\"Menu\", \"Item\"]}")
-        }
-
-        let target = parseAXTarget(request.path)
-
-        do {
-            try AccessibilityService.shared.triggerMenuItem(path: path, target: target)
-            return HTTPResponse.json(try! JSONEncoder().encode(AccessibilityService.ActionResult(ok: true, message: nil)))
-        } catch {
-            return axErrorResponse(error)
-        }
-    }
-
-    private func handleAccessibilityType(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        guard let body = request.body,
-              let payload = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
-              let value = payload["value"] as? String else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON — need {\"value\": \"text\"}")
-        }
-
-        let label = payload["label"] as? String
-        let role = payload["role"] as? String
-        let target = parseAXTarget(request.path)
-
-        do {
-            try AccessibilityService.shared.setValue(value, label: label, role: role, target: target)
-            return HTTPResponse.json(try! JSONEncoder().encode(AccessibilityService.ActionResult(ok: true, message: nil)))
-        } catch {
-            return axErrorResponse(error)
-        }
-    }
-
-    private func handleAccessibilityFocused(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        let target = parseAXTarget(request.path)
-        do {
-            let info = try AccessibilityService.shared.getFocusedElement(target: target)
-            guard let data = try? JSONSerialization.data(withJSONObject: info) else {
-                return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-            }
-            return HTTPResponse.json(data)
-        } catch {
-            return axErrorResponse(error)
-        }
-    }
-
-    private func axErrorResponse(_ error: Error) -> HTTPResponse {
-        if case AccessibilityService.AXServiceError.permissionDenied = error {
-            return HTTPResponse.error(.forbidden, message: "Accessibility permission required")
-        }
-        if case AccessibilityService.AXServiceError.elementNotFound(let label) = error {
-            return HTTPResponse.error(.notFound, message: "Element not found: \(label)")
-        }
-        if case AccessibilityService.AXServiceError.menuNotFound(let path) = error {
-            return HTTPResponse.error(.notFound, message: "Menu not found: \(path)")
-        }
-        if case AccessibilityService.AXServiceError.appNotFound(let id) = error {
-            return HTTPResponse.error(.notFound, message: "Application not found: \(id)")
-        }
-        if case AccessibilityService.AXServiceError.actionFailed(let detail) = error {
-            return HTTPResponse.error(.internalServerError, message: "Action failed: \(detail)")
-        }
-        if case AccessibilityService.AXServiceError.multiTargetNotAllowed = error {
-            return HTTPResponse.error(.badRequest, message: "Multi-target (--all/--visible) not allowed for actions")
-        }
-        return HTTPResponse.error(.internalServerError, message: "\(error)")
-    }
-
-    // MARK: - Pointer
-
-    private func handlePointer(_ request: HTTPRequest) async -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        guard let body = request.body,
-              let payload = try? JSONDecoder().decode(PointerService.PointerRequest.self, from: body) else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
-        }
-
-        let expect = parseExpectChange(request.path)
-        log("[Router] POST /pointer: action=\(payload.action) expect=\(expect)")
-
-        // Take snapshot before action if waiting is needed
-        let before = (expect != .none) ? AccessibilityService.shared.createSnapshot() : nil
-
-        do {
-            let diag = try PointerService.shared.sendEvent(
-                action: payload.action,
-                x: payload.x,
-                y: payload.y,
-                button: payload.button,
-                label: payload.label,
-                endX: payload.endX,
-                endY: payload.endY,
-                deltaX: payload.deltaX,
-                deltaY: payload.deltaY
-            )
-
-            // Wait based on expect parameter
-            if let before = before {
-                switch expect {
-                case .navigation:
-                    AccessibilityService.shared.waitForLargeChange(before: before)
-                    AccessibilityService.shared.waitForStabilization()
-                case .update:
-                    AccessibilityService.shared.waitForAnyChange(before: before)
-                case .none:
-                    break
-                }
-            }
-
-            guard let data = try? JSONSerialization.data(withJSONObject: diag.dict) else {
-                return HTTPResponse(status: .ok)
-            }
-            return HTTPResponse.json(data)
-        } catch PointerService.PointerError.labelNotFound(let label) {
-            return HTTPResponse.error(.notFound, message: "Element with label '\(label)' not found")
-        } catch PointerService.PointerError.permissionDenied {
-            return HTTPResponse.error(.forbidden, message: "Accessibility permission required. Grant to GhostTools in System Settings > Privacy & Security > Accessibility.")
-        } catch {
-            return HTTPResponse.error(.internalServerError, message: "Pointer event failed: \(error)")
-        }
-    }
-
-    // MARK: - Keyboard Input
-
-    private func handleKeyboardInput(_ request: HTTPRequest) async -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        guard let body = request.body,
-              let payload = try? JSONDecoder().decode(KeyboardService.KeyboardRequest.self, from: body) else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
-        }
-
-        let expect = parseExpectChange(request.path)
-        log("[Router] POST /input expect=\(expect)")
-
-        // Take snapshot before action if waiting is needed
-        let before = (expect != .none) ? AccessibilityService.shared.createSnapshot() : nil
-
-        do {
-            try KeyboardService.shared.sendInput(
-                text: payload.text,
-                keys: payload.keys,
-                modifiers: payload.modifiers,
-                rate: payload.rate
-            )
-
-            // Wait based on expect parameter
-            if let before = before {
-                switch expect {
-                case .navigation:
-                    AccessibilityService.shared.waitForLargeChange(before: before)
-                    AccessibilityService.shared.waitForStabilization()
-                case .update:
-                    AccessibilityService.shared.waitForAnyChange(before: before)
-                case .none:
-                    break
-                }
-            }
-
-            return HTTPResponse(status: .ok)
-        } catch KeyboardService.KeyboardError.permissionDenied {
-            return HTTPResponse.error(.forbidden, message: "Accessibility permission required for keyboard input")
-        } catch {
-            return HTTPResponse.error(.internalServerError, message: "Keyboard input failed: \(error)")
-        }
-    }
-
     // MARK: - Shell Exec
 
     private struct ExecRequest: Codable {
@@ -851,198 +556,6 @@ final class Router: @unchecked Sendable {
             return HTTPResponse.error(.internalServerError, message: "Failed to encode result")
         }
         return HTTPResponse.json(responseData)
-    }
-
-    // MARK: - Permissions
-
-    private func handlePermissions(_ request: HTTPRequest) -> HTTPResponse {
-        let screenCaptureGranted = CGPreflightScreenCaptureAccess()
-
-        if request.method == .POST {
-            // POST: prompt for permissions (shows macOS dialogs)
-            let axOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-            let axTrusted = AXIsProcessTrustedWithOptions(axOptions)
-            if !screenCaptureGranted {
-                _ = CGRequestScreenCaptureAccess()
-            }
-
-            let result: [String: Any] = [
-                "accessibility": axTrusted,
-                "screenRecording": CGPreflightScreenCaptureAccess(),
-                "prompted": true
-            ]
-            guard let data = try? JSONSerialization.data(withJSONObject: result) else {
-                return HTTPResponse.error(.internalServerError, message: "Failed to encode")
-            }
-            return HTTPResponse.json(data)
-        }
-
-        // GET: check current permission status without prompting
-        let axTrusted = AXIsProcessTrusted()
-        let result: [String: Any] = [
-            "accessibility": axTrusted,
-            "screenRecording": screenCaptureGranted
-        ]
-        guard let data = try? JSONSerialization.data(withJSONObject: result) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode")
-        }
-        return HTTPResponse.json(data)
-    }
-
-    // MARK: - Screenshot
-
-    private func handleScreenshot(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        let format = (parseQuery(request.path, key: "format") ?? "png").lowercased()
-        let scale = Double(parseQuery(request.path, key: "scale") ?? "1.0") ?? 1.0
-
-        do {
-            if format == "jpeg" || format == "jpg" {
-                let quality = Double(parseQuery(request.path, key: "quality") ?? "0.8") ?? 0.8
-                let data = try ScreenshotService.shared.captureJPEG(scale: scale, quality: quality)
-                return HTTPResponse(
-                    status: .ok,
-                    headers: ["Content-Type": "image/jpeg", "Content-Length": "\(data.count)"],
-                    body: data
-                )
-            }
-
-            let data = try ScreenshotService.shared.capturePNG()
-            return HTTPResponse(
-                status: .ok,
-                headers: ["Content-Type": "image/png", "Content-Length": "\(data.count)"],
-                body: data
-            )
-        } catch ScreenshotService.CaptureError.screenRecordingDenied {
-            return HTTPResponse.error(.forbidden, message: "Screen Recording permission required. Grant to GhostTools in System Settings > Privacy & Security > Screen Recording.")
-        } catch {
-            return HTTPResponse.error(.internalServerError, message: "Capture failed: \(error.localizedDescription)")
-        }
-    }
-
-    private func handleAnnotatedScreenshot(_ request: HTTPRequest) async -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        guard CGPreflightScreenCaptureAccess() else {
-            return HTTPResponse.error(.forbidden, message: "Screen Recording permission required. Grant to GhostTools in System Settings > Privacy & Security > Screen Recording.")
-        }
-
-        let scale = Double(parseQuery(request.path, key: "scale") ?? "0.5") ?? 0.5
-        let annotated = await BatchAutomationService.shared.captureAnnotatedScreenshot(scale: scale)
-
-        var payload: [String: Any] = [
-            "elements": annotated.elements,
-            "display": annotated.display
-        ]
-        if let image = annotated.imageBase64 {
-            payload["screenshot"] = image
-        }
-
-        guard let data = try? JSONSerialization.data(withJSONObject: payload) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-        }
-        return HTTPResponse.json(data)
-    }
-
-    // MARK: - Batch
-
-    private func handleBatch(_ request: HTTPRequest) async -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        guard let body = request.body else {
-            return HTTPResponse.error(.badRequest, message: "Request body required")
-        }
-        guard let batchRequest = try? JSONDecoder().decode(GuestBatchRequest.self, from: body) else {
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
-        }
-
-        let result = await BatchAutomationService.shared.execute(request: batchRequest)
-        guard let data = try? JSONEncoder().encode(result) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-        }
-        return HTTPResponse.json(data)
-    }
-
-    // MARK: - Elements (A11y overlay + JSON, no screenshot)
-
-    private func handleElements(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        let result = AccessibilityService.shared.getInteractiveElements()
-        let elements = result.elements
-        let scrollState = result.scrollState
-
-        // Track element changes for recency coloring
-        let changeAges = ElementChangeTracker.shared.track(elements)
-
-        // Show live overlay of discovered elements in the guest framebuffer
-        if !elements.isEmpty {
-            A11yElementOverlay.shared.showElements(elements, changeAges: changeAges)
-        }
-
-        // Build elements array for JSON
-        let elementsJSON: [[String: Any]] = elements.map { elem in
-            var dict: [String: Any] = [
-                "id": elem.id,
-                "role": elem.role,
-                "frame": [
-                    "x": Int(elem.frame.x),
-                    "y": Int(elem.frame.y),
-                    "w": Int(elem.frame.width),
-                    "h": Int(elem.frame.height)
-                ],
-                "changeAge": changeAges[elem.id] ?? 0
-            ]
-            if let label = elem.label { dict["label"] = label }
-            if let title = elem.title { dict["title"] = title }
-            if let value = elem.value { dict["value"] = value }
-            return dict
-        }
-
-        let displayJSON: [String: Any] = [
-            "scroll": [
-                "up": scrollState.canScrollUp,
-                "down": scrollState.canScrollDown,
-                "left": scrollState.canScrollLeft,
-                "right": scrollState.canScrollRight
-            ]
-        ]
-
-        let response: [String: Any] = [
-            "elements": elementsJSON,
-            "display": displayJSON
-        ]
-
-        guard let data = try? JSONSerialization.data(withJSONObject: response) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-        }
-        return HTTPResponse.json(data)
-    }
-
-    // MARK: - Overlay Controls
-
-    private func handleOverlayWaitShow(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        WaitIndicatorOverlay.shared.show()
-        return HTTPResponse(status: .ok)
-    }
-
-    private func handleOverlayWaitHide(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .POST else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-        WaitIndicatorOverlay.shared.hide()
-        return HTTPResponse(status: .ok)
     }
 
     // MARK: - Frontmost App
@@ -1127,8 +640,15 @@ struct OpenRequest: Codable {
 
 // MARK: - App Management Types
 
+struct AppInfo: Codable {
+    let name: String
+    let bundleId: String
+    let pid: Int32
+    let isActive: Bool
+}
+
 struct AppListResponse: Codable {
-    let apps: [AppManagementService.AppInfo]
+    let apps: [AppInfo]
 }
 
 struct AppActionRequest: Codable {
