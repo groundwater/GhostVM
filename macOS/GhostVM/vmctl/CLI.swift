@@ -470,18 +470,6 @@ Remote flags:
 
 Remote subcommands (use 'vmctl remote --help' for full details):
   health                                      Check VM connection
-  screenshot [-o file] [--elements]           Capture VM screen
-  pointer <left|right|middle|double>click     Click at element or coords
-  pointer drag X1 Y1 -- X2 Y2                Drag between points
-  pointer scroll X Y --dy N [--dx N]          Scroll at position
-  input type <text> | key [--meta] <key>      Type text or key combos
-  launch|activate <bundleId>                  Launch or activate app
-  a11y [--front|--all|--app B] [--depth N]    Accessibility tree
-  a11y focused | elements                     Focused element / interactive list
-  a11y click <label> [--role R]               Click element by label
-  a11y action <label> --action AXFoo          Perform any AX action
-  a11y menu <item1> <item2>...                Trigger menu item
-  a11y type <value> [--label L]               Set field value
   exec <command> [args...]                    Run command in guest
   clipboard get | set <text>                  Guest clipboard
   apps                                        List running apps
@@ -504,14 +492,9 @@ Examples:
   vmctl socket ~/VMs/sandbox.GhostVM                   # Get socket path for running VM
   vmctl remote --socket $(vmctl socket Aria) interactive  # Use with command substitution
   vmctl remote --name MyVM health
-  vmctl remote --name MyVM screenshot --elements -o /tmp/screen.png
-  vmctl remote --name MyVM pointer leftclick --element 5
-  vmctl remote --name MyVM pointer doubleclick --element 5
-  vmctl remote --name MyVM input type "hello world"
-  vmctl remote --name MyVM a11y --front --depth 3
-  vmctl remote --name MyVM a11y elements
-  vmctl remote --name MyVM a11y click "OK" --role AXButton
-  vmctl remote --name MyVM a11y menu File "New Window"
+  vmctl remote --name MyVM exec ls -la
+  vmctl remote --name MyVM clipboard get
+  vmctl remote --name MyVM apps
   vmctl remote --name MyVM interactive
 
 Notes:

@@ -20,7 +20,6 @@ export default function GettingStarted() {
       <h2>Requirements</h2>
       <ul>
         <li>macOS 15+ (Sequoia) on Apple Silicon (M1 or later)</li>
-        <li>Xcode 15+ and XcodeGen for building from source</li>
       </ul>
 
       <h2>Installation</h2>
@@ -31,13 +30,6 @@ export default function GettingStarted() {
         </a>
         , open it, and drag GhostVM.app into your Applications folder.
       </p>
-      <p>Or build from source:</p>
-      <CodeBlock language="bash">
-        {`brew install xcodegen
-git clone ${siteConfig.repo}
-cd ghostvm
-make app`}
-      </CodeBlock>
 
       <h2>Create your first VM</h2>
 

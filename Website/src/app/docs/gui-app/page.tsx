@@ -126,6 +126,7 @@ export default function GUIApp() {
         <li>IPSW cache location</li>
         <li>IPSW feed URL (for discovering restore images)</li>
         <li>App icon style (System / Light / Dark)</li>
+        <li>Automatic Updates (check for updates, download automatically)</li>
       </ul>
 
       <h2>Restore Images</h2>

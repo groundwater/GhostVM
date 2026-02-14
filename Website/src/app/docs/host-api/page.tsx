@@ -20,68 +20,35 @@ export default function HostAPI() {
         When a VM starts, the GhostVMHelper process creates a Unix socket at:
       </p>
       <CodeBlock language="text">
-        {`~/Library/Application Support/GhostVM/api/<service-name>.sock`}
+        {`~/Library/Application Support/GhostVM/api/<VMName>.GhostVM.sock`}
       </CodeBlock>
       <p>
-        The service name is derived from the VM bundle path. Any process on the
-        host can connect to this socket to query or control the VM.
+        The socket name is derived from the VM name (e.g. a VM named
+        &ldquo;dev&rdquo; gets <code>dev.GhostVM.sock</code>). Any process on
+        the host can connect to this socket to query or control the VM.
       </p>
 
       <h2>Wire Protocol</h2>
       <p>
-        The Host API uses <strong>newline-delimited JSON</strong>. Each
-        request/response is a single JSON object followed by a newline
-        character.
+        The Host API uses <strong>standard HTTP/1.1</strong> over the Unix
+        socket. Send a normal HTTP request and read an HTTP response.
       </p>
-      <CodeBlock language="json" title="Request format">
-        {`{"method":"GET","path":"/vm/status","headers":{},"body":null}\n`}
+      <CodeBlock language="text" title="Request format">
+        {`GET /health HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n`}
       </CodeBlock>
-      <CodeBlock language="json" title="Response format">
-        {`{"status":200,"headers":{"Content-Type":"application/json"},"body":"{\\"state\\":\\"running\\"}"}\n`}
+      <CodeBlock language="text" title="Response format">
+        {`HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{"status":"ok"}`}
       </CodeBlock>
       <p>
-        For binary data (file transfers), the response header includes a{" "}
-        <code>Content-Length</code> field and raw bytes follow the header line.
+        Any HTTP client that supports Unix domain sockets works &mdash;{" "}
+        <code>curl --unix-socket</code>, Python&apos;s{" "}
+        <code>requests_unixsocket</code>, or a raw socket connection.
       </p>
 
       <h2>Endpoints</h2>
-
-      <h3>Host-only Endpoints</h3>
       <p>
-        These endpoints are handled directly by the Helper process without
-        communicating with the guest.
-      </p>
-      <table>
-        <thead>
-          <tr>
-            <th>Method</th>
-            <th>Path</th>
-            <th>Description</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td><code>GET</code></td>
-            <td><code>/vm/status</code></td>
-            <td>Returns VM state, health status, and Helper PID</td>
-          </tr>
-          <tr>
-            <td><code>POST</code></td>
-            <td><code>/vm/stop</code></td>
-            <td>Request graceful VM shutdown</td>
-          </tr>
-          <tr>
-            <td><code>POST</code></td>
-            <td><code>/vm/suspend</code></td>
-            <td>Suspend the VM and save state</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <h3>Guest Proxy Endpoints</h3>
-      <p>
-        These endpoints proxy requests through the vsock connection to the
-        GhostTools agent running inside the guest.
+        All requests are proxied through the vsock connection to the GhostTools
+        agent running inside the guest.
       </p>
       <table>
         <thead>
@@ -113,59 +80,90 @@ export default function HostAPI() {
             <td>List files queued by the guest</td>
           </tr>
           <tr>
-            <td><code>POST</code></td>
-            <td><code>/api/v1/files/send</code></td>
-            <td>Send a file to the guest (binary, X-Filename header)</td>
-          </tr>
-          <tr>
-            <td><code>GET</code></td>
-            <td><code>/api/v1/files/:path</code></td>
-            <td>Fetch a file from the guest (binary response)</td>
-          </tr>
-          <tr>
-            <td><code>GET</code></td>
-            <td><code>/api/v1/logs</code></td>
-            <td>Get buffered guest logs</td>
+            <td><code>DELETE</code></td>
+            <td><code>/api/v1/files</code></td>
+            <td>Clear the guest file queue</td>
           </tr>
           <tr>
             <td><code>POST</code></td>
             <td><code>/api/v1/open</code></td>
             <td>Open a path in the guest Finder</td>
           </tr>
+          <tr>
+            <td><code>POST</code></td>
+            <td><code>/api/v1/exec</code></td>
+            <td>Execute a shell command in the guest</td>
+          </tr>
+          <tr>
+            <td><code>GET</code></td>
+            <td><code>/api/v1/fs?path=&lt;dir&gt;</code></td>
+            <td>List directory contents in the guest</td>
+          </tr>
+          <tr>
+            <td><code>GET</code></td>
+            <td><code>/api/v1/apps</code></td>
+            <td>List running applications in the guest</td>
+          </tr>
+          <tr>
+            <td><code>POST</code></td>
+            <td><code>/api/v1/apps/launch</code></td>
+            <td>Launch an app by bundle ID</td>
+          </tr>
+          <tr>
+            <td><code>POST</code></td>
+            <td><code>/api/v1/apps/activate</code></td>
+            <td>Activate (bring to front) an app by bundle ID</td>
+          </tr>
+          <tr>
+            <td><code>POST</code></td>
+            <td><code>/api/v1/apps/quit</code></td>
+            <td>Quit an app by bundle ID</td>
+          </tr>
+          <tr>
+            <td><code>GET</code></td>
+            <td><code>/api/v1/apps/frontmost</code></td>
+            <td>Get the frontmost application&apos;s bundle ID</td>
+          </tr>
         </tbody>
       </table>
 
       <h2>Example Usage</h2>
       <p>
-        You can interact with the Host API using any Unix socket client. Here is
-        an example using <code>socat</code>:
+        You can interact with the Host API using any Unix socket HTTP client.
+        Here is an example using <code>curl</code>:
       </p>
-      <CodeBlock language="bash" title="Query VM status with socat">
-        {`echo '{"method":"GET","path":"/vm/status","headers":{}}' | \\
-  socat - UNIX-CONNECT:"$HOME/Library/Application Support/GhostVM/api/your-vm.sock"`}
+      <CodeBlock language="bash" title="Check health with curl">
+        {`curl --unix-socket ~/Library/Application\\ Support/GhostVM/api/dev.GhostVM.sock \\
+  http://localhost/health`}
+      </CodeBlock>
+      <CodeBlock language="bash" title="Run a command in the guest">
+        {`curl --unix-socket ~/Library/Application\\ Support/GhostVM/api/dev.GhostVM.sock \\
+  -X POST -H "Content-Type: application/json" \\
+  -d '{"command":"uname","args":["-a"]}' \\
+  http://localhost/api/v1/exec`}
       </CodeBlock>
       <p>Or with a simple Python script:</p>
       <CodeBlock language="python" title="Python example">
-        {`import socket, json
+        {`import socket, os, json
 
-sock_path = "~/Library/Application Support/GhostVM/api/your-vm.sock"
-sock_path = os.path.expanduser(sock_path)
+sock_path = os.path.expanduser(
+    "~/Library/Application Support/GhostVM/api/dev.GhostVM.sock"
+)
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.connect(sock_path)
 
-request = json.dumps({"method": "GET", "path": "/health", "headers": {}})
-s.sendall((request + "\\n").encode())
+request = "GET /health HTTP/1.1\\r\\nHost: localhost\\r\\nContent-Length: 0\\r\\n\\r\\n"
+s.sendall(request.encode())
 
 response = b""
 while True:
     chunk = s.recv(4096)
-    if not chunk or b"\\n" in chunk:
-        response += chunk
+    if not chunk:
         break
     response += chunk
 
-print(json.loads(response.decode().strip()))
+print(response.decode())
 s.close()`}
       </CodeBlock>
 

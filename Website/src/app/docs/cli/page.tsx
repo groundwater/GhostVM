@@ -37,12 +37,12 @@ Options:
 
       <h2>Common Commands</h2>
 
-      <h3>clone</h3>
+      <h3>list</h3>
       <p>
-        Duplicate a VM using APFS copy-on-write. The clone gets a fresh machine
-        identity and MAC address. Near-zero disk overhead.
+        List all VMs in the current root directory with their state. Running VMs
+        show their socket path.
       </p>
-      <CodeBlock language="bash">{`vmctl clone <source-bundle> <new-name>`}</CodeBlock>
+      <CodeBlock language="bash">{`vmctl list`}</CodeBlock>
 
       <h3>start</h3>
       <p>Launch a VM.</p>
@@ -50,7 +50,10 @@ Options:
         {`vmctl start <bundle-path> [options]
 
 Options:
-  --recovery             Boot to Recovery mode`}
+  --headless             Run without a GUI window
+  --shared-folder PATH   Host folder to share with guest
+  --writable             Make shared folder writable (use with --shared-folder)
+  --read-only            Make shared folder read-only (use with --shared-folder)`}
       </CodeBlock>
 
       <h3>stop</h3>
@@ -63,7 +66,15 @@ Options:
 
       <h3>resume</h3>
       <p>Resume from suspended state.</p>
-      <CodeBlock language="bash">{`vmctl resume <bundle-path>`}</CodeBlock>
+      <CodeBlock language="bash">
+        {`vmctl resume <bundle-path> [options]
+
+Options:
+  --headless             Run without a GUI window
+  --shared-folder PATH   Host folder to share with guest
+  --writable             Make shared folder writable (use with --shared-folder)
+  --read-only            Make shared folder read-only (use with --shared-folder)`}
+      </CodeBlock>
 
       <h3>discard-suspend</h3>
       <p>Discard the suspended state so the VM boots fresh.</p>
@@ -76,6 +87,31 @@ Options:
 vmctl snapshot <bundle-path> create <name>
 vmctl snapshot <bundle-path> revert <name>
 vmctl snapshot <bundle-path> delete <name>`}
+      </CodeBlock>
+
+      <h3>socket</h3>
+      <p>
+        Print the Unix socket path for a running VM. Useful for command
+        substitution with other tools.
+      </p>
+      <CodeBlock language="bash">{`vmctl socket <bundle-path>`}</CodeBlock>
+
+      <h3>remote</h3>
+      <p>
+        Execute commands against a running VM via its Host API socket. Requires{" "}
+        <code>--name</code> or <code>--socket</code> to identify the VM.
+      </p>
+      <CodeBlock language="bash">
+        {`vmctl remote --name <VMName> [--json] <subcommand> [args...]
+vmctl remote --socket <path> [--json] <subcommand> [args...]
+
+Subcommands:
+  health                     Check VM connection status
+  exec <command> [args...]   Run a command in the guest
+  clipboard get              Get guest clipboard contents
+  clipboard set <text>       Set guest clipboard contents
+  apps                       List running guest applications
+  interactive                Start interactive REPL`}
       </CodeBlock>
 
       <h2>Examples</h2>
@@ -92,13 +128,18 @@ vmctl snapshot ~/VMs/dev.GhostVM create clean-state
 vmctl snapshot ~/VMs/dev.GhostVM revert clean-state`}
       </CodeBlock>
 
-      <CodeBlock language="bash" title="Clone and automate">
-        {`# Clone an existing workspace
-vmctl clone ~/VMs/dev.GhostVM staging
-vmctl start ~/VMs/staging.GhostVM
+      <CodeBlock language="bash" title="Remote commands">
+        {`# Run a command inside the guest
+vmctl remote --name dev exec uname -a
 
-# Run a command inside the guest
-vmctl remote staging exec 'uname -a'`}
+# Get the guest clipboard
+vmctl remote --name dev clipboard get
+
+# List running apps
+vmctl remote --name dev apps
+
+# Use socket path with command substitution
+vmctl remote --socket $(vmctl socket ~/VMs/dev.GhostVM) interactive`}
       </CodeBlock>
       <PrevNextNav currentHref="/docs/cli" />
     </>

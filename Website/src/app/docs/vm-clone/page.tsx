@@ -75,19 +75,6 @@ export default function VMClone() {
         </tbody>
       </table>
 
-      <h2>CLI Usage</h2>
-      <CodeBlock language="bash">
-        {`vmctl clone <source-bundle> <new-name>
-
-# Example
-vmctl clone ~/VMs/dev.GhostVM staging
-→ Cloned to ~/VMs/staging.GhostVM (APFS copy-on-write)`}
-      </CodeBlock>
-      <p>
-        The clone is created in the same parent directory as the source. The
-        new name must not already exist at that location.
-      </p>
-
       <h2>GUI Usage</h2>
       <p>
         Right-click any stopped VM in the main window and select{" "}
