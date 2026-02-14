@@ -2272,6 +2272,7 @@ struct SettingsDemoView: View {
     @State private var verificationMessage: String? = nil
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
+    @State private var autoCheckForUpdates: Bool = true
 
     private let labelWidth: CGFloat = 130
 
@@ -2348,13 +2349,13 @@ struct SettingsDemoView: View {
                 .frame(maxWidth: 260, alignment: .leading)
             }
 
-            if let updater = updater {
+            if updater != nil {
                 labeledRow("Updates") {
-                    Toggle("Automatically check for updates", isOn: Binding(
-                        get: { updater.automaticallyChecksForUpdates },
-                        set: { updater.automaticallyChecksForUpdates = $0 }
-                    ))
-                    .toggleStyle(.checkbox)
+                    Toggle("Automatically check for updates", isOn: $autoCheckForUpdates)
+                        .toggleStyle(.checkbox)
+                        .onChange(of: autoCheckForUpdates) { _, newValue in
+                            updater?.automaticallyChecksForUpdates = newValue
+                        }
                 }
             }
 
@@ -2385,6 +2386,11 @@ struct SettingsDemoView: View {
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 320)
+        .onAppear {
+            if let updater = updater {
+                autoCheckForUpdates = updater.automaticallyChecksForUpdates
+            }
+        }
     }
 
     @ViewBuilder
