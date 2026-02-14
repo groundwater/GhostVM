@@ -98,30 +98,40 @@ test: $(XCODE_PROJECT)
 # GhostTools settings
 GHOSTTOOLS_DIR = macOS/GhostTools
 GHOSTTOOLS_BUILD_DIR = $(BUILD_DIR)/GhostTools
+GHOSTTOOLS_APP = $(GHOSTTOOLS_BUILD_DIR)/GhostTools.app
 GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
 
-# Build GhostTools guest agent
-tools:
+# Build GhostTools guest agent (.app bundle, signed)
+tools: ghosttools-icon
 	@echo "Building GhostTools..."
 	@echo "Injecting build timestamp..."
 	@TIMESTAMP=$$(date +%s); \
 	plutil -replace CFBundleVersion -string "$$TIMESTAMP" \
 		"$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist"
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
-	@rm -f "$(GHOSTTOOLS_DIR)/.build/release/GhostTools"
-	cd $(GHOSTTOOLS_DIR) && swift build -c release
-	@echo "GhostTools built at: $(GHOSTTOOLS_DIR)/.build/release/GhostTools"
+	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
+	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
+	@# Assemble .app bundle
+	@rm -rf "$(GHOSTTOOLS_APP)"
+	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/MacOS"
+	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/Resources"
+	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
+	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
+	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_APP)/Contents/"
+	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_APP)/Contents/Resources/"
+	codesign --force --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_APP)"
+	@echo "GhostTools.app built at: $(GHOSTTOOLS_APP)"
 
 # Build GhostTools debug binary for guest VM debugging
 debug-tools:
 	@echo "Building GhostTools (debug)..."
-	cd $(GHOSTTOOLS_DIR) && swift build
+	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR)
 	@echo "Patching SDK version for guest compatibility..."
 	vtool -set-build-version macos 14.0 15.0 -replace \
-		-output $(GHOSTTOOLS_DIR)/.build/debug/GhostTools-debug \
-		$(GHOSTTOOLS_DIR)/.build/debug/GhostTools
-	codesign --force -s "-" $(GHOSTTOOLS_DIR)/.build/debug/GhostTools-debug
-	@echo "Debug binary: $(GHOSTTOOLS_DIR)/.build/debug/GhostTools-debug"
+		-output $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug \
+		$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools
+	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug
+	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug"
 	@echo "Copy to guest and use: lldb GhostTools-debug"
 
 # Generate GhostTools .icns from source PNG
@@ -174,24 +184,13 @@ $(GHOSTVM_ICON_ICNS): $(GHOSTVM_ICON_SRC)
 	@rm -rf "$(GHOSTVM_ICONSET)"
 	@echo "GhostVMIcon.icns created at: $(GHOSTVM_ICON_ICNS)"
 
-# Create GhostTools.app bundle and package into DMG
-dmg: tools ghosttools-icon
-	@echo "Creating GhostTools.app bundle..."
+# Package GhostTools.app into a DMG
+dmg: tools
+	@echo "Creating GhostTools.dmg..."
 	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS"
-	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources"
-	@# Copy executable (patch SDK version for guest compatibility)
-	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/"
-	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/MacOS/GhostTools"
-	@# Copy Info.plist
-	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/"
-	@# Copy app icon
-	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app/Contents/Resources/"
-	@# Copy README to DMG root
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@cp -R "$(GHOSTTOOLS_APP)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Sign GhostTools (Apple Development preserves TCC; ad-hoc for debug)
-	codesign --force --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/GhostTools.app"
-	@# Create the DMG
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
 		-hfs \
@@ -271,11 +270,8 @@ dist: app cli
 	@# 5b. Re-create GhostTools.dmg with Developer ID signing for notarization
 	@echo "  Re-signing GhostTools for distribution..."
 	@rm -rf "$(DIST_DIR)/ghosttools-stage"
-	@mkdir -p "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/MacOS"
-	@mkdir -p "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/Resources"
-	@cp "$(GHOSTTOOLS_DIR)/.build/release/GhostTools" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/MacOS/"
-	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/"
-	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/Resources/"
+	@mkdir -p "$(DIST_DIR)/ghosttools-stage"
+	@cp -R "$(GHOSTTOOLS_APP)" "$(DIST_DIR)/ghosttools-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
 	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
@@ -328,10 +324,8 @@ website-build:
 	cd Website && npm run build
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf build
 	rm -rf $(XCODE_PROJECT)
-	rm -rf $(DIST_DIR)
-	cd $(GHOSTTOOLS_DIR) && swift package clean 2>/dev/null || true
 
 help:
 	@echo "GhostVM Build Targets:"

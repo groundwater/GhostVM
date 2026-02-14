@@ -13,12 +13,13 @@ let kGhostToolsBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String
 let kApplicationsPath = "/Applications/GhostTools.app"
 
 /// UserDefaults key for auto-start preference
-private let kAutoStartEnabledKey = "com.ghostvm.ghosttools.autoStartEnabled"
+private let kAutoStartEnabledKey = "org.ghostvm.ghosttools.autoStartEnabled"
 
 /// Notification names
 extension Notification.Name {
     static let autoStartPreferenceChanged = Notification.Name("autoStartPreferenceChanged")
     static let autoStartEnableRequested = Notification.Name("autoStartEnableRequested")
+    static let autoStartDisableRequested = Notification.Name("autoStartDisableRequested")
 }
 
 /// GhostTools - Menu bar daemon for guest VM integration
@@ -44,7 +45,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var healthServer: HealthServer?
     private var isServerRunning = false
     private var isFilePickerOpen = false
-    private var updateTimer: Timer?
     private var lockFileHandle: FileHandle?
     // Use bundle ID from Info.plist, fallback to hardcoded for compatibility
     private var bundleId: String {
@@ -115,32 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // STEP 1: Check for updates FIRST (before anything else)
-        if checkForUpdatesAndRelaunch() {
-            // Update in progress, will relaunch - this instance exits
-            return
-        }
-
-        // STEP 2: Ensure we're in /Applications
-        if !isRunningFromApplications() {
-            print("[GhostTools] ERROR: Not in /Applications and installation failed")
-            print("[GhostTools] Bundle path: \(Bundle.main.bundlePath)")
-            print("[GhostTools] Expected path: \(kApplicationsPath)")
-
-            // Show error notification to user
-            let content = UNMutableNotificationContent()
-            content.title = "GhostTools Installation Failed"
-            content.body = "Failed to install to /Applications. Please manually copy GhostTools.app to /Applications and launch it from there."
-            content.sound = .default
-            let request = UNNotificationRequest(identifier: "install-failed", content: content, trigger: nil)
-            UNUserNotificationCenter.current().add(request)
-
-            // Wait a bit for notification to be delivered
-            Thread.sleep(forTimeInterval: 2.0)
-            exit(1)
-        }
-
-        // STEP 3: Install LaunchAgent (only if explicitly enabled)
+        // STEP 1: Install LaunchAgent (only if explicitly enabled and running from /Applications)
         if isAutoStartEnabled {
             _ = installLaunchAgent()
         } else if isAutoStartExplicitlyDisabled {
@@ -155,16 +130,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
-        registerAsDefaultBrowser()
 
         // Refresh menu when outgoing files change (e.g. host clears queue via DELETE)
         NotificationCenter.default.addObserver(forName: .outgoingFilesChanged, object: nil, queue: .main) { [weak self] _ in
             self?.updateMenu()
         }
 
-        // Handle auto-start enable request from permissions window
+        // Handle auto-start enable/disable requests from permissions window
         NotificationCenter.default.addObserver(forName: .autoStartEnableRequested, object: nil, queue: .main) { [weak self] _ in
             self?.handleAutoStartEnableRequest()
+        }
+        NotificationCenter.default.addObserver(forName: .autoStartDisableRequested, object: nil, queue: .main) { [weak self] _ in
+            self?.handleAutoStartDisableRequest()
         }
 
         startServer()
@@ -174,243 +151,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startPortScanner()
         startForegroundAppService()
 
-        // STEP 5: Start update checker (checks every 10s for new DMG)
-        startUpdateChecker()
-    }
-
-    // MARK: - Unified Update Check and Relaunch
-
-    /// Check for updates from all sources and relaunch if found
-    /// Sources checked in order:
-    /// 1. /Volumes/GhostTools/GhostTools.app (mounted DMG)
-    /// 2. /Volumes/*/GhostTools.app (shared folders for debug)
-    /// Returns: true if updating (caller should exit), false to continue
-    private func checkForUpdatesAndRelaunch() -> Bool {
-        let installedPath = kApplicationsPath
-
-        // Get current installed version and build
-        guard let installed = getInstalledVersion() else {
-            // Not installed yet, check if we should install
-            return installFromFirstAvailableSource()
-        }
-
-        print("[GhostTools] Installed: v\(installed.version) build \(installed.build)")
-        print("[GhostTools] Current: v\(kGhostToolsVersion) build \(kGhostToolsBuild)")
-
-        // Check update sources in order
-        let updateSources = findUpdateSources()
-
-        for source in updateSources {
-            guard let sourceInfo = getVersionFromBundle(source) else { continue }
-
-            // Compare versions and builds
-            if shouldUpdate(from: installed.version, to: sourceInfo.version,
-                           installedBuild: installed.build, sourceBuild: sourceInfo.build) {
-                print("[GhostTools] Update found at \(source) (v\(sourceInfo.version) build \(sourceInfo.build))")
-                return performUpdate(from: source, newVersion: sourceInfo.version)
+        // Show settings window if any green dots are off (defer to next run loop)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            if !PermissionsWindow.shared.allGranted(from: self) {
+                PermissionsWindow.shared.show(from: self)
             }
         }
-
-        // If we're not running from /Applications, launch the installed version and exit
-        let currentBundle = Bundle.main.bundlePath
-        if currentBundle != installedPath {
-            print("[GhostTools] Running from \(currentBundle), launching installed version")
-            launchInstalledAndTerminate()
-            return true
-        }
-
-        return false
     }
+
+    // MARK: - Installation
 
     /// Check if running from /Applications
     private func isRunningFromApplications() -> Bool {
         return Bundle.main.bundlePath == kApplicationsPath
     }
 
-    /// Find all potential update sources
-    private func findUpdateSources() -> [String] {
-        var sources: [String] = []
+    /// Copy the running app bundle to /Applications using ditto.
+    /// Returns nil on success, or an error message on failure.
+    func installToApplications() -> String? {
         let fm = FileManager.default
+        let source = Bundle.main.bundlePath
 
-        // Source 1: Mounted DMG
-        let dmgPath = "/Volumes/GhostTools/GhostTools.app"
-        if fm.fileExists(atPath: dmgPath) {
-            sources.append(dmgPath)
+        print("[GhostTools] Installing to \(kApplicationsPath)...")
+        print("[GhostTools] Source: \(source)")
+
+        // Verify source looks like a .app bundle
+        guard source.hasSuffix(".app"),
+              fm.fileExists(atPath: source + "/Contents/MacOS/GhostTools") else {
+            let msg = "Source is not a valid .app bundle: \(source)"
+            print("[GhostTools] Install failed: \(msg)")
+            return msg
         }
 
-        // Source 2: Shared folders (for debug updates without restart)
-        if let volumesContents = try? fm.contentsOfDirectory(atPath: "/Volumes") {
-            for volume in volumesContents {
-                let sharedGhostTools = "/Volumes/\(volume)/GhostTools.app"
-                if volume != "GhostTools" && fm.fileExists(atPath: sharedGhostTools) {
-                    sources.append(sharedGhostTools)
-                }
+        // Remove existing installation
+        if fm.fileExists(atPath: kApplicationsPath) {
+            print("[GhostTools] Removing existing \(kApplicationsPath)...")
+            let rm = Process()
+            rm.executableURL = URL(fileURLWithPath: "/bin/rm")
+            rm.arguments = ["-rf", kApplicationsPath]
+            let rmErr = Pipe()
+            rm.standardError = rmErr
+            try? rm.run()
+            rm.waitUntilExit()
+            if rm.terminationStatus != 0 {
+                let errStr = String(data: rmErr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let msg = "Could not remove existing /Applications/GhostTools.app: \(errStr)"
+                print("[GhostTools] Install failed: \(msg)")
+                return msg
             }
         }
 
-        return sources
-    }
-
-    /// Get installed version and build from /Applications
-    private func getInstalledVersion() -> (version: String, build: String)? {
-        let installedPlistPath = kApplicationsPath + "/Contents/Info.plist"
-        guard let installedPlist = NSDictionary(contentsOfFile: installedPlistPath),
-              let version = installedPlist["CFBundleShortVersionString"] as? String,
-              let build = installedPlist["CFBundleVersion"] as? String else {
-            return nil
-        }
-        return (version, build)
-    }
-
-    /// Get version and build from any bundle path
-    private func getVersionFromBundle(_ bundlePath: String) -> (version: String, build: String)? {
-        let plistPath = bundlePath + "/Contents/Info.plist"
-        guard let plist = NSDictionary(contentsOfFile: plistPath) else {
-            print("[GhostTools] Failed to read plist at \(plistPath)")
-            return nil
-        }
-
-        guard let version = plist["CFBundleShortVersionString"] as? String else {
-            print("[GhostTools] No CFBundleShortVersionString in plist at \(plistPath)")
-            return nil
-        }
-
-        guard let build = plist["CFBundleVersion"] as? String else {
-            print("[GhostTools] No CFBundleVersion in plist at \(plistPath)")
-            return nil
-        }
-
-        print("[GhostTools] Read version info from \(bundlePath): v\(version) build \(build)")
-        return (version, build)
-    }
-
-    /// Compare versions and builds to determine if update is needed
-    /// Primary strategy: Compare CFBundleVersion (build timestamps)
-    /// Fallback strategy: Compare CFBundleShortVersionString (semantic versions)
-    private func shouldUpdate(from installedVersion: String, to sourceVersion: String,
-                             installedBuild: String, sourceBuild: String) -> Bool {
-        // Parse build strings as integers (Unix timestamps)
-        if let installedBuildNum = Int(installedBuild),
-           let sourceBuildNum = Int(sourceBuild) {
-            // Both have numeric build timestamps - prefer timestamp comparison
-            if sourceBuildNum > installedBuildNum {
-                return true
-            }
-            // If builds are identical, check semantic version as tiebreaker
-            if sourceBuildNum == installedBuildNum {
-                return sourceVersion.compare(installedVersion, options: .numeric) == .orderedDescending
-            }
-            return false
-        }
-
-        // Fallback: if build numbers aren't timestamps, use semantic version comparison
-        return sourceVersion.compare(installedVersion, options: .numeric) == .orderedDescending
-    }
-
-    /// Install from the first available source (DMG or shared folder)
-    private func installFromFirstAvailableSource() -> Bool {
-        let sources = findUpdateSources()
-
-        for source in sources {
-            if let sourceInfo = getVersionFromBundle(source) {
-                print("[GhostTools] Not installed, installing from \(source)...")
-                return performUpdate(from: source, newVersion: sourceInfo.version)
-            }
-        }
-
-        print("[GhostTools] No installation source found")
-        return false
-    }
-
-    /// Perform the update from the source app path
-    private func performUpdate(from sourcePath: String, newVersion: String) -> Bool {
-        // Cancel timer first to prevent multiple updates
-        updateTimer?.invalidate()
-        updateTimer = nil
-
-        let fm = FileManager.default
-        let sourceURL = URL(fileURLWithPath: sourcePath)
-        let destURL = URL(fileURLWithPath: kApplicationsPath)
-
-        print("[GhostTools] Updating from \(sourcePath) (version \(newVersion))...")
+        // Use ditto to copy (robust cross-filesystem, preserves code signing)
+        let ditto = Process()
+        ditto.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+        ditto.arguments = [source, kApplicationsPath]
+        let errPipe = Pipe()
+        ditto.standardError = errPipe
 
         do {
-            // Remove existing installation
-            if fm.fileExists(atPath: kApplicationsPath) {
-                print("[GhostTools] Removing existing installation...")
-                try fm.removeItem(at: destURL)
-            }
-
-            // Copy new version
-            print("[GhostTools] Copying \(sourcePath) to \(kApplicationsPath)...")
-            try fm.copyItem(at: sourceURL, to: destURL)
-            print("[GhostTools] Copy complete")
-
-            // Verify the copy
-            guard fm.fileExists(atPath: kApplicationsPath) else {
-                print("[GhostTools] ERROR: Copy succeeded but destination doesn't exist!")
-                return false
-            }
-            print("[GhostTools] Installation verified")
-
-            // Register with Launch Services
-            let lsregister = "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
-            let lsProcess = Process()
-            lsProcess.executableURL = URL(fileURLWithPath: lsregister)
-            lsProcess.arguments = ["-f", kApplicationsPath]
-            try lsProcess.run()
-            lsProcess.waitUntilExit()
-            print("[GhostTools] Registered with Launch Services")
-
-            // Terminate other instances
-            terminateOtherInstances()
-
-            // Launch the newly installed version directly, then exit
-            let installedExecutable = kApplicationsPath + "/Contents/MacOS/GhostTools"
-            print("[GhostTools] Launching \(installedExecutable) (new version)...")
-            let launchProcess = Process()
-            launchProcess.executableURL = URL(fileURLWithPath: installedExecutable)
-            try launchProcess.run()
-            print("[GhostTools] Launched new version (PID \(launchProcess.processIdentifier)), exiting...")
-            exit(0)
-
+            try ditto.run()
         } catch {
-            print("[GhostTools] Update failed: \(error)")
-            print("[GhostTools] Error details: \(error.localizedDescription)")
-            if let nsError = error as NSError? {
-                print("[GhostTools] Error domain: \(nsError.domain), code: \(nsError.code)")
-                print("[GhostTools] Error userInfo: \(nsError.userInfo)")
-            }
-            return false
+            let msg = "Could not run ditto: \(error)"
+            print("[GhostTools] Install failed: \(msg)")
+            return msg
         }
-    }
+        ditto.waitUntilExit()
 
-    /// Launch the /Applications copy and exit this instance
-    private func launchInstalledAndTerminate() {
-        terminateOtherInstances()
-
-        let installedExecutable = kApplicationsPath + "/Contents/MacOS/GhostTools"
-        print("[GhostTools] Launching \(installedExecutable)...")
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: installedExecutable)
-        do {
-            try process.run()
-            print("[GhostTools] Launched installed version (PID \(process.processIdentifier)), exiting DMG instance...")
-        } catch {
-            print("[GhostTools] ERROR: Failed to launch installed version: \(error)")
+        if ditto.terminationStatus != 0 {
+            let errStr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let msg = "ditto failed (exit \(ditto.terminationStatus)): \(errStr)"
+            print("[GhostTools] Install failed: \(msg)")
+            return msg
         }
-        exit(0)
-    }
 
-    /// Periodically check for updates from mounted volumes
-    private func startUpdateChecker() {
-        // Check every 10 seconds for mounted DMGs with updates
-        updateTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
-            if self?.checkForUpdatesAndRelaunch() == true {
-                // Update in progress - terminate() will handle exit
-            }
+        // Verify
+        guard fm.fileExists(atPath: kApplicationsPath + "/Contents/MacOS/GhostTools") else {
+            let msg = "ditto succeeded but executable missing at destination"
+            print("[GhostTools] Install failed: \(msg)")
+            return msg
         }
+
+        // Register with Launch Services
+        let lsregister = Process()
+        lsregister.executableURL = URL(fileURLWithPath: "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister")
+        lsregister.arguments = ["-f", kApplicationsPath]
+        try? lsregister.run()
+        lsregister.waitUntilExit()
+
+        print("[GhostTools] Installed to /Applications successfully")
+        return nil
     }
 
     // MARK: - Singleton Protection
@@ -485,9 +315,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Default Browser Registration
 
+    /// Check if GhostTools is the default handler for http URLs
+    func isDefaultBrowser() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        guard let currentHandler = LSCopyDefaultHandlerForURLScheme("http" as CFString)?.takeRetainedValue() as String? else {
+            return false
+        }
+        return currentHandler.caseInsensitiveCompare(bundleID) == .orderedSame
+    }
+
     /// Register GhostTools as the default handler for http/https URLs
     /// This enables URL forwarding from guest to host
-    private func registerAsDefaultBrowser() {
+    func registerAsDefaultBrowser() {
         guard let bundleID = Bundle.main.bundleIdentifier else {
             print("[GhostTools] No bundle identifier, skipping default browser registration")
             return
@@ -698,7 +537,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Uninstall and unload the launch agent
+    /// Uninstall the launch agent by removing the plist file.
+    /// Does NOT call launchctl unload — that would kill this process
+    /// if we were launched by the agent (KeepAlive). Simply removing
+    /// the plist prevents launchd from restarting us and removes the
+    /// agent on next login.
     @discardableResult
     private func uninstallLaunchAgent() -> Bool {
         let plistPath = launchAgentPlistPath()
@@ -708,27 +551,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         print("[GhostTools] Uninstalling launch agent...")
 
-        // Unload from launchctl with -w flag to write disabled state
-        // This prevents KeepAlive from auto-reloading
-        let unload = Process()
-        unload.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        unload.arguments = ["unload", "-w", plistPath.path]
-
-        let errorPipe = Pipe()
-        unload.standardError = errorPipe
-
-        try? unload.run()
-        unload.waitUntilExit()
-
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorStr = String(data: errorData, encoding: .utf8) ?? ""
-
-        print("[GhostTools] launchctl unload exit status: \(unload.terminationStatus)")
-        if !errorStr.isEmpty && unload.terminationStatus != 0 {
-            print("[GhostTools] launchctl unload stderr: \(errorStr)")
-        }
-
-        // Delete the plist file
         do {
             try FileManager.default.removeItem(at: plistPath)
             print("[GhostTools] Launch agent plist removed")
@@ -739,15 +561,72 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Handle auto-start enable request from permissions window
+    /// Handle auto-start enable request from permissions window.
+    /// Writes the plist without launchctl load (takes effect on next login).
     @objc private func handleAutoStartEnableRequest() {
         setAutoStartEnabled(true)
         UserDefaults.standard.synchronize()
-        if installLaunchAgent() {
+        if writeLaunchAgentPlist() {
             updateMenu()
-            NotificationCenter.default.post(name: .autoStartPreferenceChanged, object: nil)
         } else {
-            setAutoStartEnabled(false) // Revert on failure
+            setAutoStartEnabled(false)
+        }
+    }
+
+    /// Handle auto-start disable request from permissions window.
+    /// Removes the plist without launchctl unload (takes effect on next login).
+    @objc private func handleAutoStartDisableRequest() {
+        setAutoStartEnabled(false)
+        UserDefaults.standard.synchronize()
+        removeLaunchAgentPlist()
+        updateMenu()
+    }
+
+    /// Write the launch agent plist file (no launchctl load).
+    private func writeLaunchAgentPlist() -> Bool {
+        let launchAgentsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents")
+        let plistPath = launchAgentsDir.appendingPathComponent("\(bundleId).plist")
+        let executablePath = kApplicationsPath + "/Contents/MacOS/GhostTools"
+
+        do {
+            try FileManager.default.createDirectory(at: launchAgentsDir, withIntermediateDirectories: true)
+        } catch {
+            print("[GhostTools] Failed to create LaunchAgents directory: \(error)")
+            return false
+        }
+
+        let logDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/GhostTools")
+        try? FileManager.default.createDirectory(at: logDir, withIntermediateDirectories: true)
+
+        let plistContent: [String: Any] = [
+            "Label": bundleId,
+            "ProgramArguments": [executablePath],
+            "RunAtLoad": true,
+            "KeepAlive": true,
+            "StandardOutPath": logDir.appendingPathComponent("stdout.log").path,
+            "StandardErrorPath": logDir.appendingPathComponent("stderr.log").path,
+            "ThrottleInterval": 5
+        ]
+
+        do {
+            let data = try PropertyListSerialization.data(fromPropertyList: plistContent, format: .xml, options: 0)
+            try data.write(to: plistPath)
+            print("[GhostTools] Launch agent plist written to \(plistPath.path)")
+            return true
+        } catch {
+            print("[GhostTools] Failed to write launch agent plist: \(error)")
+            return false
+        }
+    }
+
+    /// Remove the launch agent plist file (no launchctl unload).
+    private func removeLaunchAgentPlist() {
+        let plistPath = launchAgentPlistPath()
+        if FileManager.default.fileExists(atPath: plistPath.path) {
+            try? FileManager.default.removeItem(at: plistPath)
+            print("[GhostTools] Launch agent plist removed")
         }
     }
 
@@ -837,6 +716,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         autoStartItem.state = isAutoStartEnabled ? .on : .off
         menu.addItem(autoStartItem)
 
+        // Permissions window
+        let permissionsItem = NSMenuItem(
+            title: "Settings...",
+            action: #selector(showPermissions),
+            keyEquivalent: ""
+        )
+        permissionsItem.target = self
+        menu.addItem(permissionsItem)
+
         menu.addItem(NSMenuItem.separator())
 
         // Send to Host menu item
@@ -925,6 +813,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func clearFileQueue() {
         FileService.shared.clearOutgoingFiles()
         updateMenu()
+    }
+
+    @objc private func showPermissions() {
+        PermissionsWindow.shared.show(from: self)
+    }
+
+    /// Called by PermissionsWindow to copy the app to /Applications.
+    /// Returns nil on success, error string on failure.
+    func performCopyToApplications() -> String? {
+        return installToApplications()
     }
 
     @objc private func toggleAutoStart() {
