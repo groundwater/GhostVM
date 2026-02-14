@@ -74,6 +74,8 @@ final class PortForwardNotificationContentViewController: NSViewController {
     weak var delegate: PortForwardNotificationContentViewControllerDelegate?
 
     private var mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)] = []
+    private var isLocallyRemoving = false
+    private var needsRebuildAfterAnimation = false
 
     private var titleLabel: NSTextField!
     private var subtitleLabel: NSTextField!
@@ -133,6 +135,10 @@ final class PortForwardNotificationContentViewController: NSViewController {
 
     func setPortMappings(_ newMappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
         mappings = newMappings
+        guard !isLocallyRemoving else {
+            needsRebuildAfterAnimation = true
+            return
+        }
         rebuildPortList()
         updateSubtitle()
     }
@@ -248,10 +254,13 @@ final class PortForwardNotificationContentViewController: NSViewController {
         // Remove from data model
         mappings.removeAll { $0.guestPort == guestPort }
 
+        // Flag prevents setPortMappings callbacks from rebuilding during animation
+        isLocallyRemoving = true
+
         // Notify delegate
         delegate?.notificationContentViewController(self, didBlockPort: guestPort)
 
-        // Animate removal
+        // Keep isLocallyRemoving set until animation completes
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
             ctx.allowsImplicitAnimation = true
@@ -260,6 +269,11 @@ final class PortForwardNotificationContentViewController: NSViewController {
             guard let self = self else { return }
             self.portListStack.removeArrangedSubview(row)
             row.removeFromSuperview()
+            self.isLocallyRemoving = false
+            if self.needsRebuildAfterAnimation {
+                self.needsRebuildAfterAnimation = false
+                self.rebuildPortList()
+            }
             self.updateSubtitle()
         })
     }
