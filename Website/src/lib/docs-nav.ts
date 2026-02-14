@@ -31,6 +31,7 @@ export const docsNav: NavItem[] = [
   { title: "GhostTools", href: "/docs/ghosttools" },
   { title: "Host API", href: "/docs/host-api" },
   { title: "Architecture", href: "/docs/architecture" },
+  { title: "Building from Source", href: "/docs/building-from-source" },
 ];
 
 export function flattenNav(items: NavItem[]): NavItem[] {
