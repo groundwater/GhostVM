@@ -155,7 +155,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setupMenuBar()
         print("[GhostTools] Menu bar setup complete")
         requestNotificationPermission()
-        PermissionsWindow.shared.showIfNeeded()
         registerAsDefaultBrowser()
 
         // Refresh menu when outgoing files change (e.g. host clears queue via DELETE)
