@@ -40,9 +40,9 @@ const features = [
   },
   {
     icon: Bot,
-    title: "MCP Integration",
+    title: "Host API",
     description:
-      "AI agents see the screen, click, type, and manage files inside a workspace. Built-in MCP server — just point your client at a VM.",
+      "Programmatic access to every running VM via a Unix domain socket. Run commands, transfer files, and manage the VM lifecycle from scripts or agents.",
   },
 ];
 

@@ -78,14 +78,6 @@ vmctl snapshot <bundle-path> revert <name>
 vmctl snapshot <bundle-path> delete <name>`}
       </CodeBlock>
 
-      <h3>mcp</h3>
-      <p>
-        Start an MCP server for the given VM. Reads JSON-RPC from stdin,
-        writes responses to stdout. See the{" "}
-        <a href="/docs/mcp">MCP Server</a> docs for full details.
-      </p>
-      <CodeBlock language="bash">{`vmctl mcp <bundle-path>`}</CodeBlock>
-
       <h2>Examples</h2>
       <CodeBlock language="bash" title="Full macOS workflow">
         {`# Create and install a macOS VM
@@ -105,8 +97,8 @@ vmctl snapshot ~/VMs/dev.GhostVM revert clean-state`}
 vmctl clone ~/VMs/dev.GhostVM staging
 vmctl start ~/VMs/staging.GhostVM
 
-# Start an MCP server for AI agent control
-vmctl mcp ~/VMs/staging.GhostVM`}
+# Run a command inside the guest
+vmctl remote staging exec 'uname -a'`}
       </CodeBlock>
       <PrevNextNav currentHref="/docs/cli" />
     </>
