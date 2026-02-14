@@ -1,8 +1,15 @@
 import Foundation
 import AppKit
+import Sparkle
 
 @MainActor
 final class App2AppDelegate: NSObject, NSApplicationDelegate {
+    let updaterController = SPUStandardUpdaterController(
+        startingUpdater: true,
+        updaterDelegate: nil,
+        userDriverDelegate: nil
+    )
+
     static weak var sharedStore: App2VMStore? {
         didSet {
             NSLog("[App2AppDelegate] sharedStore set: \(sharedStore != nil)")

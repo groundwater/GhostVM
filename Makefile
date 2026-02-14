@@ -14,7 +14,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build
+.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign
 
 all: help
 
@@ -198,6 +198,21 @@ dmg: tools
 		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@echo "GhostTools.dmg created at: $(GHOSTTOOLS_DMG)"
 
+# Sparkle tools for signing updates
+SPARKLE_TOOLS_DIR = tools/sparkle
+
+$(SPARKLE_TOOLS_DIR)/bin/sign_update:
+	@echo "Downloading Sparkle tools..."
+	@mkdir -p $(SPARKLE_TOOLS_DIR)
+	@SPARKLE_TAG=$$(curl -sI https://github.com/sparkle-project/Sparkle/releases/latest | grep -i '^location:' | sed 's|.*/||' | tr -d '\r'); \
+	echo "  Sparkle version: $$SPARKLE_TAG"; \
+	curl -L -o /tmp/sparkle.tar.xz \
+		"https://github.com/sparkle-project/Sparkle/releases/download/$$SPARKLE_TAG/Sparkle-$$SPARKLE_TAG.tar.xz" && \
+	tar -xf /tmp/sparkle.tar.xz -C $(SPARKLE_TOOLS_DIR) bin/ && \
+	rm /tmp/sparkle.tar.xz
+
+sparkle-tools: $(SPARKLE_TOOLS_DIR)/bin/sign_update
+
 # Distribution settings
 DIST_DIR = build/dist
 DMG_NAME = GhostVM
@@ -253,6 +268,18 @@ dist: app cli
 		--entitlements macOS/GhostVMHelper/entitlements.plist \
 		-s "$(DIST_CODESIGN_ID)" \
 		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"
+	@# 2b. Sign Sparkle nested components (XPC services, Autoupdate helper)
+	@for xpc in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/"*.xpc 2>/dev/null; do \
+		if [ -d "$$xpc" ]; then \
+			echo "  Signing $$(basename $$xpc) (Sparkle XPC)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$xpc"; \
+		fi; \
+	done
+	@if [ -d "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate.app" ]; then \
+		echo "  Signing Autoupdate.app (Sparkle)"; \
+		codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" \
+			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate.app"; \
+	fi
 	@# 3. Sign all embedded frameworks in the main app
 	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/"*.framework; do \
 		if [ -d "$$fw" ]; then \
@@ -314,6 +341,13 @@ dist: app cli
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/MacOS/vmctl"
 
+# Sign DMG for Sparkle auto-updates (run after make dist)
+sparkle-sign: sparkle-tools
+	@echo "Signing DMG for Sparkle..."
+	$(SPARKLE_TOOLS_DIR)/bin/sign_update "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
+	@echo ""
+	@echo "Add the above edSignature and length to Website/public/appcast.xml"
+
 # Run the Next.js dev server
 website:
 	cd Website && npm run dev
@@ -341,6 +375,8 @@ help:
 	@echo "  make debug-tools - Build GhostTools debug binary (lldb-compatible with macOS 15)"
 	@echo "  make dmg      - Create GhostTools.dmg"
 	@echo "  make dist     - Create distribution DMG with app + vmctl"
+	@echo "  make sparkle-tools - Download Sparkle signing tools"
+	@echo "  make sparkle-sign  - Sign DMG for Sparkle auto-updates"
 	@echo "  make website  - Run Next.js dev server (Website/)"
 	@echo "  make website-build - Build Next.js site for production"
 	@echo "  make clean    - Remove build artifacts and generated project"

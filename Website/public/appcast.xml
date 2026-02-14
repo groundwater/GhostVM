@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>GhostVM Updates</title>
+    <language>en</language>
+    <!-- Add <item> entries when releasing new versions -->
+    <!--
+    Item template:
+    <item>
+      <title>GhostVM VERSION</title>
+      <pubDate>DATE_RFC2822</pubDate>
+      <sparkle:version>VERSION</sparkle:version>
+      <sparkle:shortVersionString>VERSION</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Changes</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/vVERSION/GhostVM-vVERSION.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="FROM_SIGN_UPDATE"
+        length="DMG_SIZE_BYTES"
+      />
+    </item>
+    -->
+  </channel>
+</rss>

@@ -2,6 +2,7 @@
 *.dmg
 .env
 build/
+tools/
 *.local.json
 *.xcodeproj/
 *.profraw

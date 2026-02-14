@@ -9,6 +9,9 @@ packages:
   swift-nio:
     url: https://github.com/apple/swift-nio.git
     from: "2.65.0"
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle.git
+    from: "2.6.0"
 
 settings:
   base:
@@ -128,6 +131,7 @@ targets:
         products:
           - NIOCore
           - NIOPosix
+      - package: Sparkle
     settings:
       base:
         PRODUCT_NAME: GhostVM
