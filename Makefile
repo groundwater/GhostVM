@@ -14,7 +14,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug screenshots website website-build
+.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build
 
 all: help
 
@@ -319,10 +319,6 @@ dist: app cli
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/MacOS/vmctl"
 
-# Capture XCUITest screenshots for the website
-screenshots: $(XCODE_PROJECT)
-	./scripts/capture-screenshots.sh
-
 # Run the Next.js dev server
 website:
 	cd Website && npm run dev
@@ -352,7 +348,6 @@ help:
 	@echo "  make debug-tools - Build GhostTools debug binary (lldb-compatible with macOS 15)"
 	@echo "  make dmg      - Create GhostTools.dmg"
 	@echo "  make dist     - Create distribution DMG with app + vmctl"
-	@echo "  make screenshots - Capture XCUITest screenshots for website"
 	@echo "  make website  - Run Next.js dev server (Website/)"
 	@echo "  make website-build - Build Next.js site for production"
 	@echo "  make clean    - Remove build artifacts and generated project"
