@@ -299,19 +299,17 @@ dist: app cli
 	codesign --force --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "DMG signed with: $(DIST_CODESIGN_ID)"
 	@# --- Notarization ---
-	@if [ -n "$(NOTARY_APPLE_ID)" ] && [ -n "$(NOTARY_TEAM_ID)" ] && [ -n "$(NOTARY_PASSWORD)" ]; then \
-		echo "Submitting for notarization..."; \
-		xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
-			--apple-id "$(NOTARY_APPLE_ID)" \
-			--team-id "$(NOTARY_TEAM_ID)" \
-			--password "$(NOTARY_PASSWORD)" \
-			--wait && \
-		echo "Stapling notarization ticket..." && \
-		xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"; \
-	else \
-		echo "Warning: Skipping notarization (NOTARY_APPLE_ID, NOTARY_TEAM_ID, NOTARY_PASSWORD not all set)"; \
-		echo "Create a .env file with these variables to enable notarization."; \
+	@if [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; then \
+		echo "ERROR: Notarization requires NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD"; \
+		echo "Set these in a .env file or as environment variables."; \
+		exit 1; \
 	fi
+	xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
+		--apple-id "$(NOTARY_APPLE_ID)" \
+		--team-id "$(NOTARY_TEAM_ID)" \
+		--password "$(NOTARY_PASSWORD)" \
+		--wait
+	xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/MacOS/vmctl"
 
