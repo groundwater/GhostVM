@@ -217,6 +217,12 @@ dist: app cli
 		echo "Install one via Xcode > Settings > Accounts > Manage Certificates."; \
 		exit 1; \
 	fi
+	@# Verify notarization credentials are set
+	@if [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; then \
+		echo "ERROR: Notarization requires NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD"; \
+		echo "Set these in a .env file or as environment variables."; \
+		exit 1; \
+	fi
 	@echo "Creating distribution DMG (version $(VERSION))..."
 	@echo "Signing with: $(DIST_CODESIGN_ID)"
 	@rm -rf "$(DIST_DIR)"
@@ -299,11 +305,6 @@ dist: app cli
 	codesign --force --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "DMG signed with: $(DIST_CODESIGN_ID)"
 	@# --- Notarization ---
-	@if [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; then \
-		echo "ERROR: Notarization requires NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD"; \
-		echo "Set these in a .env file or as environment variables."; \
-		exit 1; \
-	fi
 	xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
 		--apple-id "$(NOTARY_APPLE_ID)" \
 		--team-id "$(NOTARY_TEAM_ID)" \
