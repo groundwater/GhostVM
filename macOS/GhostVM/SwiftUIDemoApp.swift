@@ -271,7 +271,7 @@ struct VMListDemoView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     private var ghostWatermarkImage: NSImage? {
-        NSImage(named: colorScheme == .dark ? "ghostvm-dark" : "ghostvm")
+        NSImage(named: colorScheme == .dark ? "ghost-watermark-dark" : "ghost-watermark")
     }
 
     var body: some View {
