@@ -110,6 +110,7 @@ final class PortForwardPermissionContentViewController: NSViewController {
     private var blockedDescriptions: [String] = []
     private var autoPortMapEnabled = false
     private var isLocallyRemoving = false
+    private var needsRebuildAfterAnimation = false
 
     private var autoMapCheckbox: NSButton!
     private var portListStack: NSStackView!
@@ -277,7 +278,10 @@ final class PortForwardPermissionContentViewController: NSViewController {
 
     func setEntries(_ entries: [PortForwardEntry]) {
         self.entries = entries
-        guard !isLocallyRemoving else { return }
+        guard !isLocallyRemoving else {
+            needsRebuildAfterAnimation = true
+            return
+        }
         rebuildPortList()
         updateEmptyState()
     }
@@ -443,16 +447,16 @@ final class PortForwardPermissionContentViewController: NSViewController {
         // Remove from data model
         entries.removeAll { $0.hostPort == hostPort }
 
-        // Notify delegate (flag prevents the synchronous setEntries callback from rebuilding)
+        // Flag prevents setEntries callbacks from rebuilding during animation
         isLocallyRemoving = true
+
         if entry.isAutoMapped {
             delegate?.contentViewController(self, didBlockPort: entry.guestPort)
         } else {
             delegate?.contentViewController(self, didRemoveForwardWithHostPort: hostPort)
         }
-        isLocallyRemoving = false
 
-        // Animate removal
+        // Keep isLocallyRemoving set until animation completes
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.25
             ctx.allowsImplicitAnimation = true
@@ -461,6 +465,11 @@ final class PortForwardPermissionContentViewController: NSViewController {
             guard let self = self else { return }
             self.portListStack.removeArrangedSubview(row)
             row.removeFromSuperview()
+            self.isLocallyRemoving = false
+            if self.needsRebuildAfterAnimation {
+                self.needsRebuildAfterAnimation = false
+                self.rebuildPortList()
+            }
             self.updateEmptyState()
         })
     }
