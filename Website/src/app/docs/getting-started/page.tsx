@@ -93,8 +93,8 @@ vmctl start ~/VMs/sandbox.GhostVM`}
           sync and file transfer
         </li>
         <li>
-          Let AI agents control VMs with the{" "}
-          <Link href="/docs/mcp">MCP Server</Link>
+          Automate VMs with the{" "}
+          <Link href="/docs/host-api">Host API</Link>
         </li>
       </ul>
 

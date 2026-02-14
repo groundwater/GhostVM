@@ -13,7 +13,7 @@ GhostVM is a native macOS app for creating and managing macOS virtual machines o
 - Port forwarding through vsock tunnels
 - Per-VM Dock icons with a helper-per-VM architecture
 - `vmctl` CLI for headless VM management and scripting
-- `vmctl remote` for programmatic guest control (accessibility, pointer, keyboard)
+- `vmctl remote` for programmatic guest control (exec, clipboard, apps)
 
 ## Requirements
 
@@ -70,10 +70,10 @@ vmctl stop ~/VMs/sandbox.GhostVM
 | `status <bundle>` | Report running state and config |
 | `snapshot <bundle> list\|create\|revert\|delete` | Manage snapshots |
 | `list` | List all VMs and their status |
-| `remote <vm> screenshot` | Capture guest screenshot |
-| `remote <vm> elements` | Inspect accessibility tree |
-| `remote <vm> leftclick --label <text>` | Click a UI element |
-| `remote <vm> type --text <text>` | Type text into the guest |
+| `remote <vm> exec <command>` | Run a shell command in the guest |
+| `remote <vm> clipboard get\|set` | Read or write the guest clipboard |
+| `remote <vm> apps` | List running guest applications |
+| `remote <vm> health` | Check guest agent connectivity |
 
 ## Notes
 

@@ -37,10 +37,10 @@ export default function Footer() {
               </li>
               <li>
                 <Link
-                  href="/docs/mcp"
+                  href="/docs/host-api"
                   className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
                 >
-                  MCP Server
+                  Host API
                 </Link>
               </li>
             </ul>

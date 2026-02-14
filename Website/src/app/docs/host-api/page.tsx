@@ -11,8 +11,8 @@ export default function HostAPI() {
       <h1>Host API</h1>
       <p className="lead">
         Each running VM exposes a Unix domain socket on the host for
-        programmatic access to VM operations. This is the foundation that
-        powers the MCP server and enables custom integrations.
+        programmatic access to VM operations. This enables custom integrations
+        and scripted automation.
       </p>
 
       <h2>Overview</h2>
@@ -168,15 +168,6 @@ while True:
 print(json.loads(response.decode().strip()))
 s.close()`}
       </CodeBlock>
-
-      <h2>Relationship to MCP</h2>
-      <p>
-        The <a href="/docs/mcp">MCP server</a> (<code>vmctl mcp</code>) is a
-        thin bridge between JSON-RPC on stdin/stdout and the Host API socket.
-        Each MCP tool call maps to exactly one Host API request. If you need
-        direct programmatic access without MCP, you can connect to the socket
-        directly.
-      </p>
 
       <Callout variant="info" title="Connection Lifecycle">
         Each connection is single-request: send one request, read one response,

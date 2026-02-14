@@ -3,7 +3,7 @@ import Foundation
 import GhostVMKit
 
 /// Host-side HTTP API served over a Unix domain socket.
-/// vmctl and MCP servers connect here. Requests are proxied to GhostTools in the guest
+/// vmctl connects here. Requests are proxied to GhostTools in the guest
 /// (including screenshot and batch automation paths).
 @MainActor
 final class HostAPIService {

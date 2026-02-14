@@ -17,8 +17,8 @@ const terminalLines = [
   { prompt: true, text: "vmctl clone ~/VMs/dev.GhostVM staging" },
   { prompt: false, text: "Cloned to ~/VMs/staging.GhostVM (APFS copy-on-write)" },
   { prompt: false, text: "" },
-  { prompt: true, text: "vmctl mcp ~/VMs/staging.GhostVM" },
-  { prompt: false, text: "MCP server ready (stdin/stdout)" },
+  { prompt: true, text: "vmctl remote staging exec 'uname -a'" },
+  { prompt: false, text: "Darwin staging.local 24.6.0 Darwin Kernel..." },
 ];
 
 const bullets = [
@@ -47,8 +47,8 @@ const bullets = [
     description: "Duplicate a workspace instantly with APFS copy-on-write. Fresh identity, minimal disk usage.",
   },
   {
-    title: "MCP Server",
-    description: "Expose tools to AI agents via JSON-RPC. Clipboard, files, and lifecycle — all programmatic.",
+    title: "Host API",
+    description: "Programmatic access via Unix domain socket. Clipboard, files, commands, and lifecycle — all scriptable.",
   },
 ];
 

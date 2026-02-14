@@ -29,7 +29,6 @@ export const docsNav: NavItem[] = [
     ],
   },
   { title: "GhostTools", href: "/docs/ghosttools" },
-  { title: "MCP Server", href: "/docs/mcp" },
   { title: "Host API", href: "/docs/host-api" },
   { title: "Architecture", href: "/docs/architecture" },
 ];

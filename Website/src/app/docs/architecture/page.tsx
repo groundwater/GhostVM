@@ -74,15 +74,6 @@ export default function Architecture() {
         <a href="/docs/host-api">Host API</a> docs for details.
       </p>
 
-      <h3>MCP Server</h3>
-      <p>
-        The <code>vmctl mcp</code> command starts a{" "}
-        <a href="https://modelcontextprotocol.io">Model Context Protocol</a>{" "}
-        server that bridges JSON-RPC on stdin/stdout to the Host API socket.
-        This allows AI assistants like Claude Desktop to control VMs
-        programmatically. See the <a href="/docs/mcp">MCP Server</a> docs.
-      </p>
-
       <h2>Services Architecture</h2>
       <p>
         All host-guest services are located in <code>GhostVM/Services/</code>{" "}
