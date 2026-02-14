@@ -34,9 +34,8 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(verifyButton.waitForExistence(timeout: 3), "Verify button should exist")
     }
 
-    func testCaptureKeysToggleExists() {
-        // The capture system keys toggle should be present in settings
-        let toggle = app.checkBoxes.matching(NSPredicate(format: "label CONTAINS 'Capture system keys'")).firstMatch
-        XCTAssertTrue(toggle.waitForExistence(timeout: 3), "Capture system keys toggle should exist")
+    func testFeedURLFieldExists() {
+        let feedURLField = app.textFields["settings.feedURLField"]
+        XCTAssertTrue(feedURLField.waitForExistence(timeout: 3), "Feed URL field should exist in settings")
     }
 }

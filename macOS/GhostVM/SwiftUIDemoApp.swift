@@ -237,6 +237,7 @@ struct VMListDemoView: View {
                     Label("Create", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("vmList.createButton")
 
                 #if DEBUG
                 Button {
@@ -618,6 +619,7 @@ struct CreateVMDemoView: View {
                     TextField("Number of vCPUs", text: $cpuCount)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 120)
+                        .accessibilityIdentifier("createVM.cpuField")
                     Text("cores")
                         .foregroundStyle(.secondary)
                 }
@@ -628,6 +630,7 @@ struct CreateVMDemoView: View {
                     TextField("GiB", text: $memoryGiB)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 120)
+                        .accessibilityIdentifier("createVM.memoryField")
                     Text("GiB")
                         .foregroundStyle(.secondary)
                 }
@@ -638,6 +641,7 @@ struct CreateVMDemoView: View {
                     TextField("GiB (minimum 20)", text: $diskGiB)
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 120)
+                        .accessibilityIdentifier("createVM.diskField")
                     Text("GiB")
                         .foregroundStyle(.secondary)
                 }
@@ -659,11 +663,13 @@ struct CreateVMDemoView: View {
                     isPresented = false
                 }
                 .disabled(isCreating)
+                .accessibilityIdentifier("createVM.cancelButton")
                 Button("Create") {
                     create()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canCreate)
+                .accessibilityIdentifier("createVM.createButton")
             }
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
@@ -922,6 +928,7 @@ struct VMRowView: View {
                             .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.borderless)
+                    .accessibilityIdentifier("vmRow.playButton")
                 }
 
                 Menu {
@@ -2237,6 +2244,7 @@ struct SettingsDemoView: View {
                 HStack(spacing: 8) {
                     TextField("Path to virtual machines", text: $vmPath)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("settings.vmPathField")
                     Button("Browse…") {
                         // Intentionally no-op in demo app.
                     }
@@ -2247,6 +2255,7 @@ struct SettingsDemoView: View {
                 HStack(spacing: 8) {
                     TextField("Path to IPSW cache", text: $ipswPath)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("settings.ipswPathField")
                     Button("Browse…") {
                         // Intentionally no-op in demo app.
                     }
@@ -2257,10 +2266,12 @@ struct SettingsDemoView: View {
                 HStack(spacing: 8) {
                     TextField("https://mesu.apple.com/…", text: $feedURLString)
                         .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("settings.feedURLField")
                     Button("Verify") {
                         verifyFeedURL()
                     }
                     .disabled(isVerifying)
+                    .accessibilityIdentifier("settings.verifyButton")
                 }
             }
 

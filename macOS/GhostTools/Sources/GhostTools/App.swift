@@ -366,9 +366,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Terminate other instances
             terminateOtherInstances()
 
-            // Exit so launchd restarts us with the new binary
-            // (KeepAlive: true in launch agent ensures automatic restart)
-            print("[GhostTools] Exiting for launchd restart with new version...")
+            // Launch the newly installed version directly, then exit
+            let installedExecutable = kApplicationsPath + "/Contents/MacOS/GhostTools"
+            print("[GhostTools] Launching \(installedExecutable) (new version)...")
+            let launchProcess = Process()
+            launchProcess.executableURL = URL(fileURLWithPath: installedExecutable)
+            try launchProcess.run()
+            print("[GhostTools] Launched new version (PID \(launchProcess.processIdentifier)), exiting...")
             exit(0)
 
         } catch {
@@ -382,10 +386,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Exit so launchd restarts us from /Applications
+    /// Launch the /Applications copy and exit this instance
     private func launchInstalledAndTerminate() {
         terminateOtherInstances()
-        print("[GhostTools] Exiting for launchd restart from /Applications...")
+
+        let installedExecutable = kApplicationsPath + "/Contents/MacOS/GhostTools"
+        print("[GhostTools] Launching \(installedExecutable)...")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: installedExecutable)
+        do {
+            try process.run()
+            print("[GhostTools] Launched installed version (PID \(process.processIdentifier)), exiting DMG instance...")
+        } catch {
+            print("[GhostTools] ERROR: Failed to launch installed version: \(error)")
+        }
         exit(0)
     }
 
