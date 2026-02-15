@@ -81,6 +81,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var captureSystemKeysEnabled = true
     private var captureQuitEnabled = false
     private var captureHideEnabled = false
+    private var openURLsAutomaticallyEnabled = false
     private var autoPortMapEnabled = false
     private var queuedFileCount = 0
     private var queuedFileNames: [String] = []
@@ -195,6 +196,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
     func setCaptureHide(_ enabled: Bool) {
         captureHideEnabled = enabled
+        rebuildCaptureCommandsMenu()
+    }
+
+    func setOpenURLsAutomatically(_ enabled: Bool) {
+        openURLsAutomaticallyEnabled = enabled
         rebuildCaptureCommandsMenu()
     }
 
@@ -434,7 +440,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Commands"
         item.paletteLabel = "Capture Commands"
         item.toolTip = "Command key capture settings"
-        item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Capture Commands")?.withSymbolConfiguration(iconConfig)
+        item.image = NSImage(systemSymbolName: "switch.2", accessibilityDescription: "Capture Commands")?.withSymbolConfiguration(iconConfig)
         item.showsIndicator = false
         item.minSize = NSSize(width: 36, height: 32)
         item.maxSize = NSSize(width: 36, height: 32)
@@ -572,13 +578,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Capture Inputs")?.withSymbolConfiguration(iconConfig)
         item.toolTip = captureSystemKeysEnabled ? "Inputs captured by VM" : "Inputs handled by macOS"
 
-        // Disable the Commands dropdown when inputs are captured — CMD overrides
-        // are forced off so the menu would be misleading.
-        updateCaptureCommandsEnabled()
-    }
-
-    private func updateCaptureCommandsEnabled() {
-        captureCommandsItem?.isEnabled = !captureSystemKeysEnabled
+        rebuildCaptureCommandsMenu()
     }
 
     private func updateQueuedFilesButton() {
@@ -663,15 +663,35 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private func rebuildCaptureCommandsMenu() {
         let menu = NSMenu()
 
-        let quitItem = NSMenuItem(title: "Quit (\u{2318}Q)", action: #selector(toggleCaptureQuit), keyEquivalent: "")
-        quitItem.target = self
-        quitItem.state = captureQuitEnabled ? .on : .off
-        menu.addItem(quitItem)
+        let urlItem = NSMenuItem(title: "Open URLs Automatically", action: #selector(toggleOpenURLsAutomatically), keyEquivalent: "")
+        urlItem.target = self
+        urlItem.state = openURLsAutomaticallyEnabled ? .on : .off
+        menu.addItem(urlItem)
 
-        let hideItem = NSMenuItem(title: "Hide (\u{2318}H)", action: #selector(toggleCaptureHide), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+
+        let captureItem = NSMenuItem(title: "Capture All Inputs", action: #selector(toggleCaptureSystemKeysFromMenu), keyEquivalent: "")
+        captureItem.target = self
+        captureItem.state = captureSystemKeysEnabled ? .on : .off
+        menu.addItem(captureItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let shortcutsSubmenu = NSMenu()
+
+        let hideItem = NSMenuItem(title: "Hide \u{2318}H", action: #selector(toggleCaptureHide), keyEquivalent: "")
         hideItem.target = self
         hideItem.state = captureHideEnabled ? .on : .off
-        menu.addItem(hideItem)
+        shortcutsSubmenu.addItem(hideItem)
+
+        let quitItem = NSMenuItem(title: "Quit \u{2318}Q", action: #selector(toggleCaptureQuit), keyEquivalent: "")
+        quitItem.target = self
+        quitItem.state = captureQuitEnabled ? .on : .off
+        shortcutsSubmenu.addItem(quitItem)
+
+        let shortcutsItem = NSMenuItem(title: "Intercept Shortcuts", action: nil, keyEquivalent: "")
+        shortcutsItem.submenu = shortcutsSubmenu
+        menu.addItem(shortcutsItem)
 
         captureCommandsMenu = menu
         captureCommandsItem?.menu = menu
@@ -871,6 +891,19 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         captureHideEnabled.toggle()
         rebuildCaptureCommandsMenu()
         delegate?.toolbar(self, didToggleCaptureHide: captureHideEnabled)
+    }
+
+    @objc private func toggleOpenURLsAutomatically() {
+        openURLsAutomaticallyEnabled.toggle()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleOpenURLsAutomatically: openURLsAutomaticallyEnabled)
+    }
+
+    @objc private func toggleCaptureSystemKeysFromMenu() {
+        captureSystemKeysEnabled.toggle()
+        updateCaptureKeysButton()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleCaptureSystemKeys: captureSystemKeysEnabled)
     }
 
     @objc private func receiveQueuedFiles() {
@@ -1165,6 +1198,7 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureHide enabled: Bool)
+    func toolbar(_ toolbar: HelperToolbar, didToggleOpenURLsAutomatically enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleAutoPortMap enabled: Bool)
     @discardableResult
     func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) -> String?

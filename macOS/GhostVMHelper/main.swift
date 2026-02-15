@@ -73,8 +73,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var clipboardAutoDismissMonitor: Any?
     private var lastPromptedClipboardChangeCount: Int? = nil
 
-    // URL permission state (in-memory, resets on restart)
-    private var urlAlwaysAllowed = false
+    // URL permission state
+    private var urlAlwaysAllowed = false  // true when persisted setting OR "Always Allow" clicked
     private var pendingURLsToOpen: [String] = []
     private var urlPermissionCancellable: AnyCancellable?
 
@@ -525,32 +525,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let key = "captureSystemKeys_\(vmBundleURL.path.stableHash)"
         UserDefaults.standard.set(enabled, forKey: key)
         NSLog("GhostVMHelper: Capture inputs changed to \(enabled)")
-
-        if enabled {
-            // Force CMD overrides off — all keys go to VM
-            captureQuitEnabled = false
-            captureHideEnabled = false
-            (NSApp as? HelperApplication)?.captureQuitEnabled = false
-            (NSApp as? HelperApplication)?.captureHideEnabled = false
-            quitMenuItem?.keyEquivalent = "q"
-            hideMenuItem?.keyEquivalent = "h"
-            helperToolbar?.setCaptureQuit(false)
-            helperToolbar?.setCaptureHide(false)
-        } else {
-            // Restore persisted CMD override preferences
-            let quitKey = "captureQuit_\(vmBundleURL.path.stableHash)"
-            let hideKey = "captureHide_\(vmBundleURL.path.stableHash)"
-            let quit = UserDefaults.standard.bool(forKey: quitKey)
-            let hide = UserDefaults.standard.bool(forKey: hideKey)
-            captureQuitEnabled = quit
-            captureHideEnabled = hide
-            (NSApp as? HelperApplication)?.captureQuitEnabled = quit
-            (NSApp as? HelperApplication)?.captureHideEnabled = hide
-            quitMenuItem?.keyEquivalent = quit ? "" : "q"
-            hideMenuItem?.keyEquivalent = hide ? "" : "h"
-            helperToolbar?.setCaptureQuit(quit)
-            helperToolbar?.setCaptureHide(hide)
-        }
     }
 
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool) {
@@ -571,6 +545,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let key = "captureHide_\(vmBundleURL.path.stableHash)"
         UserDefaults.standard.set(enabled, forKey: key)
         NSLog("GhostVMHelper: Capture hide changed to \(enabled)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleOpenURLsAutomatically enabled: Bool) {
+        urlAlwaysAllowed = enabled
+
+        let key = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(enabled, forKey: key)
+        NSLog("GhostVMHelper: Open URLs automatically changed to \(enabled)")
     }
 
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String) {
@@ -709,6 +691,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
         urlAlwaysAllowed = true
+        helperToolbar?.setOpenURLsAutomatically(true)
+        let key = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(true, forKey: key)
         openPendingURLs()
         restoreVMViewFocus()
     }
@@ -1851,35 +1836,31 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         vmView.capturesSystemKeys = captureKeys
         toolbar.setCaptureSystemKeys(captureKeys)
 
-        // Load persisted capture quit/hide preferences.
-        // When capture inputs is ON, CMD overrides stay off — keys go to VM.
+        // Load persisted capture quit/hide preferences (independent of capture inputs)
         let captureQuitKey = "captureQuit_\(vmBundleURL.path.stableHash)"
         let captureQuit = UserDefaults.standard.bool(forKey: captureQuitKey)
         let captureHideKey = "captureHide_\(vmBundleURL.path.stableHash)"
         let captureHide = UserDefaults.standard.bool(forKey: captureHideKey)
 
-        if captureKeys {
-            // Capture inputs is ON — force CMD overrides off
-            captureQuitEnabled = false
-            captureHideEnabled = false
-            toolbar.setCaptureQuit(false)
-            toolbar.setCaptureHide(false)
-        } else {
-            captureQuitEnabled = captureQuit
-            toolbar.setCaptureQuit(captureQuit)
-            if captureQuit {
-                (NSApp as? HelperApplication)?.captureQuitEnabled = true
-                quitMenuItem?.keyEquivalent = ""
-            }
-
-            captureHideEnabled = captureHide
-            toolbar.setCaptureHide(captureHide)
-            if captureHide {
-                (NSApp as? HelperApplication)?.captureHideEnabled = true
-                hideMenuItem?.keyEquivalent = ""
-            }
+        captureQuitEnabled = captureQuit
+        toolbar.setCaptureQuit(captureQuit)
+        if captureQuit {
+            (NSApp as? HelperApplication)?.captureQuitEnabled = true
+            quitMenuItem?.keyEquivalent = ""
         }
 
+        captureHideEnabled = captureHide
+        toolbar.setCaptureHide(captureHide)
+        if captureHide {
+            (NSApp as? HelperApplication)?.captureHideEnabled = true
+            hideMenuItem?.keyEquivalent = ""
+        }
+
+        // Load persisted open-URLs-automatically preference
+        let openURLsKey = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
+        let openURLsAuto = UserDefaults.standard.bool(forKey: openURLsKey)
+        urlAlwaysAllowed = openURLsAuto
+        toolbar.setOpenURLsAutomatically(openURLsAuto)
 
         containerView.addSubview(vmView)
 
