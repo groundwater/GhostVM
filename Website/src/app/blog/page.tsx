@@ -5,28 +5,12 @@ export const metadata: Metadata = { title: "Blog - GhostVM" };
 
 const posts = [
   {
-    slug: "virtio-vsock-surprises",
-    title: "The Unexpected Challenges of virtio-vsock on macOS",
-    date: "2025-02-07",
-    readingTime: "8 min read",
-    summary:
-      "Real bugs we hit building host-guest communication with virtio-vsock — from silently closed file descriptors to broken kqueue notifications.",
-  },
-  {
     slug: "why-you-cant-clone-your-mac",
     title: "Why You Can't Clone Your Mac Into a VM",
     date: "2025-01-24",
     readingTime: "6 min read",
     summary:
       "Apple's Virtualization.framework doesn't let you snapshot a running Mac into a VM. Here's why that's a fundamental limitation, not a missing feature.",
-  },
-  {
-    slug: "how-macos-vms-work",
-    title: "How macOS Virtual Machines Actually Work on Apple Silicon",
-    date: "2025-01-10",
-    readingTime: "7 min read",
-    summary:
-      "Apple Silicon VMs aren't emulation. They run native ARM code through the hypervisor with a full secure boot chain. Here's what happens under the hood.",
   },
 ];
 
