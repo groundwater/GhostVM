@@ -73,6 +73,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var clipboardAutoDismissMonitor: Any?
     private var lastPromptedClipboardChangeCount: Int? = nil
 
+    // URL permission state
+    private var urlAlwaysAllowed = false  // true when persisted setting OR "Always Allow" clicked
+    private var pendingURLsToOpen: [String] = []
+    private var urlPermissionCancellable: AnyCancellable?
+
     // Port forward notification state
     private var newlyForwardedCancellable: AnyCancellable?
     private var blockedPortsCancellable: AnyCancellable?
@@ -520,32 +525,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let key = "captureSystemKeys_\(vmBundleURL.path.stableHash)"
         UserDefaults.standard.set(enabled, forKey: key)
         NSLog("GhostVMHelper: Capture inputs changed to \(enabled)")
-
-        if enabled {
-            // Force CMD overrides off — all keys go to VM
-            captureQuitEnabled = false
-            captureHideEnabled = false
-            (NSApp as? HelperApplication)?.captureQuitEnabled = false
-            (NSApp as? HelperApplication)?.captureHideEnabled = false
-            quitMenuItem?.keyEquivalent = "q"
-            hideMenuItem?.keyEquivalent = "h"
-            helperToolbar?.setCaptureQuit(false)
-            helperToolbar?.setCaptureHide(false)
-        } else {
-            // Restore persisted CMD override preferences
-            let quitKey = "captureQuit_\(vmBundleURL.path.stableHash)"
-            let hideKey = "captureHide_\(vmBundleURL.path.stableHash)"
-            let quit = UserDefaults.standard.bool(forKey: quitKey)
-            let hide = UserDefaults.standard.bool(forKey: hideKey)
-            captureQuitEnabled = quit
-            captureHideEnabled = hide
-            (NSApp as? HelperApplication)?.captureQuitEnabled = quit
-            (NSApp as? HelperApplication)?.captureHideEnabled = hide
-            quitMenuItem?.keyEquivalent = quit ? "" : "q"
-            hideMenuItem?.keyEquivalent = hide ? "" : "h"
-            helperToolbar?.setCaptureQuit(quit)
-            helperToolbar?.setCaptureHide(hide)
-        }
     }
 
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool) {
@@ -566,6 +545,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let key = "captureHide_\(vmBundleURL.path.stableHash)"
         UserDefaults.standard.set(enabled, forKey: key)
         NSLog("GhostVMHelper: Capture hide changed to \(enabled)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleOpenURLsAutomatically enabled: Bool) {
+        urlAlwaysAllowed = enabled
+
+        let key = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(enabled, forKey: key)
+        NSLog("GhostVMHelper: Open URLs automatically changed to \(enabled)")
     }
 
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String) {
@@ -652,19 +639,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar) {
         NSLog("GhostVMHelper: toolbarDidRequestReceiveFiles called, fileTransferService=%@", fileTransferService != nil ? "present" : "NIL")
-        window?.level = .normal
         fileTransferService?.fetchAllGuestFiles()
         restoreVMViewFocus()
     }
 
     func toolbarDidRequestDenyFiles(_ toolbar: HelperToolbar) {
-        window?.level = .normal
         fileTransferService?.clearGuestFileQueue()
         restoreVMViewFocus()
     }
 
     func toolbarQueuedFilesPanelDidClose(_ toolbar: HelperToolbar) {
-        window?.level = .normal
         restoreVMViewFocus()
     }
 
@@ -694,6 +678,30 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         restoreVMViewFocus()
     }
 
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar) {
+        pendingURLsToOpen = []
+        eventStreamService?.clearPendingURLs()
+        restoreVMViewFocus()
+    }
+
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar) {
+        openPendingURLs()
+        restoreVMViewFocus()
+    }
+
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
+        urlAlwaysAllowed = true
+        helperToolbar?.setOpenURLsAutomatically(true)
+        let key = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
+        UserDefaults.standard.set(true, forKey: key)
+        openPendingURLs()
+        restoreVMViewFocus()
+    }
+
+    func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar) {
+        restoreVMViewFocus()
+    }
+
     func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16) {
         autoPortMapService?.blockPort(port)
         updateToolbarPortForwards()
@@ -713,7 +721,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
-        // In UI testing mode, skip the floating window activation
+        // In UI testing mode, skip the popover activation
         guard !isUITesting else { return }
 
         // Use the file paths we already have from the event stream
@@ -722,13 +730,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let names = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
         NSLog("GhostVMHelper: toolbarDidDetectNewQueuedFiles — %d file(s) from event stream", names.count)
         helperToolbar?.setQueuedFileNames(names)
-
-        // Float the window above ALL other apps — this is the only
-        // reliable way to appear in front on macOS 14+.
-        window?.level = .floating
-        window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.requestUserAttention(.criticalRequest)
 
         Task {
             try? await Task.sleep(for: .milliseconds(200))
@@ -905,6 +906,40 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             NSEvent.removeMonitor(monitor)
             clipboardAutoDismissMonitor = nil
         }
+    }
+
+    // MARK: - URL Permission Flow
+
+    private func handlePendingURLs(_ urls: [String]) {
+        guard !urls.isEmpty else { return }
+
+        if urlAlwaysAllowed {
+            for urlString in urls {
+                if let url = URL(string: urlString) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            eventStreamService?.clearPendingURLs()
+            return
+        }
+
+        pendingURLsToOpen = urls
+
+        Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            helperToolbar?.showURLPermissionPopover()
+            helperToolbar?.setURLPermissionURLs(urls)
+        }
+    }
+
+    private func openPendingURLs() {
+        for urlString in pendingURLsToOpen {
+            if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        pendingURLsToOpen = []
+        eventStreamService?.clearPendingURLs()
     }
 
     // MARK: - Dynamic Icon
@@ -1533,7 +1568,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.helperToolbar?.setQueuedFileCount(count)
             }
 
-        // 6b. Dynamic icon — subscribe to foreground app changes
+        // 6b. URL permission — subscribe to pending URLs
+        urlPermissionCancellable = esService.$pendingURLs
+            .receive(on: RunLoop.main)
+            .sink { [weak self] urls in
+                self?.handlePendingURLs(urls)
+            }
+
+        // 6c. Dynamic icon — subscribe to foreground app changes
         foregroundAppCancellable = esService.$foregroundApp
             .receive(on: RunLoop.main)
             .sink { [weak self] app in
@@ -1614,6 +1656,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         fileCountCancellable?.cancel()
         fileCountCancellable = nil
         fileTransferService = nil
+
+        urlPermissionCancellable?.cancel()
+        urlPermissionCancellable = nil
 
         foregroundAppCancellable?.cancel()
         foregroundAppCancellable = nil
@@ -1791,35 +1836,31 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         vmView.capturesSystemKeys = captureKeys
         toolbar.setCaptureSystemKeys(captureKeys)
 
-        // Load persisted capture quit/hide preferences.
-        // When capture inputs is ON, CMD overrides stay off — keys go to VM.
+        // Load persisted capture quit/hide preferences (independent of capture inputs)
         let captureQuitKey = "captureQuit_\(vmBundleURL.path.stableHash)"
         let captureQuit = UserDefaults.standard.bool(forKey: captureQuitKey)
         let captureHideKey = "captureHide_\(vmBundleURL.path.stableHash)"
         let captureHide = UserDefaults.standard.bool(forKey: captureHideKey)
 
-        if captureKeys {
-            // Capture inputs is ON — force CMD overrides off
-            captureQuitEnabled = false
-            captureHideEnabled = false
-            toolbar.setCaptureQuit(false)
-            toolbar.setCaptureHide(false)
-        } else {
-            captureQuitEnabled = captureQuit
-            toolbar.setCaptureQuit(captureQuit)
-            if captureQuit {
-                (NSApp as? HelperApplication)?.captureQuitEnabled = true
-                quitMenuItem?.keyEquivalent = ""
-            }
-
-            captureHideEnabled = captureHide
-            toolbar.setCaptureHide(captureHide)
-            if captureHide {
-                (NSApp as? HelperApplication)?.captureHideEnabled = true
-                hideMenuItem?.keyEquivalent = ""
-            }
+        captureQuitEnabled = captureQuit
+        toolbar.setCaptureQuit(captureQuit)
+        if captureQuit {
+            (NSApp as? HelperApplication)?.captureQuitEnabled = true
+            quitMenuItem?.keyEquivalent = ""
         }
 
+        captureHideEnabled = captureHide
+        toolbar.setCaptureHide(captureHide)
+        if captureHide {
+            (NSApp as? HelperApplication)?.captureHideEnabled = true
+            hideMenuItem?.keyEquivalent = ""
+        }
+
+        // Load persisted open-URLs-automatically preference
+        let openURLsKey = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
+        let openURLsAuto = UserDefaults.standard.bool(forKey: openURLsKey)
+        urlAlwaysAllowed = openURLsAuto
+        toolbar.setOpenURLsAutomatically(openURLsAuto)
 
         containerView.addSubview(vmView)
 

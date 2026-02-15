@@ -51,7 +51,7 @@ private final class HighlightingMenuItemView: NSView {
 
 /// NSToolbar implementation for the VM helper window.
 /// Provides quick access to VM status and controls.
-final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
+final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, URLPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
 
     // MARK: - Toolbar Item Identifiers
 
@@ -81,6 +81,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var captureSystemKeysEnabled = true
     private var captureQuitEnabled = false
     private var captureHideEnabled = false
+    private var openURLsAutomaticallyEnabled = false
     private var autoPortMapEnabled = false
     private var queuedFileCount = 0
     private var queuedFileNames: [String] = []
@@ -108,6 +109,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var sharedFolderEntries: [SharedFolderEntry] = []
     private var queuedFilesPanel: QueuedFilesPanel?
     private var clipboardPermissionPanel: ClipboardPermissionPanel?
+    private var urlPermissionPanel: URLPermissionPanel?
     private var portForwardPermissionPanel: PortForwardPermissionPanel?
     private var portForwardNotificationPanel: PortForwardNotificationPanel?
     private var iconChooserPanel: IconChooserPanel?
@@ -194,6 +196,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
     func setCaptureHide(_ enabled: Bool) {
         captureHideEnabled = enabled
+        rebuildCaptureCommandsMenu()
+    }
+
+    func setOpenURLsAutomatically(_ enabled: Bool) {
+        openURLsAutomaticallyEnabled = enabled
         rebuildCaptureCommandsMenu()
     }
 
@@ -433,7 +440,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         item.label = "Commands"
         item.paletteLabel = "Capture Commands"
         item.toolTip = "Command key capture settings"
-        item.image = NSImage(systemSymbolName: "command", accessibilityDescription: "Capture Commands")?.withSymbolConfiguration(iconConfig)
+        item.image = NSImage(systemSymbolName: "switch.2", accessibilityDescription: "Capture Commands")?.withSymbolConfiguration(iconConfig)
         item.showsIndicator = false
         item.minSize = NSSize(width: 36, height: 32)
         item.maxSize = NSSize(width: 36, height: 32)
@@ -571,13 +578,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Capture Inputs")?.withSymbolConfiguration(iconConfig)
         item.toolTip = captureSystemKeysEnabled ? "Inputs captured by VM" : "Inputs handled by macOS"
 
-        // Disable the Commands dropdown when inputs are captured — CMD overrides
-        // are forced off so the menu would be misleading.
-        updateCaptureCommandsEnabled()
-    }
-
-    private func updateCaptureCommandsEnabled() {
-        captureCommandsItem?.isEnabled = !captureSystemKeysEnabled
+        rebuildCaptureCommandsMenu()
     }
 
     private func updateQueuedFilesButton() {
@@ -662,15 +663,35 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private func rebuildCaptureCommandsMenu() {
         let menu = NSMenu()
 
-        let quitItem = NSMenuItem(title: "Quit (\u{2318}Q)", action: #selector(toggleCaptureQuit), keyEquivalent: "")
-        quitItem.target = self
-        quitItem.state = captureQuitEnabled ? .on : .off
-        menu.addItem(quitItem)
+        let urlItem = NSMenuItem(title: "Open URLs Automatically", action: #selector(toggleOpenURLsAutomatically), keyEquivalent: "")
+        urlItem.target = self
+        urlItem.state = openURLsAutomaticallyEnabled ? .on : .off
+        menu.addItem(urlItem)
 
-        let hideItem = NSMenuItem(title: "Hide (\u{2318}H)", action: #selector(toggleCaptureHide), keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
+
+        let captureItem = NSMenuItem(title: "Capture All Inputs", action: #selector(toggleCaptureSystemKeysFromMenu), keyEquivalent: "")
+        captureItem.target = self
+        captureItem.state = captureSystemKeysEnabled ? .on : .off
+        menu.addItem(captureItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        let shortcutsSubmenu = NSMenu()
+
+        let hideItem = NSMenuItem(title: "Hide \u{2318}H", action: #selector(toggleCaptureHide), keyEquivalent: "")
         hideItem.target = self
         hideItem.state = captureHideEnabled ? .on : .off
-        menu.addItem(hideItem)
+        shortcutsSubmenu.addItem(hideItem)
+
+        let quitItem = NSMenuItem(title: "Quit \u{2318}Q", action: #selector(toggleCaptureQuit), keyEquivalent: "")
+        quitItem.target = self
+        quitItem.state = captureQuitEnabled ? .on : .off
+        shortcutsSubmenu.addItem(quitItem)
+
+        let shortcutsItem = NSMenuItem(title: "Intercept Shortcuts", action: nil, keyEquivalent: "")
+        shortcutsItem.submenu = shortcutsSubmenu
+        menu.addItem(shortcutsItem)
 
         captureCommandsMenu = menu
         captureCommandsItem?.menu = menu
@@ -872,6 +893,19 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         delegate?.toolbar(self, didToggleCaptureHide: captureHideEnabled)
     }
 
+    @objc private func toggleOpenURLsAutomatically() {
+        openURLsAutomaticallyEnabled.toggle()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleOpenURLsAutomatically: openURLsAutomaticallyEnabled)
+    }
+
+    @objc private func toggleCaptureSystemKeysFromMenu() {
+        captureSystemKeysEnabled.toggle()
+        updateCaptureKeysButton()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleCaptureSystemKeys: captureSystemKeysEnabled)
+    }
+
     @objc private func receiveQueuedFiles() {
         showQueuedFilesPopover()
     }
@@ -940,6 +974,35 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
 
     var isClipboardPermissionPopoverShown: Bool {
         clipboardPermissionPanel?.isShown ?? false
+    }
+
+    func showURLPermissionPopover() {
+        guard let view = guestToolsItem?.view else { return }
+
+        urlPermissionPanel?.close()
+
+        let panel = URLPermissionPanel()
+        panel.delegate = self
+        panel.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.urlPermissionPanel = nil
+            self.delegate?.toolbarURLPermissionPanelDidClose(self)
+        }
+        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        urlPermissionPanel = panel
+    }
+
+    func closeURLPermissionPopover() {
+        urlPermissionPanel?.close()
+        urlPermissionPanel = nil
+    }
+
+    var isURLPermissionPopoverShown: Bool {
+        urlPermissionPanel?.isShown ?? false
+    }
+
+    func setURLPermissionURLs(_ urls: [String]) {
+        urlPermissionPanel?.setURLs(urls)
     }
 
     func showPortForwardPermissionPopover() {
@@ -1065,6 +1128,26 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         delegate?.toolbarClipboardPermissionDidAlwaysAllow(self)
     }
 
+    // MARK: - URLPermissionPanelDelegate
+
+    func urlPermissionPanelDidDeny(_ panel: URLPermissionPanel) {
+        panel.close()
+        urlPermissionPanel = nil
+        delegate?.toolbarURLPermissionDidDeny(self)
+    }
+
+    func urlPermissionPanelDidAllowOnce(_ panel: URLPermissionPanel) {
+        panel.close()
+        urlPermissionPanel = nil
+        delegate?.toolbarURLPermissionDidAllowOnce(self)
+    }
+
+    func urlPermissionPanelDidAlwaysAllow(_ panel: URLPermissionPanel) {
+        panel.close()
+        urlPermissionPanel = nil
+        delegate?.toolbarURLPermissionDidAlwaysAllow(self)
+    }
+
     // MARK: - PortForwardPermissionPanelDelegate
 
     func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didBlockPort guestPort: UInt16) {
@@ -1115,6 +1198,7 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureHide enabled: Bool)
+    func toolbar(_ toolbar: HelperToolbar, didToggleOpenURLsAutomatically enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleAutoPortMap enabled: Bool)
     @discardableResult
     func toolbar(_ toolbar: HelperToolbar, didAddPortForward hostPort: UInt16, guestPort: UInt16) -> String?
@@ -1133,6 +1217,10 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbarClipboardPermissionDidAllowOnce(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16)
     func toolbarPortForwardPermissionPanelDidClose(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didUnblockPort port: UInt16)
