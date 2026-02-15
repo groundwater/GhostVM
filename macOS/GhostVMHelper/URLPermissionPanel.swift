@@ -1,4 +1,5 @@
 import AppKit
+import GhostVMKit
 
 /// Delegate protocol for URL permission panel actions
 protocol URLPermissionPanelDelegate: AnyObject {
@@ -81,7 +82,7 @@ final class URLPermissionContentViewController: NSViewController {
     func setURLs(_ urls: [String]) {
         guard let label = urlLabel else { return }
         if urls.count == 1 {
-            label.stringValue = truncateMiddle(urls[0], maxLength: 60)
+            label.stringValue = URLUtilities.truncateMiddle(urls[0], maxLength: 60)
             label.toolTip = urls[0]
         } else {
             label.stringValue = "\(urls.count) URLs from guest"
@@ -166,11 +167,4 @@ final class URLPermissionContentViewController: NSViewController {
         delegate?.contentViewControllerDidAlwaysAllow(self)
     }
 
-    private func truncateMiddle(_ string: String, maxLength: Int) -> String {
-        guard string.count > maxLength else { return string }
-        let half = (maxLength - 1) / 2
-        let start = string.prefix(half)
-        let end = string.suffix(half)
-        return "\(start)\u{2026}\(end)"
-    }
 }

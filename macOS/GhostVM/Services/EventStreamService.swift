@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import Combine
 import Virtualization
+import GhostVMKit
 
 /// A guest port with optional process name.
 public struct GuestPort: Equatable {
@@ -130,12 +131,7 @@ public final class EventStreamService: ObservableObject {
             }
         case "urls":
             if let urls = obj["urls"] as? [String] {
-                let validURLs = urls.filter { urlString in
-                    guard let url = URL(string: urlString),
-                          let scheme = url.scheme?.lowercased(),
-                          scheme == "http" || scheme == "https" else { return false }
-                    return true
-                }
+                let validURLs = URLUtilities.filterWebURLs(urls)
                 if !validURLs.isEmpty {
                     Task { @MainActor [weak self] in
                         self?.pendingURLs = validURLs
