@@ -821,6 +821,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     }
 
     @objc private func editSharedFolders(_ sender: NSMenuItem) {
+        showSharedFolderEditor()
+    }
+
+    func showSharedFolderEditor() {
         let targetWindow = window ?? NSApp.keyWindow
         guard let targetWindow = targetWindow else { return }
 

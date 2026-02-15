@@ -74,6 +74,7 @@ final class QueuedFilesContentViewController: NSViewController {
     private var fileNames: [String] = []
     private var fileListStack: NSStackView!
     private var subtitleLabel: NSTextField!
+    private var scrollHeightConstraint: NSLayoutConstraint?
 
     override func loadView() {
         let container = NSView()
@@ -144,8 +145,7 @@ final class QueuedFilesContentViewController: NSViewController {
             scrollView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
-            scrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
-            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 110),
+            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 200),
 
             infoLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 10),
             infoLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
@@ -159,6 +159,11 @@ final class QueuedFilesContentViewController: NSViewController {
 
             container.widthAnchor.constraint(equalToConstant: 300),
         ])
+
+        let heightConstraint = scrollView.heightAnchor.constraint(equalToConstant: 24)
+        heightConstraint.priority = .defaultHigh
+        heightConstraint.isActive = true
+        scrollHeightConstraint = heightConstraint
 
         rebuildFileList()
         self.view = container
@@ -175,6 +180,9 @@ final class QueuedFilesContentViewController: NSViewController {
         if count == 1 { return "1 file ready to download" }
         return "\(count) files ready to download"
     }
+
+    private let rowHeight: CGFloat = 18
+    private let maxVisibleRows = 10
 
     private func rebuildFileList() {
         guard let fileListStack = fileListStack else { return }
@@ -206,6 +214,11 @@ final class QueuedFilesContentViewController: NSViewController {
 
             fileListStack.addArrangedSubview(row)
         }
+
+        // Size scroll view to fit content, capped at maxVisibleRows
+        let visibleRows = min(fileNames.count, maxVisibleRows)
+        let contentHeight = CGFloat(visibleRows) * rowHeight + CGFloat(max(visibleRows - 1, 0)) * fileListStack.spacing
+        scrollHeightConstraint?.constant = max(contentHeight, 24)
     }
 
     @objc private func allowClicked() {

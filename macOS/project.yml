@@ -1,6 +1,6 @@
 name: GhostVM
 options:
-  bundleIdPrefix: com.yellowgreenfruit
+  bundleIdPrefix: org.ghostvm
   deploymentTarget:
     macOS: "15.0"
   xcodeVersion: "15.4"
@@ -29,7 +29,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVMKit
-        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvmkit
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvmkit
         GENERATE_INFOPLIST_FILE: YES
         DEFINES_MODULE: YES
         SWIFT_VERSION: "5.0"
@@ -79,6 +79,9 @@ targets:
       - path: GhostVM/Resources/VMIcons
         type: resource
         buildPhase: resources
+      - path: ../Resources
+        type: resource
+        buildPhase: resources
     dependencies:
       - target: GhostVMKit
         embed: true
@@ -89,7 +92,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
-        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm.helper
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper
         INFOPLIST_FILE: GhostVMHelper/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
@@ -135,7 +138,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVM
-        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm
         INFOPLIST_FILE: GhostVM/VMApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
@@ -159,7 +162,7 @@ targets:
       - target: GhostVMKit
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm.tests
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.tests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: "5.0"
 
@@ -172,6 +175,21 @@ targets:
       - target: GhostVM
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.yellowgreenfruit.ghostvm.uitests
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.uitests
         GENERATE_INFOPLIST_FILE: YES
         SWIFT_VERSION: "5.0"
+        ENABLE_APP_SANDBOX: NO
+
+  GhostVMHelperUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: GhostVMHelperUITests
+    dependencies:
+      - target: GhostVMHelper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        ENABLE_APP_SANDBOX: NO
