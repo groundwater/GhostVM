@@ -657,19 +657,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     func toolbarDidRequestReceiveFiles(_ toolbar: HelperToolbar) {
         NSLog("GhostVMHelper: toolbarDidRequestReceiveFiles called, fileTransferService=%@", fileTransferService != nil ? "present" : "NIL")
-        window?.level = .normal
         fileTransferService?.fetchAllGuestFiles()
         restoreVMViewFocus()
     }
 
     func toolbarDidRequestDenyFiles(_ toolbar: HelperToolbar) {
-        window?.level = .normal
         fileTransferService?.clearGuestFileQueue()
         restoreVMViewFocus()
     }
 
     func toolbarQueuedFilesPanelDidClose(_ toolbar: HelperToolbar) {
-        window?.level = .normal
         restoreVMViewFocus()
     }
 
@@ -702,20 +699,17 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar) {
         pendingURLsToOpen = []
         eventStreamService?.clearPendingURLs()
-        window?.level = .normal
         restoreVMViewFocus()
     }
 
     func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar) {
         openPendingURLs()
-        window?.level = .normal
         restoreVMViewFocus()
     }
 
     func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
         urlAlwaysAllowed = true
         openPendingURLs()
-        window?.level = .normal
         restoreVMViewFocus()
     }
 
@@ -742,7 +736,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
-        // In UI testing mode, skip the floating window activation
+        // In UI testing mode, skip the popover activation
         guard !isUITesting else { return }
 
         // Use the file paths we already have from the event stream
@@ -751,13 +745,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let names = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
         NSLog("GhostVMHelper: toolbarDidDetectNewQueuedFiles — %d file(s) from event stream", names.count)
         helperToolbar?.setQueuedFileNames(names)
-
-        // Float the window above ALL other apps — this is the only
-        // reliable way to appear in front on macOS 14+.
-        window?.level = .floating
-        window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
-        NSApp.requestUserAttention(.criticalRequest)
 
         Task {
             try? await Task.sleep(for: .milliseconds(200))
@@ -952,11 +939,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
 
         pendingURLsToOpen = urls
-
-        // Float the window to get user attention
-        window?.level = .floating
-        window?.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
 
         Task {
             try? await Task.sleep(for: .milliseconds(200))
