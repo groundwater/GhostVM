@@ -11,7 +11,7 @@ GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
 XCODE_CONFIG ?= Release
-BUILD_DIR = build/xcode
+BUILD_DIR ?= build/xcode
 APP_NAME = GhostVM
 
 .PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version
@@ -474,6 +474,7 @@ help:
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
 	@echo "Variables:"
+	@echo "  DEVELOPMENT_TEAM - Apple Developer team ID (via .env file, see .env.example)"
 	@echo "  CODESIGN_ID   - Code signing identity (default: Apple Development)"
 	@echo "  XCODE_CONFIG  - Xcode build configuration (default: Release)"
 	@echo "  VERSION       - Version for DMG (default: git describe)"
