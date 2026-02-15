@@ -893,6 +893,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 return event
             }
             // Auto-dismiss (implicit deny) when user interacts with the VM
+            self.lastPromptedClipboardChangeCount = NSPasteboard.general.changeCount
             self.helperToolbar?.closeClipboardPermissionPopover()
             self.removeClipboardAutoDismissMonitor()
             return event
