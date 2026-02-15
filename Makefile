@@ -317,16 +317,21 @@ dist: app cli
 		-s "$(DIST_CODESIGN_ID)" \
 		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"
 	@# 2b. Sign Sparkle nested components (XPC services, Autoupdate helper)
-	@for xpc in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/"*.xpc 2>/dev/null; do \
+	@for xpc in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/XPCServices/"*.xpc; do \
 		if [ -d "$$xpc" ]; then \
 			echo "  Signing $$(basename $$xpc) (Sparkle XPC)"; \
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$xpc"; \
 		fi; \
 	done
-	@if [ -d "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate.app" ]; then \
-		echo "  Signing Autoupdate.app (Sparkle)"; \
+	@if [ -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate" ]; then \
+		echo "  Signing Autoupdate (Sparkle)"; \
 		codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" \
-			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate.app"; \
+			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate"; \
+	fi
+	@if [ -d "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app" ]; then \
+		echo "  Signing Updater.app (Sparkle)"; \
+		codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" \
+			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app"; \
 	fi
 	@# 3. Sign all embedded frameworks in the main app
 	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Frameworks/"*.framework; do \
