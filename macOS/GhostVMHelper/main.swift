@@ -127,10 +127,24 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     // MARK: - App Lifecycle
 
+    private var isUITesting = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSLog("GhostVMHelper: BUILD 2025-02-09A — file transfer debug build")
         // Parse command line arguments
         let args = ProcessInfo.processInfo.arguments
+
+        // UI testing mode: skip VM, show mock window
+        if args.contains("--ui-testing") {
+            isUITesting = true
+            vmName = "macOS Sequoia"
+            ProcessInfo.processInfo.processName = vmName
+            NSApp.setActivationPolicy(.regular)
+            setupMenuBar()
+            setupUITestingWindow(args: args)
+            return
+        }
+
         if let bundleIndex = args.firstIndex(of: "--vm-bundle"), bundleIndex + 1 < args.count {
             vmBundleURL = URL(fileURLWithPath: args[bundleIndex + 1]).standardizedFileURL
         } else {
@@ -195,6 +209,143 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         helperToolbar?.showQueuedFilesPopoverIfNeeded()
         return true
+    }
+
+    // MARK: - UI Testing Mode
+
+    private func setupUITestingWindow(args: [String]) {
+        // Create window — wide enough for toolbar items + popovers to not clip
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = vmName
+        window.delegate = self
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 512, height: 512)
+        window.hasShadow = false  // Disable shadow so XCUITest captures are tight to window frame
+
+        // Setup toolbar
+        let toolbar = HelperToolbar()
+        toolbar.delegate = self
+        toolbar.attach(to: window)
+        helperToolbar = toolbar
+
+        // Create container for VM content
+        let containerView = NSView()
+        containerView.wantsLayer = true
+        window.contentView = containerView
+
+        // Helper to load a @2x image from bundle resources
+        func loadBundleImage(_ name: String) -> NSImage? {
+            let image = NSImage(named: name) ?? {
+                guard let path = Bundle.main.path(forResource: name, ofType: "png") else { return nil }
+                return NSImage(contentsOfFile: path)
+            }()
+            if let image = image, let rep = image.representations.first {
+                image.size = NSSize(width: rep.pixelsWide / 2, height: rep.pixelsHigh / 2)
+            }
+            return image
+        }
+
+        // Guest desktop wallpaper — use --wallpaper flag or default to Desktop-Sequoia
+        // Offset upward to hide the guest menu bar baked into the screenshot.
+        let wallpaperName: String
+        if let idx = args.firstIndex(of: "--wallpaper"), idx + 1 < args.count {
+            wallpaperName = args[idx + 1]
+        } else {
+            wallpaperName = "Desktop-Sequoia"
+        }
+        let wallpaperView = NSImageView()
+        wallpaperView.imageScaling = .scaleAxesIndependently
+        wallpaperView.translatesAutoresizingMaskIntoConstraints = false
+        wallpaperView.image = loadBundleImage(wallpaperName)
+        containerView.addSubview(wallpaperView)
+        let menuBarCrop: CGFloat = 38
+        NSLayoutConstraint.activate([
+            wallpaperView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: -menuBarCrop),
+            wallpaperView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            wallpaperView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+            wallpaperView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+        ])
+
+        // If --content-image is specified, overlay the app window on the guest desktop
+        if let idx = args.firstIndex(of: "--content-image"), idx + 1 < args.count {
+            let contentName = args[idx + 1]
+            if let appImage = loadBundleImage(contentName) {
+                let appView = NSImageView()
+                appView.translatesAutoresizingMaskIntoConstraints = false
+                appView.image = appImage
+                appView.wantsLayer = true
+                appView.layer!.backgroundColor = NSColor.clear.cgColor
+                appView.imageScaling = .scaleProportionallyUpOrDown
+                appView.shadow = {
+                    let s = NSShadow()
+                    s.shadowBlurRadius = 12
+                    s.shadowOffset = NSSize(width: 0, height: -4)
+                    s.shadowColor = NSColor.black.withAlphaComponent(0.4)
+                    return s
+                }()
+                containerView.addSubview(appView)
+                // Inset the app window so guest desktop wallpaper is clearly visible behind it
+                NSLayoutConstraint.activate([
+                    appView.topAnchor.constraint(equalTo: containerView.topAnchor, constant: 60),
+                    appView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor, constant: 50),
+                    appView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor, constant: -50),
+                    appView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor, constant: -30),
+                ])
+            }
+        }
+
+        self.window = window
+
+        // Pre-populate toolbar with mock data
+        toolbar.setGuestToolsStatus(.connected)
+        toolbar.setClipboardSyncMode("bidirectional")
+
+        // Mock port forwards: node:8080, python3:3000
+        toolbar.setPortForwardEntries([
+            PortForwardEntry(hostPort: 8080, guestPort: 8080, enabled: true, isAutoMapped: true, processName: "node"),
+            PortForwardEntry(hostPort: 3000, guestPort: 3000, enabled: true, isAutoMapped: true, processName: "python3"),
+        ])
+        toolbar.setAutoPortMapEnabled(true)
+
+        // Mock shared folder
+        toolbar.setSharedFolderEntries([
+            SharedFolderEntry(id: UUID(), path: NSHomeDirectory() + "/Projects", readOnly: false),
+        ])
+
+        // Mock queued files
+        toolbar.setQueuedFileCount(3)
+        toolbar.setQueuedFileNames(["screenshot.png"])
+
+        toolbar.setVMRunning(true)
+
+        // Show window
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Show the requested panel after a delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self = self else { return }
+            if args.contains("--show-clipboard-prompt") {
+                self.helperToolbar?.showClipboardPermissionPopover()
+            } else if args.contains("--show-port-forward") {
+                self.helperToolbar?.showPortForwardNotificationPopover()
+                let mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)] = [
+                    (guestPort: 8080, hostPort: 8080, processName: "node"),
+                    (guestPort: 3000, hostPort: 3000, processName: "python3"),
+                ]
+                self.helperToolbar?.setPortForwardPermissionMappings(mappings)
+            } else if args.contains("--show-file-transfer") {
+                self.helperToolbar?.showQueuedFilesPopover()
+            } else if args.contains("--show-shared-folders") {
+                self.helperToolbar?.showSharedFolderEditor()
+            }
+        }
     }
 
     // MARK: - Custom Icon
@@ -562,6 +713,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarDidDetectNewQueuedFiles(_ toolbar: HelperToolbar) {
+        // In UI testing mode, skip the floating window activation
+        guard !isUITesting else { return }
+
         // Use the file paths we already have from the event stream
         // instead of making a redundant HTTP round-trip via listGuestFiles()
         let paths = fileTransferService?.queuedGuestFilePaths ?? []
@@ -1694,6 +1848,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - NSWindowDelegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if isUITesting { return true }
         switch state {
         case .stopped, .failed:
             return true

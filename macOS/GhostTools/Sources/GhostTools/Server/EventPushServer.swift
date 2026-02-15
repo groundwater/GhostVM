@@ -62,7 +62,7 @@ final class EventPushServer: @unchecked Sendable {
     private let clientLock = NSLock()
 
     /// Serial queue for writes (preserves NDJSON line ordering)
-    private let writeQueue = DispatchQueue(label: "\(Bundle.main.bundleIdentifier ?? "com.yellowgreenfruit.com.ghostvm.guest-tools").eventpush.write")
+    private let writeQueue = DispatchQueue(label: "\(Bundle.main.bundleIdentifier ?? "org.ghostvm.com.ghostvm.guest-tools").eventpush.write")
 
     /// Called on main thread when a new host client connects.
     var onClientConnected: (() -> Void)?

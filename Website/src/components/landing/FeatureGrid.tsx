@@ -3,7 +3,7 @@ import {
   Zap,
   Camera,
   Shield,
-  Copy,
+  Pause,
   Bot,
 } from "lucide-react";
 
@@ -12,37 +12,37 @@ const features = [
     icon: Zap,
     title: "Native Performance",
     description:
-      "Built on Apple's Virtualization.framework for near-native performance on macOS. No emulation overhead.",
+      "Built on Apple's Virtualization.framework. Near-native speed, no emulation.",
   },
   {
     icon: Package,
     title: "Self-Contained Bundles",
     description:
-      "Each workspace lives in a single .GhostVM bundle. Copy, move, or back up entire environments as a folder.",
+      "Each workspace is a single .GhostVM folder. Copy, move, or back it up like any file.",
   },
   {
     icon: Camera,
-    title: "Snapshots",
+    title: "Snapshots & Clones",
     description:
-      "Checkpoint before risky changes. Create, revert, and delete snapshots to save and restore full workspace state.",
+      "Checkpoint before risky changes. Clone instantly with APFS copy-on-write.",
   },
   {
     icon: Shield,
     title: "Security Boundaries",
     description:
-      "Files from guests are quarantined for Gatekeeper verification. Clipboard sync requires explicit permission — deny, allow once, or always allow.",
+      "Isolated by default. File transfers are quarantined. Clipboard syncs require permission.",
   },
   {
-    icon: Copy,
-    title: "Instant Clone",
+    icon: Pause,
+    title: "Suspend & Resume",
     description:
-      "Duplicate any workspace with APFS copy-on-write. Fresh machine IDs and MAC addresses. Near-zero disk overhead.",
+      "Suspend a workspace to disk and resume exactly where you left off.",
   },
   {
     icon: Bot,
     title: "Host API",
     description:
-      "Programmatic access to every running VM via a Unix domain socket. Run commands, transfer files, and manage the VM lifecycle from scripts or agents.",
+      "Programmatic access via Unix socket. Scriptable lifecycle, file transfer, and remote execution.",
   },
 ];
 

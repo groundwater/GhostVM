@@ -6,17 +6,15 @@ export default function Hero() {
     <section className="py-20 sm:py-28">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
-          Agentic Workspaces
+          Agent Workspace
           <br />
           <span className="text-ghost-600 dark:text-ghost-400">
             Virtualization for macOS
           </span>
         </h1>
         <p className="text-lg sm:text-xl text-gray-600 dark:text-gray-400 max-w-2xl mx-auto mb-10">
-          Each workspace is an isolated macOS VM with its own tools, files, and
-          environment. Deep host integration means switching between them is as
-          easy as switching apps. Control them with the GUI, the CLI, or let an
-          AI agent drive.
+          Isolated macOS VMs with deep host integration. Switch between
+          workspaces like apps. Drive them with the GUI, the CLI, or an agent.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-14">
           <Link
@@ -33,11 +31,11 @@ export default function Hero() {
           </Link>
         </div>
 
-        {/* Hero screenshot */}
+        {/* Hero: host desktop → GhostVM window → guest desktop → VS Code */}
         <div className="max-w-4xl mx-auto">
           <div className="rounded-xl overflow-hidden shadow-2xl ring-1 ring-black/10 dark:ring-white/10">
             <Image
-              src="/images/hero-screenshot.png"
+              src="/images/screenshots/hero-screenshot.jpg"
               alt="VS Code running inside a GhostVM virtual machine on macOS"
               width={2992}
               height={1934}

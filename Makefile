@@ -14,7 +14,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign
+.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots
 
 all: help
 
@@ -94,6 +94,54 @@ launch: app
 # Run unit tests
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
+
+# Generate website screenshots from UI tests
+# Step 1: capture — runs XCUITests, saves raw PNGs to build/screenshots/
+# Step 2: composite — processes raw captures into final website images
+SCREENSHOT_RAW = $(BUILD_DIR)/screenshots
+SCREENSHOT_DEST = Website/public/images/screenshots
+UITEST_CONTAINER = $(HOME)/Library/Containers/org.ghostvm.ghostvm.uitests.xctrunner/Data/tmp/GhostVM-Screenshots
+HELPER_UITEST_CONTAINER = $(HOME)/Library/Containers/org.ghostvm.ghostvm.helper.uitests.xctrunner/Data/tmp/GhostVM-Screenshots
+
+# Capture raw screenshots from XCUITests → build/screenshots/
+capture: $(XCODE_PROJECT)
+	@rm -rf "$(UITEST_CONTAINER)" "$(HELPER_UITEST_CONTAINER)"
+	xcodebuild build-for-testing -project $(XCODE_PROJECT) -scheme GhostVMUITests \
+		-derivedDataPath $(BUILD_DIR) -destination 'platform=macOS'
+	xcodebuild build-for-testing -project $(XCODE_PROJECT) -scheme GhostVMHelperUITests \
+		-derivedDataPath $(BUILD_DIR) -destination 'platform=macOS'
+	xcodebuild test-without-building -project $(XCODE_PROJECT) -scheme GhostVMUITests \
+		-derivedDataPath $(BUILD_DIR) -destination 'platform=macOS' \
+		-only-testing:GhostVMUITests/ScreenshotTests
+	xcodebuild test-without-building -project $(XCODE_PROJECT) -scheme GhostVMHelperUITests \
+		-derivedDataPath $(BUILD_DIR) -destination 'platform=macOS' \
+		-only-testing:GhostVMHelperUITests/HelperScreenshotTests
+	@mkdir -p "$(SCREENSHOT_RAW)"
+	@if [ -d "$(UITEST_CONTAINER)" ]; then cp "$(UITEST_CONTAINER)"/*.png "$(SCREENSHOT_RAW)/"; fi
+	@if [ -d "$(HELPER_UITEST_CONTAINER)" ]; then cp "$(HELPER_UITEST_CONTAINER)"/*.png "$(SCREENSHOT_RAW)/"; fi
+	@echo "Raw captures saved to $(SCREENSHOT_RAW)/:"
+	@ls -1 "$(SCREENSHOT_RAW)"/ 2>/dev/null | while read f; do echo "  $$f"; done
+
+# Composite raw captures into final website images → Website/public/images/screenshots/
+composite:
+	@if [ ! -d "$(SCREENSHOT_RAW)" ]; then echo "No raw captures found. Run 'make capture' first."; exit 1; fi
+	@mkdir -p "$(SCREENSHOT_DEST)"
+	@cp "$(SCREENSHOT_RAW)"/*.png "$(SCREENSHOT_DEST)/"
+	@# Composite helper-window captures onto host desktop wallpaper (before flattening — needs alpha)
+	swift scripts/composite-screenshots.swift Resources "$(SCREENSHOT_DEST)"
+	@# Flatten all PNGs to RGB (remove alpha transparency artifacts)
+	@for f in "$(SCREENSHOT_DEST)"/*.png; do \
+		python3 -c "from PIL import Image; img=Image.open('$$f'); img.convert('RGB').save('$$f')" 2>/dev/null; \
+	done
+	@# Convert composites to JPEG for web
+	@for f in "$(SCREENSHOT_DEST)/multiple-vms.png" "$(SCREENSHOT_DEST)/vm-integration.png" "$(SCREENSHOT_DEST)/hero-screenshot.png"; do \
+		sips -s format jpeg -s formatOptions 85 "$$f" --out "$${f%.png}.jpg" >/dev/null 2>&1 && rm "$$f"; \
+	done
+	@echo "Website images saved to $(SCREENSHOT_DEST)/:"
+	@ls -1 "$(SCREENSHOT_DEST)"/ 2>/dev/null | while read f; do echo "  $$f"; done
+
+# Full pipeline: capture + composite
+screenshots: capture composite
 
 # GhostTools settings
 GHOSTTOOLS_DIR = macOS/GhostTools
@@ -371,6 +419,9 @@ help:
 	@echo "  make run      - Build and run attached to terminal"
 	@echo "  make launch   - Build and launch detached"
 	@echo "  make test     - Run unit tests"
+	@echo "  make capture     - Capture raw screenshots from UI tests → build/screenshots/"
+	@echo "  make composite   - Composite raw captures into website images"
+	@echo "  make screenshots - Full pipeline: capture + composite"
 	@echo "  make tools    - Build GhostTools guest agent"
 	@echo "  make debug-tools - Build GhostTools debug binary (lldb-compatible with macOS 15)"
 	@echo "  make dmg      - Create GhostTools.dmg"

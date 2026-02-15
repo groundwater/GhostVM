@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { DesktopFrame, WindowScreenshot } from "./DesktopFrame";
 
 export default function ScreenshotShowcase() {
@@ -8,33 +9,22 @@ export default function ScreenshotShowcase() {
           Run multiple workspaces, each fully isolated
         </h2>
         <p className="text-center text-gray-600 dark:text-gray-400 mb-10 max-w-xl mx-auto">
-          Every VM is a self-contained workspace — its own OS, tools, and
-          files. Run as many as you need in parallel, each isolated from the
-          others and from your host.
+          Each workspace is its own macOS. Run as many as you need, fully
+          isolated from each other and your host.
         </p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8 max-w-5xl mx-auto">
-          <div>
-            <DesktopFrame>
-              <WindowScreenshot
-                src="/images/screenshots/vm-list-with-vms.png"
-                alt="GhostVM main window showing a list of virtual machines"
-              />
-            </DesktopFrame>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mt-3 text-center">
-              Multiple workspaces running side by side.
-            </p>
+        <div className="max-w-3xl mx-auto">
+          <div className="rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 shadow-xl">
+            <Image
+              src="/images/screenshots/multiple-vms.jpg"
+              alt="Two workspace windows running side by side on the macOS desktop"
+              width={2992}
+              height={1934}
+              className="w-full h-auto block"
+            />
           </div>
-          <div>
-            <DesktopFrame>
-              <WindowScreenshot
-                src="/images/screenshots/create-vm-sheet.png"
-                alt="GhostVM Create VM dialog"
-              />
-            </DesktopFrame>
-            <p className="text-sm text-gray-600 dark:text-gray-400 mt-3 text-center">
-              Spin up a new workspace in seconds.
-            </p>
-          </div>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mt-3 text-center">
+            Each workspace runs as its own window.
+          </p>
         </div>
       </div>
     </section>

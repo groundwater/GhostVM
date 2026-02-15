@@ -1,19 +1,19 @@
-import type { Metadata } from "next";
-import { ThemeProvider } from "next-themes";
-import Navbar from "@/components/layout/Navbar";
-import Footer from "@/components/layout/Footer";
-import "./globals.css";
+import type { Metadata } from "next"
+import { ThemeProvider } from "next-themes"
+import Navbar from "@/components/layout/Navbar"
+import Footer from "@/components/layout/Footer"
+import "./globals.css"
 
 export const metadata: Metadata = {
-  title: "GhostVM - Agentic Workspaces on macOS",
+  title: "GhostVM - Agent Workspaces on macOS",
   description:
-    "GhostVM is a native macOS app for running isolated agentic workspaces on macOS. Deep host integration, scriptable CLI, instant clones, and self-contained bundles.",
-};
+    "GhostVM is a native macOS app for running isolated agent workspaces on macOS. Deep host integration, scriptable CLI, instant clones, and self-contained bundles.",
+}
 
 export default function RootLayout({
   children,
 }: {
-  children: React.ReactNode;
+  children: React.ReactNode
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
@@ -25,5 +25,5 @@ export default function RootLayout({
         </ThemeProvider>
       </body>
     </html>
-  );
+  )
 }

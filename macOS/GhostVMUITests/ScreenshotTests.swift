@@ -17,6 +17,7 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "vm-list-empty"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "vm-list-empty")
     }
 
     // MARK: - With VMs
@@ -34,6 +35,7 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "vm-list-with-vms"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "vm-list-with-vms")
     }
 
     // MARK: - Create VM Sheet
@@ -60,6 +62,7 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "create-vm-sheet"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "create-vm-sheet")
     }
 
     // MARK: - Settings Window
@@ -83,6 +86,7 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "settings-window"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "settings-window")
     }
 
     // MARK: - Restore Images Window
@@ -108,6 +112,7 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "restore-images"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "restore-images")
     }
 
     // MARK: - Edit VM Sheet
@@ -146,6 +151,7 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "edit-vm-sheet"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "edit-vm-sheet")
     }
 
     // MARK: - Context Menu
@@ -174,5 +180,6 @@ final class ScreenshotTests: XCTestCase {
         attachment.name = "context-menu"
         attachment.lifetime = .keepAlways
         add(attachment)
+        ScreenshotExporter.save(screenshot, name: "context-menu")
     }
 }
