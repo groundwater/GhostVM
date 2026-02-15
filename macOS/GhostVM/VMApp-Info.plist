@@ -34,15 +34,19 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.81.0</string>
+	<string>1.82.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.81.0</string>
-	<key>LSMultipleInstancesProhibited</key>
-	<true/>
+	<string>1.82.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
+	<key>LSMultipleInstancesProhibited</key>
+	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>SUFeedURL</key>
+	<string>https://ghostvm.org/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>kM9Hv12r/NHKd7mB/ymaYLwPKvK6G1wW7Qd2tl7C+0U=</string>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -66,9 +70,5 @@
 			</dict>
 		</dict>
 	</array>
-	<key>SUFeedURL</key>
-	<string>https://ghostvm.org/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>kM9Hv12r/NHKd7mB/ymaYLwPKvK6G1wW7Qd2tl7C+0U=</string>
 </dict>
 </plist>

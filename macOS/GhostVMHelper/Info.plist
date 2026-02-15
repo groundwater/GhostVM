@@ -4,6 +4,8 @@
 <dict>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>GhostVM</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIconFile</key>
@@ -14,14 +16,12 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>GhostVM</string>
-	<key>CFBundleDisplayName</key>
-	<string>GhostVM</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.81.0</string>
+	<string>1.82.0</string>
 	<key>CFBundleVersion</key>
-	<string>1.81.0</string>
+	<string>1.82.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
