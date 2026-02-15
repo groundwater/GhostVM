@@ -9,8 +9,8 @@ export default function DownloadCTA() {
           Ready to get started?
         </h2>
         <p className="text-ghost-100 mb-8 max-w-lg mx-auto">
-          Download GhostVM and start running isolated agentic workspaces on
-          your Mac in minutes.
+          Download GhostVM and start running isolated workspaces in minutes.
+          Built-in updates keep you current.
         </p>
         <Link
           href="/download"

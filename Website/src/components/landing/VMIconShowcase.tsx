@@ -3,19 +3,6 @@
 import Image from "next/image";
 import { useEffect, useState } from "react";
 
-const icons = [
-  { name: "Hipster", file: "icon-hipster.png" },
-  { name: "Nerd", file: "icon-nerd.png" },
-  { name: "80s Bro", file: "icon-80s-bro.png" },
-  { name: "Terminal", file: "icon-terminal.png" },
-  { name: "Quill", file: "icon-quill.png" },
-  { name: "Typewriter", file: "icon-typewriter.png" },
-  { name: "Kernel", file: "icon-kernel.png" },
-  { name: "Banana", file: "icon-banana.png" },
-  { name: "Papaya", file: "icon-papaya.png" },
-  { name: "Daemon", file: "icon-daemon.png" },
-];
-
 type DockItem = {
   name: string;
   src: string;
@@ -30,7 +17,6 @@ const dockItems: DockItem[] = [
   { name: "iTerm", src: "/images/dock-icons/iterm.png" },
   { name: "macOS Sequoia", src: "/images/vm-icons/icon-nerd.png", running: true, isVM: true },
   { name: "Dev Server", src: "/images/vm-icons/icon-banana.png", running: true, isVM: true },
-  { name: "Ubuntu CI", src: "/images/vm-icons/icon-terminal.png", isVM: true },
 ];
 
 // Total items including trash at the end
@@ -109,20 +95,18 @@ export default function VMIconShowcase() {
   }, []);
 
   return (
-    <section className="py-20">
+    <section className="py-20 bg-gray-50 dark:bg-gray-900/50">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         <h2 className="text-3xl font-bold mb-4">
           Every workspace gets its own Dock icon
         </h2>
-        <p className="text-gray-600 dark:text-gray-400 mb-10 max-w-xl mx-auto">
-          Each running workspace appears in the macOS Dock as its own app.
-          Pick from presets or use the toolbar icon chooser to switch between
-          Generic, Glass, App, and Stack modes on the fly. Glass mode renders
-          any app icon with a frosted overlay.
+        <p className="text-gray-600 dark:text-gray-400 mb-10 max-w-2xl mx-auto">
+          Each running workspace gets its own Dock icon. Choose from built-in
+          presets, or switch to App mode to mirror the guest&apos;s foreground app.
         </p>
 
         {/* Faux Desktop */}
-        <div className="max-w-3xl mx-auto mb-4">
+        <div className="max-w-3xl mx-auto mb-8">
           <div className="rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 shadow-xl">
             {/* Desktop wallpaper area */}
             <div className="relative bg-gradient-to-br from-indigo-400 via-purple-400 to-pink-300 dark:from-indigo-900 dark:via-purple-900 dark:to-slate-900">
@@ -194,28 +178,6 @@ export default function VMIconShowcase() {
           </div>
         </div>
 
-        {/* Full icon grid */}
-        <p className="text-sm font-medium text-gray-500 dark:text-gray-400 mb-4 uppercase tracking-wide">
-          10 built-in icons to choose from
-        </p>
-        <div className="grid grid-cols-5 gap-5 max-w-sm mx-auto">
-          {icons.map((icon) => (
-            <div key={icon.file} className="group flex flex-col items-center gap-1.5">
-              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-[22%] overflow-hidden shadow-md group-hover:shadow-lg group-hover:scale-110 transition-all duration-200">
-                <Image
-                  src={`/images/vm-icons/${icon.file}`}
-                  alt={icon.name}
-                  width={64}
-                  height={64}
-                  className="w-full h-full object-cover"
-                />
-              </div>
-              <span className="text-[11px] text-gray-500 dark:text-gray-400">
-                {icon.name}
-              </span>
-            </div>
-          ))}
-        </div>
       </div>
     </section>
   );
