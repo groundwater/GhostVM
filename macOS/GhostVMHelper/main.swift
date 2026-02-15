@@ -745,7 +745,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Update live icon mode so handleForegroundAppChange reacts immediately
         activeIconMode = mode
 
-        if mode == "stack" || mode == "app" {
+        if mode == "stack" || mode == "app" || mode == "glass" {
             // Immediately apply the cached foreground app icon
             handleForegroundAppChange(eventStreamService?.foregroundApp)
         }
@@ -975,6 +975,34 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                       from: .zero, operation: .sourceOver, fraction: 1.0)
             sized.unlockFocus()
             NSApp.applicationIconImage = sized
+            return
+        }
+
+        // "glass" mode: app icon behind glass overlay
+        if mode == "glass" {
+            let canvasSize = NSSize(width: 512, height: 512)
+            let composited = NSImage(size: canvasSize)
+            composited.lockFocus()
+
+            // Draw app icon as base, clipped to macOS icon shape
+            let iconRect = NSRect(x: 56, y: 56, width: 400, height: 400)
+            let cornerRadius = iconRect.width * 185.4 / 1024
+            let path = NSBezierPath(roundedRect: iconRect, xRadius: cornerRadius, yRadius: cornerRadius)
+            NSGraphicsContext.saveGraphicsState()
+            path.addClip()
+            icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1.0)
+            NSGraphicsContext.restoreGraphicsState()
+
+            // Draw glass overlay on top
+            if let glassURL = Bundle.main.url(forResource: "GlassOverlay", withExtension: "png"),
+               let glass = NSImage(contentsOf: glassURL) {
+                glass.draw(in: NSRect(origin: .zero, size: canvasSize),
+                           from: .zero, operation: .sourceOver, fraction: 1.0)
+            }
+
+            composited.unlockFocus()
+            composited.size = NSSize(width: 256, height: 256)
+            NSApp.applicationIconImage = composited
             return
         }
 
@@ -1449,7 +1477,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
             // For dynamic icon modes, persist the current dock icon as icon.png
             // so the main app and Finder show the last active icon
-            if activeIconMode == "stack" || activeIconMode == "app",
+            if activeIconMode == "stack" || activeIconMode == "app" || activeIconMode == "glass",
                let layout = self.layout,
                let tiff = icon.tiffRepresentation,
                let bitmap = NSBitmapImageRep(data: tiff),
