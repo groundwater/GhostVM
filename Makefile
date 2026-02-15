@@ -14,7 +14,7 @@ XCODE_CONFIG ?= Release
 BUILD_DIR = build/xcode
 APP_NAME = GhostVM
 
-.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots
+.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version
 
 all: help
 
@@ -404,6 +404,40 @@ website:
 website-build:
 	cd Website && npm run build
 
+# Plist paths for version management
+PLIST_GHOSTVM = macOS/GhostVM/VMApp-Info.plist
+PLIST_HELPER  = macOS/GhostVMHelper/Info.plist
+PLIST_TOOLS   = macOS/GhostTools/Sources/GhostTools/Resources/Info.plist
+
+# Bump CFBundleShortVersionString in all 3 targets, CFBundleVersion in GhostVM + Helper only
+# Usage: make bump VERSION=1.2.0
+bump:
+	@if [ -z "$(VERSION)" ] || [ "$(VERSION)" = "$$(git describe --tags --always 2>/dev/null || echo dev)" ]; then \
+		echo "Usage: make bump VERSION=x.y.z"; exit 1; \
+	fi
+	@echo "Bumping all targets to $(VERSION)..."
+	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_GHOSTVM)"
+	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_GHOSTVM)"
+	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_HELPER)"
+	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_HELPER)"
+	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_TOOLS)"
+	@echo "Done. GhostTools CFBundleVersion left unchanged (auto-injected build timestamp)."
+	@$(MAKE) --no-print-directory check-version
+
+# Verify all 3 targets have the same CFBundleShortVersionString
+check-version:
+	@V1=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_GHOSTVM)"); \
+	V2=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_HELPER)"); \
+	V3=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)"); \
+	echo "GhostVM:       $$V1"; \
+	echo "GhostVMHelper: $$V2"; \
+	echo "GhostTools:    $$V3"; \
+	if [ "$$V1" = "$$V2" ] && [ "$$V2" = "$$V3" ]; then \
+		echo "All targets in sync ($$V1)"; \
+	else \
+		echo "ERROR: Version mismatch!" >&2; exit 1; \
+	fi
+
 clean:
 	rm -rf build
 	rm -rf $(XCODE_PROJECT)
@@ -430,6 +464,8 @@ help:
 	@echo "  make sparkle-sign  - Sign DMG for Sparkle auto-updates"
 	@echo "  make website  - Run Next.js dev server (Website/)"
 	@echo "  make website-build - Build Next.js site for production"
+	@echo "  make bump VERSION=x.y.z - Bump version in all 3 targets"
+	@echo "  make check-version     - Verify all targets have the same version"
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
 	@echo "Variables:"
