@@ -478,8 +478,7 @@ export default function VMIconShowcase() {
           Customize each workspace&apos;s icon
         </h2>
         <p className="text-gray-600 dark:text-gray-400 mb-10 max-w-2xl mx-auto">
-          Every workspace appears in the Dock and App Switcher with its own
-          icon. Choose a mode, pick a preset, or upload your own image.
+          Every workspace appears in the Dock and App Switcher with its own icon.
         </p>
 
         {/* Faux Desktop with Dock animation */}
