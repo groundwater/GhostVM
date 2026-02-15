@@ -40,7 +40,7 @@ targets:
           - "@loader_path/../Frameworks"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
-        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
 
   vmctl:
@@ -61,7 +61,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
-        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhostVM/vmctl/CEditLine"
         OTHER_LDFLAGS:
@@ -99,7 +99,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: GhostVMHelper/entitlements.plist
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
-        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
@@ -143,7 +143,7 @@ targets:
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
-        DEVELOPMENT_TEAM: 3FGZQE8AW3
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
         GENERATE_INFOPLIST_FILE: NO
         LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
