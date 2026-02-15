@@ -59,13 +59,6 @@ struct GhostVMSwiftUIApp: App {
                 .environmentObject(restoreStore)
         }
 
-        #if DEBUG
-        Window("Marketplace", id: "marketplace") {
-            MarketplaceView()
-        }
-        .defaultSize(width: 780, height: 520)
-        #endif
-
         // Real VM window shown when pressing Play.
         WindowGroup(id: "vm", for: App2VM.self) { vmBinding in
             if let vm = vmBinding.wrappedValue {
@@ -284,16 +277,6 @@ struct VMListDemoView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("vmList.createButton")
-
-                #if DEBUG
-                Button {
-                    openWindow(id: "marketplace")
-                } label: {
-                    Label("Marketplace", systemImage: "storefront")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                #endif
 
                 Spacer()
 
