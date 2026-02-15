@@ -51,7 +51,7 @@ private final class HighlightingMenuItemView: NSView {
 
 /// NSToolbar implementation for the VM helper window.
 /// Provides quick access to VM status and controls.
-final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
+final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, URLPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
 
     // MARK: - Toolbar Item Identifiers
 
@@ -108,6 +108,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
     private var sharedFolderEntries: [SharedFolderEntry] = []
     private var queuedFilesPanel: QueuedFilesPanel?
     private var clipboardPermissionPanel: ClipboardPermissionPanel?
+    private var urlPermissionPanel: URLPermissionPanel?
     private var portForwardPermissionPanel: PortForwardPermissionPanel?
     private var portForwardNotificationPanel: PortForwardNotificationPanel?
     private var iconChooserPanel: IconChooserPanel?
@@ -942,6 +943,35 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         clipboardPermissionPanel?.isShown ?? false
     }
 
+    func showURLPermissionPopover() {
+        guard let view = guestToolsItem?.view else { return }
+
+        urlPermissionPanel?.close()
+
+        let panel = URLPermissionPanel()
+        panel.delegate = self
+        panel.onClose = { [weak self] in
+            guard let self = self else { return }
+            self.urlPermissionPanel = nil
+            self.delegate?.toolbarURLPermissionPanelDidClose(self)
+        }
+        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        urlPermissionPanel = panel
+    }
+
+    func closeURLPermissionPopover() {
+        urlPermissionPanel?.close()
+        urlPermissionPanel = nil
+    }
+
+    var isURLPermissionPopoverShown: Bool {
+        urlPermissionPanel?.isShown ?? false
+    }
+
+    func setURLPermissionURLs(_ urls: [String]) {
+        urlPermissionPanel?.setURLs(urls)
+    }
+
     func showPortForwardPermissionPopover() {
         guard let button = portForwardsItem?.view else { return }
 
@@ -1065,6 +1095,26 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, PortForwardPanelDelegate
         delegate?.toolbarClipboardPermissionDidAlwaysAllow(self)
     }
 
+    // MARK: - URLPermissionPanelDelegate
+
+    func urlPermissionPanelDidDeny(_ panel: URLPermissionPanel) {
+        panel.close()
+        urlPermissionPanel = nil
+        delegate?.toolbarURLPermissionDidDeny(self)
+    }
+
+    func urlPermissionPanelDidAllowOnce(_ panel: URLPermissionPanel) {
+        panel.close()
+        urlPermissionPanel = nil
+        delegate?.toolbarURLPermissionDidAllowOnce(self)
+    }
+
+    func urlPermissionPanelDidAlwaysAllow(_ panel: URLPermissionPanel) {
+        panel.close()
+        urlPermissionPanel = nil
+        delegate?.toolbarURLPermissionDidAlwaysAllow(self)
+    }
+
     // MARK: - PortForwardPermissionPanelDelegate
 
     func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didBlockPort guestPort: UInt16) {
@@ -1133,6 +1183,10 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbarClipboardPermissionDidAllowOnce(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16)
     func toolbarPortForwardPermissionPanelDidClose(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didUnblockPort port: UInt16)

@@ -73,6 +73,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var clipboardAutoDismissMonitor: Any?
     private var lastPromptedClipboardChangeCount: Int? = nil
 
+    // URL permission state (in-memory, resets on restart)
+    private var urlAlwaysAllowed = false
+    private var pendingURLsToOpen: [String] = []
+    private var urlPermissionCancellable: AnyCancellable?
+
     // Port forward notification state
     private var newlyForwardedCancellable: AnyCancellable?
     private var blockedPortsCancellable: AnyCancellable?
@@ -694,6 +699,30 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         restoreVMViewFocus()
     }
 
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar) {
+        pendingURLsToOpen = []
+        eventStreamService?.clearPendingURLs()
+        window?.level = .normal
+        restoreVMViewFocus()
+    }
+
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar) {
+        openPendingURLs()
+        window?.level = .normal
+        restoreVMViewFocus()
+    }
+
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
+        urlAlwaysAllowed = true
+        openPendingURLs()
+        window?.level = .normal
+        restoreVMViewFocus()
+    }
+
+    func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar) {
+        restoreVMViewFocus()
+    }
+
     func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16) {
         autoPortMapService?.blockPort(port)
         updateToolbarPortForwards()
@@ -905,6 +934,45 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             NSEvent.removeMonitor(monitor)
             clipboardAutoDismissMonitor = nil
         }
+    }
+
+    // MARK: - URL Permission Flow
+
+    private func handlePendingURLs(_ urls: [String]) {
+        guard !urls.isEmpty else { return }
+
+        if urlAlwaysAllowed {
+            for urlString in urls {
+                if let url = URL(string: urlString) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            eventStreamService?.clearPendingURLs()
+            return
+        }
+
+        pendingURLsToOpen = urls
+
+        // Float the window to get user attention
+        window?.level = .floating
+        window?.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+
+        Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            helperToolbar?.showURLPermissionPopover()
+            helperToolbar?.setURLPermissionURLs(urls)
+        }
+    }
+
+    private func openPendingURLs() {
+        for urlString in pendingURLsToOpen {
+            if let url = URL(string: urlString) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+        pendingURLsToOpen = []
+        eventStreamService?.clearPendingURLs()
     }
 
     // MARK: - Dynamic Icon
@@ -1533,7 +1601,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.helperToolbar?.setQueuedFileCount(count)
             }
 
-        // 6b. Dynamic icon — subscribe to foreground app changes
+        // 6b. URL permission — subscribe to pending URLs
+        urlPermissionCancellable = esService.$pendingURLs
+            .receive(on: RunLoop.main)
+            .sink { [weak self] urls in
+                self?.handlePendingURLs(urls)
+            }
+
+        // 6c. Dynamic icon — subscribe to foreground app changes
         foregroundAppCancellable = esService.$foregroundApp
             .receive(on: RunLoop.main)
             .sink { [weak self] app in
@@ -1614,6 +1689,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         fileCountCancellable?.cancel()
         fileCountCancellable = nil
         fileTransferService = nil
+
+        urlPermissionCancellable?.cancel()
+        urlPermissionCancellable = nil
 
         foregroundAppCancellable?.cancel()
         foregroundAppCancellable = nil

@@ -23,6 +23,7 @@ public final class EventStreamService: ObservableObject {
     @Published public private(set) var queuedGuestFiles: [String] = []
     @Published public private(set) var detectedGuestPorts: [GuestPort] = []
     @Published public private(set) var foregroundApp: GuestForegroundApp?
+    @Published public private(set) var pendingURLs: [String] = []
 
     public var queuedGuestFileCount: Int { queuedGuestFiles.count }
 
@@ -47,6 +48,11 @@ public final class EventStreamService: ObservableObject {
         queuedGuestFiles = []
         detectedGuestPorts = []
         foregroundApp = nil
+        pendingURLs = []
+    }
+
+    public func clearPendingURLs() {
+        pendingURLs = []
     }
 
     private func reconnectLoop() async {
@@ -124,13 +130,15 @@ public final class EventStreamService: ObservableObject {
             }
         case "urls":
             if let urls = obj["urls"] as? [String] {
-                Task { @MainActor in
-                    for urlString in urls {
-                        if let url = URL(string: urlString),
-                           let scheme = url.scheme?.lowercased(),
-                           scheme == "http" || scheme == "https" {
-                            NSWorkspace.shared.open(url)
-                        }
+                let validURLs = urls.filter { urlString in
+                    guard let url = URL(string: urlString),
+                          let scheme = url.scheme?.lowercased(),
+                          scheme == "http" || scheme == "https" else { return false }
+                    return true
+                }
+                if !validURLs.isEmpty {
+                    Task { @MainActor [weak self] in
+                        self?.pendingURLs = validURLs
                     }
                 }
             }
