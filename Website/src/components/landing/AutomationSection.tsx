@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { DesktopFrame, WindowScreenshot } from "./DesktopFrame";
 
 const terminalLines = [
   { prompt: true, text: "vmctl create dev --ipsw latest" },
@@ -80,18 +79,7 @@ export default function AutomationSection() {
           </div>
         </div>
 
-        {/* Below: context-menu screenshot */}
-        <div className="mt-14 max-w-3xl mx-auto">
-          <DesktopFrame>
-            <WindowScreenshot
-              src="/images/screenshots/context-menu.png"
-              alt="GhostVM context menu showing VM lifecycle actions"
-            />
-          </DesktopFrame>
-          <p className="text-sm text-gray-600 dark:text-gray-400 mt-3 text-center">
-            Full workspace lifecycle management from the GUI &mdash; start, stop, snapshot, and configure.
-          </p>
-        </div>
+
       </div>
     </section>
   );
