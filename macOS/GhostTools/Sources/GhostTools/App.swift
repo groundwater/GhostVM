@@ -48,7 +48,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var lockFileHandle: FileHandle?
     // Use bundle ID from Info.plist, fallback to hardcoded for compatibility
     private var bundleId: String {
-        Bundle.main.bundleIdentifier ?? "com.yellowgreenfruit.com.ghostvm.guest-tools"
+        Bundle.main.bundleIdentifier ?? "org.ghostvm.com.ghostvm.guest-tools"
     }
 
     private lazy var lockFilePath: String = {
