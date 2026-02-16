@@ -49,7 +49,7 @@ cli: $(XCODE_PROJECT)
 app: $(XCODE_PROJECT) dmg ghostvm-icon
 ifeq ($(INJECT_TIMESTAMP),1)
 	@echo "Injecting build timestamp into GhostVM and GhostVMHelper..."
-	@TIMESTAMP=$$(date +%s); \
+	@TIMESTAMP=$$(date +%Y%m%d%H%M%S); \
 	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
 		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
 		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
@@ -76,7 +76,7 @@ endif
 debug: $(XCODE_PROJECT) dmg ghostvm-icon
 ifeq ($(INJECT_TIMESTAMP),1)
 	@echo "Injecting build timestamp into GhostVM and GhostVMHelper..."
-	@TIMESTAMP=$$(date +%s); \
+	@TIMESTAMP=$$(date +%Y%m%d%H%M%S); \
 	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
 		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
 		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
@@ -175,7 +175,7 @@ GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
 tools: ghosttools-icon
 	@echo "Building GhostTools..."
 	@echo "Injecting build timestamp..."
-	@TIMESTAMP=$$(date +%s); \
+	@TIMESTAMP=$$(date +%Y%m%d%H%M%S); \
 	MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
 	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$(PLIST_TOOLS)"; \
 	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
