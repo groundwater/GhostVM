@@ -699,7 +699,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             item.state = clipboardSyncMode == entry.mode ? .on : .off
             clipboardSubmenu.addItem(item)
         }
-        let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: nil, keyEquivalent: "")
+        let clipboardItem = NSMenuItem(title: "Clipboard", action: nil, keyEquivalent: "")
         clipboardItem.submenu = clipboardSubmenu
         captureCommandsMenu.addItem(clipboardItem)
 
