@@ -335,6 +335,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         guestToolsLabel = label
 
         item.view = button
+        item.minSize = NSSize(width: 16, height: 22)
+        item.maxSize = NSSize(width: 16, height: 22)
 
         guestToolsItem = item
         updateGuestToolsButton()
@@ -670,7 +672,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         } else {
             width = 18 + label.frame.width + 4  // dot(4+8) + spacing(6) + text + padding(4)
         }
-        button.setFrameSize(NSSize(width: width, height: button.frame.height))
+        let size = NSSize(width: width, height: button.frame.height)
+        button.setFrameSize(size)
+        guestToolsItem?.minSize = size
+        guestToolsItem?.maxSize = size
     }
 
     // MARK: - Menu Builders
@@ -777,6 +782,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         termItem.target = self
         termItem.isEnabled = vmRunning
         captureCommandsMenu.addItem(termItem)
+
+        captureCommandsMenu.addItem(NSMenuItem.separator())
+
+        let customizeItem = NSMenuItem(title: "Customize Toolbar\u{2026}", action: #selector(customizeToolbar), keyEquivalent: "")
+        customizeItem.target = self
+        captureCommandsMenu.addItem(customizeItem)
     }
 
     private func portForwardsIcon() -> NSImage? {
@@ -1177,6 +1188,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         }
         panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         portForwardNotificationPanel = panel
+    }
+
+    @objc private func customizeToolbar() {
+        toolbar.runCustomizationPalette(nil)
     }
 
     @objc private func shutDownVM() {

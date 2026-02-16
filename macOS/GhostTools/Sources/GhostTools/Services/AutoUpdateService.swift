@@ -39,9 +39,9 @@ final class AutoUpdateService {
     private func checkForUpdate() {
         guard PermissionsWindow.isAutoUpdateEnabled else { return }
 
-        let currentBuild = Int(kGhostToolsBuild) ?? 0
-        guard currentBuild > 0 else {
-            print("[AutoUpdate] Cannot parse current build number: \(kGhostToolsBuild)")
+        let currentVersion = AppVersion(kGhostToolsBuild)
+        guard currentVersion.isValid else {
+            print("[AutoUpdate] Cannot parse current build version: \(kGhostToolsBuild)")
             return
         }
 
@@ -49,7 +49,7 @@ final class AutoUpdateService {
         let fm = FileManager.default
         guard let volumes = try? fm.contentsOfDirectory(atPath: "/Volumes") else { return }
 
-        var bestCandidate: (path: String, version: String, build: String, buildInt: Int)?
+        var bestCandidate: (path: String, version: String, build: String, buildVersion: AppVersion)?
 
         for volume in volumes {
             let candidatePath = "/Volumes/\(volume)/GhostTools.app"
@@ -57,9 +57,12 @@ final class AutoUpdateService {
 
             guard fm.fileExists(atPath: plistPath),
                   let plist = NSDictionary(contentsOfFile: plistPath),
-                  let candidateBuild = plist["CFBundleVersion"] as? String,
-                  let candidateBuildInt = Int(candidateBuild),
-                  candidateBuildInt > currentBuild else {
+                  let candidateBuild = plist["CFBundleVersion"] as? String else {
+                continue
+            }
+
+            let candidateVersion = AppVersion(candidateBuild)
+            guard candidateVersion.isValid, candidateVersion > currentVersion else {
                 continue
             }
 
@@ -68,14 +71,14 @@ final class AutoUpdateService {
                 continue
             }
 
-            let candidateVersion = plist["CFBundleShortVersionString"] as? String ?? "unknown"
+            let candidateDisplayVersion = plist["CFBundleShortVersionString"] as? String ?? "unknown"
 
             if let best = bestCandidate {
-                if candidateBuildInt > best.buildInt {
-                    bestCandidate = (candidatePath, candidateVersion, candidateBuild, candidateBuildInt)
+                if candidateVersion > best.buildVersion {
+                    bestCandidate = (candidatePath, candidateDisplayVersion, candidateBuild, candidateVersion)
                 }
             } else {
-                bestCandidate = (candidatePath, candidateVersion, candidateBuild, candidateBuildInt)
+                bestCandidate = (candidatePath, candidateDisplayVersion, candidateBuild, candidateVersion)
             }
         }
 
@@ -88,7 +91,7 @@ final class AutoUpdateService {
         showUpdateAlert(candidate: candidate)
     }
 
-    private func showUpdateAlert(candidate: (path: String, version: String, build: String, buildInt: Int)) {
+    private func showUpdateAlert(candidate: (path: String, version: String, build: String, buildVersion: AppVersion)) {
         let alert = NSAlert()
         alert.messageText = "GhostTools Update Available"
         alert.informativeText = "Version \(candidate.version) (build \(candidate.build)) is available. You are running version \(kGhostToolsVersion) (build \(kGhostToolsBuild))."

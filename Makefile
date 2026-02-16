@@ -8,6 +8,10 @@ export
 CODESIGN_ID ?= Apple Development
 GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
 
+# Inject build timestamp into patch version during development builds.
+# Set to 0 for production releases (make dist does this automatically).
+INJECT_TIMESTAMP ?= 1
+
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
 XCODE_CONFIG ?= Release
@@ -43,6 +47,15 @@ cli: $(XCODE_PROJECT)
 
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
 app: $(XCODE_PROJECT) dmg ghostvm-icon
+ifeq ($(INJECT_TIMESTAMP),1)
+	@echo "Injecting build timestamp into GhostVM and GhostVMHelper..."
+	@TIMESTAMP=$$(date +%s); \
+	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
+	done
+endif
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
@@ -61,6 +74,15 @@ app: $(XCODE_PROJECT) dmg ghostvm-icon
 
 # Build the SwiftUI app in Debug configuration (ad-hoc signing)
 debug: $(XCODE_PROJECT) dmg ghostvm-icon
+ifeq ($(INJECT_TIMESTAMP),1)
+	@echo "Injecting build timestamp into GhostVM and GhostVMHelper..."
+	@TIMESTAMP=$$(date +%s); \
+	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
+	done
+endif
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration Debug \
@@ -154,8 +176,11 @@ tools: ghosttools-icon
 	@echo "Building GhostTools..."
 	@echo "Injecting build timestamp..."
 	@TIMESTAMP=$$(date +%s); \
-	plutil -replace CFBundleVersion -string "$$TIMESTAMP" \
-		"$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist"
+	MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
+	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$(PLIST_TOOLS)"; \
+	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$(PLIST_TOOLS)"; \
+	fi
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
 	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
@@ -272,7 +297,8 @@ DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Dev
 # Create signed distribution DMG
 # Note: If you get "Operation not permitted", grant Terminal Full Disk Access in
 # System Preferences > Privacy & Security > Full Disk Access
-dist: app cli
+dist:
+	$(MAKE) app cli INJECT_TIMESTAMP=0
 	@# Verify we have a real signing identity for distribution
 	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
 		echo "Error: No 'Developer ID Application' identity found in keychain."; \
@@ -426,7 +452,8 @@ bump:
 	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_HELPER)"
 	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_HELPER)"
 	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_TOOLS)"
-	@echo "Done. GhostTools CFBundleVersion left unchanged (auto-injected build timestamp)."
+	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_TOOLS)"
+	@echo "Done. All targets bumped to $(VERSION)."
 	@$(MAKE) --no-print-directory check-version
 
 # Verify all 3 targets have the same CFBundleShortVersionString
