@@ -11,6 +11,7 @@ GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
 # Inject build timestamp into patch version during development builds.
 # Set to 0 for production releases (make dist does this automatically).
 INJECT_TIMESTAMP ?= 1
+BUILD_TIMESTAMP := $(shell date +%Y%m%d%H%M%S)
 
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
@@ -48,12 +49,11 @@ cli: $(XCODE_PROJECT)
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
 app: $(XCODE_PROJECT) dmg ghostvm-icon
 ifeq ($(INJECT_TIMESTAMP),1)
-	@echo "Injecting build timestamp into GhostVM and GhostVMHelper..."
-	@TIMESTAMP=$$(date +%Y%m%d%H%M%S); \
-	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
+	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
 		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
-		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
 	done
 endif
 	xcodebuild -project $(XCODE_PROJECT) \
@@ -75,12 +75,11 @@ endif
 # Build the SwiftUI app in Debug configuration (ad-hoc signing)
 debug: $(XCODE_PROJECT) dmg ghostvm-icon
 ifeq ($(INJECT_TIMESTAMP),1)
-	@echo "Injecting build timestamp into GhostVM and GhostVMHelper..."
-	@TIMESTAMP=$$(date +%Y%m%d%H%M%S); \
-	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
+	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
 		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
-		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$$PLIST"; \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
 	done
 endif
 	xcodebuild -project $(XCODE_PROJECT) \
@@ -174,12 +173,11 @@ GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
 # Build GhostTools guest agent (.app bundle, signed)
 tools: ghosttools-icon
 	@echo "Building GhostTools..."
-	@echo "Injecting build timestamp..."
-	@TIMESTAMP=$$(date +%Y%m%d%H%M%S); \
-	MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
-	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$$TIMESTAMP" "$(PLIST_TOOLS)"; \
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP)..."
+	@MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
+	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
 	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$$TIMESTAMP" "$(PLIST_TOOLS)"; \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
 	fi
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
 	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
