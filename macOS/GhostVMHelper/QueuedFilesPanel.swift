@@ -74,6 +74,7 @@ final class QueuedFilesContentViewController: NSViewController {
     private var fileNames: [String] = []
     private var fileListStack: NSStackView!
     private var subtitleLabel: NSTextField!
+    private var scrollView: NSScrollView!
     private var scrollHeightConstraint: NSLayoutConstraint?
 
     override func loadView() {
@@ -90,14 +91,16 @@ final class QueuedFilesContentViewController: NSViewController {
         subtitleLabel.font = .systemFont(ofSize: 11)
         subtitleLabel.textColor = .secondaryLabelColor
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.setAccessibilityIdentifier("queuedFiles.subtitle")
         container.addSubview(subtitleLabel)
 
         // File list in scroll view
-        let scrollView = NSScrollView()
+        scrollView = NSScrollView()
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.hasVerticalScroller = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
+        scrollView.setAccessibilityIdentifier("queuedFiles.scrollView")
 
         fileListStack = NSStackView()
         fileListStack.orientation = .vertical
@@ -105,11 +108,22 @@ final class QueuedFilesContentViewController: NSViewController {
         fileListStack.spacing = 4
         fileListStack.translatesAutoresizingMaskIntoConstraints = false
 
+        // Wrap stack in a flipped view so the scroll view shows content from the top
+        let flippedContainer = FlippedView()
+        flippedContainer.translatesAutoresizingMaskIntoConstraints = false
+        flippedContainer.addSubview(fileListStack)
+        NSLayoutConstraint.activate([
+            fileListStack.topAnchor.constraint(equalTo: flippedContainer.topAnchor),
+            fileListStack.leadingAnchor.constraint(equalTo: flippedContainer.leadingAnchor),
+            fileListStack.trailingAnchor.constraint(equalTo: flippedContainer.trailingAnchor),
+            fileListStack.bottomAnchor.constraint(equalTo: flippedContainer.bottomAnchor),
+        ])
+
         let clipView = NSClipView()
-        clipView.documentView = fileListStack
+        clipView.documentView = flippedContainer
         clipView.drawsBackground = false
         scrollView.contentView = clipView
-        fileListStack.widthAnchor.constraint(equalTo: clipView.widthAnchor).isActive = true
+        flippedContainer.widthAnchor.constraint(equalTo: clipView.widthAnchor).isActive = true
 
         container.addSubview(scrollView)
 
@@ -124,12 +138,14 @@ final class QueuedFilesContentViewController: NSViewController {
         let declineButton = NSButton(title: "Decline", target: self, action: #selector(denyClicked))
         declineButton.bezelStyle = .rounded
         declineButton.translatesAutoresizingMaskIntoConstraints = false
+        declineButton.setAccessibilityIdentifier("queuedFiles.declineButton")
         container.addSubview(declineButton)
 
         let saveButton = NSButton(title: "Save", target: self, action: #selector(allowClicked))
         saveButton.bezelStyle = .rounded
         saveButton.keyEquivalent = "\r"
         saveButton.translatesAutoresizingMaskIntoConstraints = false
+        saveButton.setAccessibilityIdentifier("queuedFiles.saveButton")
         container.addSubview(saveButton)
 
         // Layout
@@ -145,7 +161,7 @@ final class QueuedFilesContentViewController: NSViewController {
             scrollView.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
             scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
             scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
-            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 200),
+            scrollView.heightAnchor.constraint(lessThanOrEqualToConstant: 216),
 
             infoLabel.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 10),
             infoLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
@@ -160,7 +176,8 @@ final class QueuedFilesContentViewController: NSViewController {
             container.widthAnchor.constraint(equalToConstant: 300),
         ])
 
-        let heightConstraint = scrollView.heightAnchor.constraint(equalToConstant: 24)
+        let initialHeight = scrollViewHeight(for: fileNames.count)
+        let heightConstraint = scrollView.heightAnchor.constraint(equalToConstant: initialHeight)
         heightConstraint.priority = .defaultHigh
         heightConstraint.isActive = true
         scrollHeightConstraint = heightConstraint
@@ -184,6 +201,12 @@ final class QueuedFilesContentViewController: NSViewController {
     private let rowHeight: CGFloat = 18
     private let maxVisibleRows = 10
 
+    private func scrollViewHeight(for fileCount: Int) -> CGFloat {
+        let visibleRows = min(fileCount, maxVisibleRows)
+        let contentHeight = CGFloat(visibleRows) * rowHeight + CGFloat(max(visibleRows - 1, 0)) * fileListStack.spacing
+        return max(contentHeight, rowHeight)
+    }
+
     private func rebuildFileList() {
         guard let fileListStack = fileListStack else { return }
 
@@ -192,11 +215,12 @@ final class QueuedFilesContentViewController: NSViewController {
             view.removeFromSuperview()
         }
 
-        for name in fileNames {
+        for (index, name) in fileNames.enumerated() {
             let row = NSStackView()
             row.orientation = .horizontal
             row.spacing = 6
             row.alignment = .centerY
+            row.setAccessibilityIdentifier("queuedFiles.row.\(index)")
 
             if let docImage = NSImage(systemSymbolName: "doc", accessibilityDescription: "File") {
                 let icon = NSImageView(image: docImage)
@@ -210,15 +234,13 @@ final class QueuedFilesContentViewController: NSViewController {
             let label = NSTextField(labelWithString: name)
             label.font = .systemFont(ofSize: 12)
             label.lineBreakMode = .byTruncatingMiddle
+            label.setAccessibilityIdentifier("queuedFiles.row.\(index)")
             row.addArrangedSubview(label)
 
             fileListStack.addArrangedSubview(row)
         }
 
-        // Size scroll view to fit content, capped at maxVisibleRows
-        let visibleRows = min(fileNames.count, maxVisibleRows)
-        let contentHeight = CGFloat(visibleRows) * rowHeight + CGFloat(max(visibleRows - 1, 0)) * fileListStack.spacing
-        scrollHeightConstraint?.constant = max(contentHeight, 24)
+        scrollHeightConstraint?.constant = scrollViewHeight(for: fileNames.count)
     }
 
     @objc private func allowClicked() {
@@ -228,4 +250,10 @@ final class QueuedFilesContentViewController: NSViewController {
     @objc private func denyClicked() {
         delegate?.contentViewControllerDidDeny(self)
     }
+}
+
+/// NSView subclass that returns `true` for `isFlipped`, ensuring the scroll view
+/// anchors content at the top rather than the bottom.
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
