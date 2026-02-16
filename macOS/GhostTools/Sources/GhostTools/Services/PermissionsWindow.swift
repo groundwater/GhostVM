@@ -103,7 +103,7 @@ final class PermissionsWindow: NSObject {
         return permissions().allSatisfy { $0.check() }
     }
 
-    private static var isAutoUpdateEnabled: Bool {
+    static var isAutoUpdateEnabled: Bool {
         UserDefaults.standard.object(forKey: kAutoUpdateEnabledKey) as? Bool ?? false
     }
 

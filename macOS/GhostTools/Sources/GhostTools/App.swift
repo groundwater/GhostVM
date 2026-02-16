@@ -150,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startEventPushServer()
         startPortScanner()
         startForegroundAppService()
+        AutoUpdateService.shared.start(appDelegate: self)
 
         // Show settings window if any green dots are off (defer to next run loop)
         DispatchQueue.main.async { [weak self] in
@@ -170,8 +171,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Copy the running app bundle to /Applications using ditto.
     /// Returns nil on success, or an error message on failure.
     func installToApplications() -> String? {
+        return installFromPath(Bundle.main.bundlePath)
+    }
+
+    /// Copy a GhostTools.app bundle from the given source path to /Applications.
+    /// Returns nil on success, or an error message on failure.
+    func installFromPath(_ source: String) -> String? {
         let fm = FileManager.default
-        let source = Bundle.main.bundlePath
 
         print("[GhostTools] Installing to \(kApplicationsPath)...")
         print("[GhostTools] Source: \(source)")
@@ -654,6 +660,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         releaseLockFile()
+        AutoUpdateService.shared.stop()
         ForegroundAppService.shared.stop()
         PortScannerService.shared.stop()
         server?.stop()
