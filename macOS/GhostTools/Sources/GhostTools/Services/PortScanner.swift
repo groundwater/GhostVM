@@ -6,11 +6,6 @@ struct PortListResponse: Codable {
     let ports: [Int]
 }
 
-/// Response model for port forward requests
-struct PortForwardResponse: Codable {
-    let ports: [Int]
-}
-
 /// A listening port with the name of the process that owns it.
 struct PortInfo {
     let port: Int
@@ -130,17 +125,5 @@ final class PortScanner {
         return portProcessMap.keys.sorted().map { port in
             PortInfo(port: Int(port), process: portProcessMap[port] ?? "")
         }
-    }
-}
-
-/// Stub for port forward request service - feature removed
-/// Kept for API compatibility, returns empty results
-final class PortForwardRequestService {
-    static let shared = PortForwardRequestService()
-    private init() {}
-
-    func popRequests() -> [Int] {
-        // Dynamic port forwarding removed - uses explicit config now
-        return []
     }
 }
