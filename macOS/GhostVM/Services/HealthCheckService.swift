@@ -96,8 +96,19 @@ public final class HealthCheckService: ObservableObject {
                         DispatchQueue.global(qos: .utility).async {
                             var buf = [UInt8](repeating: 0, count: 1)
                             while true {
-                                let n = Darwin.read(fd, &buf, 1)
-                                if n <= 0 { break }
+                                var pfd = pollfd(fd: fd, events: Int16(POLLIN | POLLHUP | POLLERR), revents: 0)
+                                let ret = poll(&pfd, 1, 5000) // 5-second timeout
+                                if ret > 0 {
+                                    if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
+                                        NSLog("HealthCheck: connection hangup/error detected via poll")
+                                        break
+                                    }
+                                    let n = Darwin.read(fd, &buf, 1)
+                                    if n <= 0 { break }
+                                } else if ret < 0 {
+                                    break // poll error
+                                }
+                                // ret == 0: timeout, loop back and poll again
                             }
                             NSLog("HealthCheck: connection lost (EOF)")
                             connection.close()
