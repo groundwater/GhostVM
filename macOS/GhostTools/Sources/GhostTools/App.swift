@@ -537,15 +537,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Uninstall the launch agent by removing the plist file.
-    /// Does NOT call launchctl unload — that would kill this process
-    /// if we were launched by the agent (KeepAlive). Simply removing
-    /// the plist prevents launchd from restarting us and removes the
-    /// agent on next login.
+    /// Uninstall the launch agent by removing the plist and unregistering from launchd.
+    /// The plist is removed first so that if `launchctl bootout` terminates this process
+    /// (KeepAlive), launchd won't find the plist to re-register on next boot.
     @discardableResult
     private func uninstallLaunchAgent() -> Bool {
         let plistPath = launchAgentPlistPath()
         guard FileManager.default.fileExists(atPath: plistPath.path) else {
+            bootoutLaunchAgent()
             return true // Already uninstalled
         }
 
@@ -554,10 +553,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             try FileManager.default.removeItem(at: plistPath)
             print("[GhostTools] Launch agent plist removed")
+            bootoutLaunchAgent()
             return true
         } catch {
             print("[GhostTools] Failed to remove launch agent plist: \(error)")
             return false
+        }
+    }
+
+    /// Tell launchd to stop managing the launch agent. This unregisters the service
+    /// from launchd's in-memory configuration so KeepAlive no longer restarts us.
+    /// Uses `launchctl remove` which is fire-and-forget — we do NOT call
+    /// waitUntilExit() because launchd may SIGTERM our process as part of the
+    /// remove, which would deadlock if we were waiting on the child process.
+    private func bootoutLaunchAgent() {
+        print("[GhostTools] Calling launchctl remove \(bundleId)")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = ["remove", bundleId]
+
+        do {
+            try process.run()
+            // Do NOT call waitUntilExit() — launchd sends SIGTERM to our
+            // process as part of the remove, creating a deadlock if we wait.
+        } catch {
+            print("[GhostTools] launchctl remove failed: \(error)")
         }
     }
 
@@ -621,13 +642,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Remove the launch agent plist file (no launchctl unload).
+    /// Remove the launch agent plist file and unregister from launchd.
     private func removeLaunchAgentPlist() {
         let plistPath = launchAgentPlistPath()
         if FileManager.default.fileExists(atPath: plistPath.path) {
             try? FileManager.default.removeItem(at: plistPath)
             print("[GhostTools] Launch agent plist removed")
         }
+        bootoutLaunchAgent()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

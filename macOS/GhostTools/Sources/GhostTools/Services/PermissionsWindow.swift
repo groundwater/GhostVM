@@ -1,5 +1,4 @@
 import AppKit
-import ApplicationServices
 
 /// UserDefaults key for auto-start preference (must match App.swift)
 private let kAutoStartEnabledKey = "org.ghostvm.ghosttools.autoStartEnabled"
@@ -83,17 +82,6 @@ final class PermissionsWindow: NSObject {
     private func permissions() -> [Permission] {
         var perms: [Permission] = []
         let ad = self.appDelegate
-
-        perms.append(Permission(
-            name: "Accessibility",
-            description: "Pointer clicks, keyboard input, and UI element reading",
-            check: { AXIsProcessTrusted() },
-            request: {
-                let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue(): true] as CFDictionary
-                AXIsProcessTrustedWithOptions(opts)
-            },
-            enabled: inApplications
-        ))
 
         perms.append(Permission(
             name: "Default Web Browser",
