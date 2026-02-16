@@ -13,6 +13,7 @@ final class IconChooserPanel: NSObject, NSPopoverDelegate {
     var onClose: (() -> Void)?
 
     private var popover: NSPopover?
+    private var sheetWindow: NSPanel?
     private var contentVC: IconChooserContentViewController?
 
     func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge, bundleURL: URL) {
@@ -32,12 +33,37 @@ final class IconChooserPanel: NSObject, NSPopoverDelegate {
         self.contentVC = vc
     }
 
+    func showAsSheet(in window: NSWindow, bundleURL: URL) {
+        let vc = IconChooserContentViewController(bundleURL: bundleURL)
+        vc.onSelect = { [weak self] mode, icon in
+            guard let self = self else { return }
+            self.delegate?.iconChooserPanel(self, didSelectMode: mode, icon: icon)
+        }
+        vc.onDone = { [weak self] in self?.close() }
+        contentVC = vc
+
+        let panel = NSPanel(contentViewController: vc)
+        panel.styleMask = [.titled, .closable]
+        panel.title = "VM Icon"
+        sheetWindow = panel
+
+        window.beginSheet(panel) { [weak self] _ in
+            self?.sheetWindow = nil
+            self?.contentVC = nil
+            self?.onClose?()
+        }
+    }
+
     func close() {
-        popover?.close()
+        if let sheet = sheetWindow, let parent = sheet.sheetParent {
+            parent.endSheet(sheet)
+        } else {
+            popover?.close()
+        }
     }
 
     var isShown: Bool {
-        popover?.isShown ?? false
+        popover?.isShown ?? false || sheetWindow != nil
     }
 
     // MARK: - NSPopoverDelegate
@@ -144,6 +170,7 @@ private final class TileButton: NSButton {
 private final class IconChooserContentViewController: NSViewController {
 
     var onSelect: ((_ mode: String?, _ icon: NSImage?) -> Void)?
+    var onDone: (() -> Void)?
 
     private let bundleURL: URL
     private var currentMode: String?
@@ -225,6 +252,22 @@ private final class IconChooserContentViewController: NSViewController {
 
         let padding: CGFloat = 16
 
+        // Done button (shown only in sheet/modal mode)
+        var bottomAnchorView: NSView = presetsView
+        if onDone != nil {
+            let doneButton = NSButton(title: "Done", target: self, action: #selector(doneClicked))
+            doneButton.bezelStyle = .rounded
+            doneButton.keyEquivalent = "\u{1b}"
+            doneButton.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(doneButton)
+
+            NSLayoutConstraint.activate([
+                doneButton.topAnchor.constraint(equalTo: presetsView.bottomAnchor, constant: 12),
+                doneButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            ])
+            bottomAnchorView = doneButton
+        }
+
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
             titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
@@ -234,7 +277,8 @@ private final class IconChooserContentViewController: NSViewController {
 
             presetsView.topAnchor.constraint(equalTo: modesStack.bottomAnchor, constant: 12),
             presetsView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            presetsView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+
+            bottomAnchorView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
 
             container.widthAnchor.constraint(equalToConstant: 4 * tileSize + 3 * 8 + 2 * padding),
         ])
@@ -343,6 +387,10 @@ private final class IconChooserContentViewController: NSViewController {
         ])
 
         return button
+    }
+
+    @objc private func doneClicked() {
+        onDone?()
     }
 
     @objc private func modeButtonClicked(_ sender: NSButton) {

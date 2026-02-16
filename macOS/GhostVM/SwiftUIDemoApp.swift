@@ -2342,29 +2342,6 @@ struct SettingsDemoView: View {
                 }
             }
 
-            #if DEBUG
-            Divider()
-
-            Text("Experimental Features")
-                .font(.system(size: 13, weight: .semibold))
-
-            ForEach(FeatureFlags.allFlags) { flag in
-                labeledRow(flag.displayName) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Toggle("", isOn: Binding(
-                            get: { FeatureFlags.shared.isEnabled(flag.key) },
-                            set: { FeatureFlags.shared.setEnabled(flag.key, value: $0) }
-                        ))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        Text(flag.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            #endif
-
             Spacer()
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))

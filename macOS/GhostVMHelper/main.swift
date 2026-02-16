@@ -340,6 +340,22 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Strip dedicated panel toolbar items to test sheet fallback path
+        if args.contains("--strip-panel-items") {
+            if let nsToolbar = window.toolbar {
+                let stripIDs: Set<NSToolbarItem.Identifier> = [
+                    NSToolbarItem.Identifier("portForwards"),
+                    NSToolbarItem.Identifier("iconChooser"),
+                    NSToolbarItem.Identifier("queuedFiles"),
+                ]
+                for i in stride(from: nsToolbar.items.count - 1, through: 0, by: -1) {
+                    if stripIDs.contains(nsToolbar.items[i].itemIdentifier) {
+                        nsToolbar.removeItem(at: i)
+                    }
+                }
+            }
+        }
+
         // Show the requested panel after a delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self = self else { return }

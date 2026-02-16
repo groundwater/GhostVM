@@ -6,9 +6,6 @@ options:
   xcodeVersion: "15.4"
 
 packages:
-  swift-nio:
-    url: https://github.com/apple/swift-nio.git
-    from: "2.65.0"
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: "2.6.0"
@@ -85,10 +82,6 @@ targets:
     dependencies:
       - target: GhostVMKit
         embed: true
-      - package: swift-nio
-        products:
-          - NIOCore
-          - NIOPosix
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
@@ -130,10 +123,6 @@ targets:
         copy:
           destination: plugins
           subpath: Helpers
-      - package: swift-nio
-        products:
-          - NIOCore
-          - NIOPosix
       - package: Sparkle
     settings:
       base:

@@ -32,8 +32,6 @@ final class Router: @unchecked Sendable {
             return handleURLs(request)
         } else if path == "/api/v1/ports" {
             return handlePorts(request)
-        } else if path == "/api/v1/port-forwards" {
-            return handlePortForwards(request)
         } else if path == "/api/v1/logs" {
             return handleLogs(request)
         } else if path == "/api/v1/open" {
@@ -221,26 +219,6 @@ final class Router: @unchecked Sendable {
         log("[Router] GET /ports - returning \(ports.count) listening port(s)")
 
         let response = PortListResponse(ports: ports)
-        guard let data = try? JSONEncoder().encode(response) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-        }
-        return HTTPResponse.json(data)
-    }
-
-    // MARK: - Port Forwards
-
-    private func handlePortForwards(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        // Pop and clear the requested ports
-        let ports = PortForwardRequestService.shared.popRequests()
-        if !ports.isEmpty {
-            log("[Router] GET /port-forwards - returning \(ports.count) requested port(s)")
-        }
-
-        let response = PortForwardResponse(ports: ports)
         guard let data = try? JSONEncoder().encode(response) else {
             return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
         }
