@@ -189,6 +189,13 @@ tools: ghosttools-icon
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
 	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_APP)/Contents/"
+	@# Generate release notes from git log since last tag
+	@LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null); \
+	if [ -n "$$LAST_TAG" ]; then \
+		git log "$$LAST_TAG..HEAD" --pretty=format:"• %s" --no-merges > "$(GHOSTTOOLS_APP)/Contents/Resources/ReleaseNotes.txt"; \
+	else \
+		echo "• Bug fixes and improvements." > "$(GHOSTTOOLS_APP)/Contents/Resources/ReleaseNotes.txt"; \
+	fi
 	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_APP)/Contents/Resources/"
 	codesign --force --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_APP)"
 	@echo "GhostTools.app built at: $(GHOSTTOOLS_APP)"

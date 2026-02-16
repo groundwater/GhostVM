@@ -210,7 +210,10 @@ final class AutoUpdateService {
         textView.isSelectable = true
         textView.font = NSFont.systemFont(ofSize: 13)
         textView.textContainerInset = NSSize(width: 8, height: 8)
-        textView.string = "  \u{2022}  Bug fixes and improvements."
+        let releaseNotesPath = candidate.path + "/Contents/Resources/ReleaseNotes.txt"
+        let releaseNotes = (try? String(contentsOfFile: releaseNotesPath, encoding: .utf8))
+            ?? "\u{2022} Bug fixes and improvements."
+        textView.string = releaseNotes
         textView.autoresizingMask = [.width]
         scrollView.documentView = textView
         cv.addSubview(scrollView)
