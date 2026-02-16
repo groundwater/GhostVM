@@ -323,8 +323,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         ])
 
         // Mock queued files
-        toolbar.setQueuedFileCount(3)
-        toolbar.setQueuedFileNames(["screenshot.png"])
+        let fileCount: Int
+        if let idx = args.firstIndex(of: "--queued-file-count"), idx + 1 < args.count,
+           let count = Int(args[idx + 1]) {
+            fileCount = count
+        } else {
+            fileCount = 3
+        }
+        toolbar.setQueuedFileCount(fileCount)
+        toolbar.setQueuedFileNames((1...fileCount).map { "file-\($0).txt" })
 
         toolbar.setVMRunning(true)
 
