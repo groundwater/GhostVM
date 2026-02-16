@@ -83,9 +83,9 @@ debug: $(XCODE_PROJECT) dmg ghostvm-icon
 	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 	@echo "Debug app built at: $(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 
-# Build and run the app (attached to terminal)
-run: app
-	"$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)"
+# Build debug and run attached to terminal (stdout/stderr visible)
+run: debug
+	"$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/MacOS/$(APP_NAME)"
 
 # Build and launch the app (detached)
 launch: app

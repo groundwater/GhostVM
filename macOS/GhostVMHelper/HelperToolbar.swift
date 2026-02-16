@@ -135,10 +135,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         super.init()
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = true
     }
 
     func attach(to window: NSWindow) {
         self.window = window
+        toolbar.autosavesConfiguration = true
         window.toolbar = toolbar
         window.toolbarStyle = .unifiedCompact
     }
@@ -311,7 +313,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         // toolbar relayout (AppKit's _postWindowNeedsUpdateConstraints crashes
         // if constraints are added inside a display cycle — seen with Vision Pro
         // virtual displays).
-        let button = NSButton(frame: NSRect(x: 0, y: 0, width: 200, height: 22))
+        let button = NSButton(frame: NSRect(x: 0, y: 0, width: 16, height: 22))
         button.bezelStyle = .toolbar
         button.isBordered = false
         button.title = ""
@@ -325,10 +327,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         button.addSubview(dot)
         guestToolsDot = dot
 
-        // Status label
+        // Status label (starts zero-width; resizeGuestToolsButton adjusts)
         let label = NSTextField(labelWithString: "")
         label.font = .systemFont(ofSize: 11, weight: .medium)
-        label.frame = NSRect(x: 18, y: 1, width: 178, height: 20)
+        label.frame = NSRect(x: 18, y: 1, width: 0, height: 20)
         button.addSubview(label)
         guestToolsLabel = label
 
@@ -619,6 +621,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             guard let self = self, let label = self.statusLabel() else { timer.invalidate(); return }
             self.statusAnimationIndex += 1
             label.stringValue = String(self.statusAnimationTarget.suffix(self.statusAnimationIndex))
+            self.resizeGuestToolsButton()
 
             if self.statusAnimationIndex >= self.statusAnimationTarget.count {
                 timer.invalidate()
@@ -647,12 +650,27 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
                 return
             }
             label.stringValue = String(current.dropLast())
+            self.resizeGuestToolsButton()
         }
     }
 
     /// Helper to find the status label inside the guest tools toolbar item.
     private func statusLabel() -> NSTextField? {
         return guestToolsLabel
+    }
+
+    /// Resize the guest tools button to fit the dot + current label text.
+    private func resizeGuestToolsButton() {
+        guard let button = guestToolsItem?.view,
+              let label = guestToolsLabel else { return }
+        label.sizeToFit()
+        let width: CGFloat
+        if label.stringValue.isEmpty {
+            width = 16  // 4 padding + 8 dot + 4 padding
+        } else {
+            width = 18 + label.frame.width + 4  // dot(4+8) + spacing(6) + text + padding(4)
+        }
+        button.setFrameSize(NSSize(width: width, height: button.frame.height))
     }
 
     // MARK: - Menu Builders
