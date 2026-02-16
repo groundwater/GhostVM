@@ -2,13 +2,17 @@ import XCTest
 
 final class QueuedFilesPanelUITests: XCTestCase {
 
-    private func launchWithFileCount(_ count: Int) -> XCUIApplication {
+    private func launchWithFileCount(_ count: Int, stripPanelItems: Bool = false) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = [
+        var args = [
             "--ui-testing",
             "--show-file-transfer",
             "--queued-file-count", "\(count)"
         ]
+        if stripPanelItems {
+            args.append("--strip-panel-items")
+        }
+        app.launchArguments = args
         app.launch()
         return app
     }
@@ -92,5 +96,38 @@ final class QueuedFilesPanelUITests: XCTestCase {
         let lastRow = row(14, in: popover)
         XCTAssertTrue(lastRow.exists, "Row 14 should exist in the hierarchy")
         XCTAssertFalse(lastRow.isHittable, "Row 14 should NOT be hittable (off-screen, needs scroll)")
+    }
+
+    // MARK: - Sheet Fallback (toolbar items stripped)
+
+    func testSheetFallbackWhenToolbarItemMissing() {
+        let app = launchWithFileCount(3, stripPanelItems: true)
+
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "Sheet should appear when toolbar item is removed")
+
+        XCTAssertTrue(sheet.staticTexts["3 files ready to download"].exists,
+                       "Subtitle should show 3 files")
+
+        XCTAssertTrue(sheet.buttons["queuedFiles.saveButton"].waitForExistence(timeout: 2),
+                       "Save button should exist in sheet")
+        XCTAssertTrue(sheet.buttons["queuedFiles.declineButton"].exists,
+                       "Decline button should exist in sheet")
+    }
+
+    func testSheetFallbackShowsFileRows() {
+        let app = launchWithFileCount(5, stripPanelItems: true)
+
+        let sheet = app.sheets.firstMatch
+        XCTAssertTrue(sheet.waitForExistence(timeout: 5), "Sheet should appear")
+
+        XCTAssertTrue(sheet.staticTexts["5 files ready to download"].exists,
+                       "Subtitle should show 5 files")
+
+        // Verify file rows are present in the sheet
+        for i in 0..<5 {
+            let fileRow = sheet.staticTexts["queuedFiles.row.\(i)"]
+            XCTAssertTrue(fileRow.waitForExistence(timeout: 2), "Row \(i) should exist in sheet")
+        }
     }
 }

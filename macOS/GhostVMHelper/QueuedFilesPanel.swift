@@ -13,6 +13,7 @@ final class QueuedFilesPanel: NSObject, NSPopoverDelegate {
     var onClose: (() -> Void)?
 
     private var popover: NSPopover?
+    private var sheetWindow: NSPanel?
     private var fileNames: [String] = []
     private var contentViewController: QueuedFilesContentViewController?
 
@@ -31,8 +32,34 @@ final class QueuedFilesPanel: NSObject, NSPopoverDelegate {
         self.popover = popover
     }
 
+    func showAsSheet(in window: NSWindow) {
+        let vc = QueuedFilesContentViewController()
+        vc.delegate = self
+        vc.setFileNames(fileNames)
+        contentViewController = vc
+
+        let panel = NSPanel(contentViewController: vc)
+        panel.styleMask = [.titled, .closable]
+        panel.title = "Files from Guest"
+        sheetWindow = panel
+
+        window.beginSheet(panel) { [weak self] _ in
+            self?.sheetWindow = nil
+            self?.contentViewController = nil
+            self?.onClose?()
+        }
+    }
+
     func close() {
-        popover?.close()
+        if let sheet = sheetWindow, let parent = sheet.sheetParent {
+            parent.endSheet(sheet)
+        } else {
+            popover?.close()
+        }
+    }
+
+    var isShown: Bool {
+        popover?.isShown ?? false || sheetWindow != nil
     }
 
     func setFileNames(_ names: [String]) {

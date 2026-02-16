@@ -18,6 +18,7 @@ final class PortForwardPermissionPanel: NSObject, NSPopoverDelegate {
     var onClose: (() -> Void)?
 
     private var popover: NSPopover?
+    private var sheetWindow: NSPanel?
     private var contentViewController: PortForwardPermissionContentViewController?
 
     func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
@@ -34,12 +35,34 @@ final class PortForwardPermissionPanel: NSObject, NSPopoverDelegate {
         self.popover = popover
     }
 
+    func showAsSheet(in window: NSWindow) {
+        let vc = PortForwardPermissionContentViewController()
+        vc.delegate = self
+        vc.onDone = { [weak self] in self?.close() }
+        contentViewController = vc
+
+        let panel = NSPanel(contentViewController: vc)
+        panel.styleMask = [.titled, .closable]
+        panel.title = "Port Forwards"
+        sheetWindow = panel
+
+        window.beginSheet(panel) { [weak self] _ in
+            self?.sheetWindow = nil
+            self?.contentViewController = nil
+            self?.onClose?()
+        }
+    }
+
     func close() {
-        popover?.close()
+        if let sheet = sheetWindow, let parent = sheet.sheetParent {
+            parent.endSheet(sheet)
+        } else {
+            popover?.close()
+        }
     }
 
     var isShown: Bool {
-        popover?.isShown ?? false
+        popover?.isShown ?? false || sheetWindow != nil
     }
 
     // MARK: - Data Forwarding
@@ -105,6 +128,7 @@ protocol PortForwardPermissionContentViewControllerDelegate: AnyObject {
 final class PortForwardPermissionContentViewController: NSViewController {
 
     weak var delegate: PortForwardPermissionContentViewControllerDelegate?
+    var onDone: (() -> Void)?
 
     private var entries: [PortForwardEntry] = []
     private var blockedDescriptions: [String] = []
@@ -231,6 +255,22 @@ final class PortForwardPermissionContentViewController: NSViewController {
         editButton.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(editButton)
 
+        // Done button (shown only in sheet/modal mode)
+        var bottomView: NSView = editButton
+        if onDone != nil {
+            let doneButton = NSButton(title: "Done", target: self, action: #selector(doneClicked))
+            doneButton.bezelStyle = .rounded
+            doneButton.keyEquivalent = "\u{1b}"
+            doneButton.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(doneButton)
+
+            NSLayoutConstraint.activate([
+                doneButton.topAnchor.constraint(equalTo: editButton.bottomAnchor, constant: 12),
+                doneButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            ])
+            bottomView = doneButton
+        }
+
         // Layout
         NSLayoutConstraint.activate([
             autoMapCheckbox.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
@@ -259,7 +299,8 @@ final class PortForwardPermissionContentViewController: NSViewController {
 
             editButton.topAnchor.constraint(equalTo: sep2.bottomAnchor, constant: 8),
             editButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            editButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+
+            bottomView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
 
             container.widthAnchor.constraint(equalToConstant: 300),
         ])
@@ -485,5 +526,9 @@ final class PortForwardPermissionContentViewController: NSViewController {
 
     @objc private func editClicked() {
         delegate?.contentViewControllerDidRequestEditor(self)
+    }
+
+    @objc private func doneClicked() {
+        onDone?()
     }
 }
