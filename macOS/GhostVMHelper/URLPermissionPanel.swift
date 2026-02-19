@@ -28,6 +28,11 @@ final class URLPermissionPanel: NSObject, NSPopoverDelegate {
 
         popover.contentViewController = vc
         popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
+
+        // Set custom window level to appear above informational popovers (level 0)
+        // but below system-wide floating windows (level 3)
+        vc.view.window?.level = NSWindow.Level(rawValue: NSWindow.Level.normal.rawValue + 1)
+
         self.popover = popover
     }
 
