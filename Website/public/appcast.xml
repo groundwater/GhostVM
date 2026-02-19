@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 1.84.0</title>
+      <pubDate>Wed, 18 Feb 2026 18:34:16 -0800</pubDate>
+      <sparkle:version>1.84.0</sparkle:version>
+      <sparkle:shortVersionString>1.84.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Fix IPSW download performance (500-1000x speedup from 23KB/s to 50-100MB/s)</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v1.84.0/GhostVM-1.84.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="OLH+6fNbCj18eHEn9/wsTJ8jHj0RxA3CvxGUBZnlpgl6uPZR6FObM5SN6/XjDXmAqTH5kdOI7F6c9Csy0XMFCw=="
+        length="32048157"
+      />
+    </item>
+    <item>
       <title>GhostVM 1.83.0</title>
       <pubDate>Mon, 16 Feb 2026 16:39:33 -0800</pubDate>
       <sparkle:version>1.83.0</sparkle:version>
