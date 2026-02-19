@@ -2,6 +2,43 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
+// MARK: - Download Metadata (Sidecar)
+
+struct DownloadMetadata: Codable {
+    struct ChunkInfo: Codable {
+        let index: Int
+        let start: Int64
+        let end: Int64
+        var bytesWritten: Int64
+        var isComplete: Bool
+    }
+
+    let url: String
+    let filename: String
+    let totalSize: Int64
+    let etag: String?
+    let lastModified: String?
+    let chunkCount: Int
+    var chunks: [ChunkInfo]
+    let createdAt: Date
+    var lastUpdated: Date
+
+    func write(to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(self)
+        try data.write(to: url, options: .atomic)
+    }
+
+    static func read(from url: URL) throws -> DownloadMetadata {
+        let data = try Data(contentsOf: url)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(DownloadMetadata.self, from: data)
+    }
+}
+
 // MARK: - Feed & Cache Models
 
 struct App2IPSWFeedEntry: Hashable, Identifiable {
@@ -64,6 +101,32 @@ final class App2IPSWService: ObservableObject {
     private let defaults = UserDefaults.standard
     private let fileManager = FileManager.default
 
+    // Dedicated URLSession for large file downloads with optimized configuration
+    private static let downloadSession: URLSession = {
+        let config = URLSessionConfiguration.default
+
+        // HTTP/2 optimization: increase connection limits for parallel chunks
+        config.httpMaximumConnectionsPerHost = 32
+
+        // Allow cellular (if applicable)
+        config.allowsCellularAccess = true
+
+        // Disable discretionary mode (prevents macOS throttling background downloads)
+        config.isDiscretionary = false
+
+        // Wait for connectivity instead of failing immediately
+        config.waitsForConnectivity = true
+
+        // Increase timeouts for large chunks over slow connections
+        config.timeoutIntervalForRequest = 120 // 2 minutes per request
+        config.timeoutIntervalForResource = 7200 // 2 hours total download
+
+        // HTTP/2 is default on modern macOS, but pipelining interferes
+        config.httpShouldUsePipelining = false
+
+        return URLSession(configuration: config)
+    }()
+
     private let feedURLKey = "SwiftUIIPSWFeedURL"
     private let cacheDirectoryKey = "SwiftUIIPSWCacheDirectoryPath"
 
@@ -90,10 +153,10 @@ final class App2IPSWService: ObservableObject {
 
     static func defaultCacheDirectory(fileManager: FileManager = .default) -> URL {
         if let supportDirectory = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            return supportDirectory.appendingPathComponent("GhostVM/IPSW", isDirectory: true)
+            return supportDirectory.appendingPathComponent("org.ghostvm.GhostVM/IPSW", isDirectory: true)
         }
         return fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/GhostVM/IPSW", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/org.ghostvm.GhostVM/IPSW", isDirectory: true)
     }
 
     func setFeedURL(_ url: URL) {
@@ -148,6 +211,10 @@ final class App2IPSWService: ObservableObject {
         if fileManager.fileExists(atPath: partial.path) {
             try fileManager.removeItem(at: partial)
         }
+        let metadata = partial.appendingPathExtension("meta.json")
+        if fileManager.fileExists(atPath: metadata.path) {
+            try fileManager.removeItem(at: metadata)
+        }
     }
 
     func partialDownloadSize(filename: String) -> Int64? {
@@ -169,7 +236,7 @@ final class App2IPSWService: ObservableObject {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 60
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await Self.downloadSession.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw NSError(domain: "App2IPSW", code: 2, userInfo: [NSLocalizedDescriptionKey: "Received an invalid response from the IPSW feed."])
         }
@@ -250,8 +317,22 @@ final class App2IPSWService: ObservableObject {
     // MARK: - Download
 
     private static let maxRetries = 10
+    private static let optimalChunkSize: Int64 = 1 * 1024 * 1024 // 1MB per chunk (matches aria2 piece-length)
+    private static let maxChunkCount = 2048 // Cap at 2048 chunks (for very large files)
+    private static let maxConcurrentChunks = 16 // Limit concurrent downloads (matches aria2 default split)
+    private static let chunkStallTimeout: TimeInterval = 30.0
+    private static let rampUpInterval: TimeInterval = 5.0 // Add a new chunk every 5s if healthy
 
     func download(
+        _ entry: App2IPSWFeedEntry,
+        resume: Bool = false,
+        progress: @escaping (App2IPSWDownloadProgress) -> Void
+    ) async throws -> (image: App2IPSWCachedImage, verificationFailure: IPSWVerificationFailure?) {
+        return try await downloadSequential(entry, resume: resume, progress: progress)
+    }
+
+
+    private func downloadSequential(
         _ entry: App2IPSWFeedEntry,
         resume: Bool = false,
         progress: @escaping (App2IPSWDownloadProgress) -> Void
@@ -260,154 +341,114 @@ final class App2IPSWService: ObservableObject {
         let destination = cacheDirectory.appendingPathComponent(entry.filename, isDirectory: false)
         let temporary = destination.appendingPathExtension("download")
 
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
+        // Check existing file for resume
+        var existingSize: Int64 = 0
+        if resume && fileManager.fileExists(atPath: temporary.path) {
+            let attrs = try? fileManager.attributesOfItem(atPath: temporary.path)
+            existingSize = (attrs?[.size] as? Int64) ?? 0
+        } else {
+            try? fileManager.removeItem(at: temporary)
         }
 
-        var existingSize: Int64 = 0
-        if resume, fileManager.fileExists(atPath: temporary.path) {
-            let attrs = try FileManager.default.attributesOfItem(atPath: temporary.path)
-            existingSize = (attrs[.size] as? Int64) ?? 0
-        } else {
-            if fileManager.fileExists(atPath: temporary.path) {
-                try fileManager.removeItem(at: temporary)
-            }
+        // Create file if needed
+        if !fileManager.fileExists(atPath: temporary.path) {
             guard fileManager.createFile(atPath: temporary.path, contents: nil, attributes: nil) else {
-                throw NSError(domain: "App2IPSW", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to prepare download destination."])
+                throw NSError(domain: "App2IPSW", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unable to create file."])
             }
         }
 
         let fileHandle = try FileHandle(forWritingTo: temporary)
-        defer {
-            try? fileHandle.close()
-        }
+        defer { try? fileHandle.close() }
 
         if existingSize > 0 {
             try fileHandle.seekToEnd()
+            print("📥 Resuming from \(ByteCountFormatter.string(fromByteCount: existingSize, countStyle: .file))")
         }
 
-        var written: Int64 = existingSize
-        var totalExpected: Int64 = 0
-        let start = Date()
-        var retriesRemaining = Self.maxRetries
+        // Download in 10MB chunks
+        let chunkSize: Int64 = 10 * 1024 * 1024
+        var written = existingSize
+        var totalSize: Int64 = 0
+        let startTime = Date()
+        var lastSpeedCheck = Date()
+        var lastSpeedBytes = existingSize
+        var currentSpeed: Double = 0.0
 
-        // Outer loop: each iteration opens a new byte stream (possibly resuming).
-        // Transient network errors trigger a retry with a Range request.
-        outerLoop: while true {
-            let bytes: URLSession.AsyncBytes
-            if written > 0 {
-                var request = URLRequest(url: entry.firmwareURL)
-                request.setValue("bytes=\(written)-", forHTTPHeaderField: "Range")
-                let (resumeBytes, response) = try await URLSession.shared.bytes(for: request)
-                if let http = response as? HTTPURLResponse, http.statusCode == 206 {
-                    bytes = resumeBytes
-                    let contentLength = response.expectedContentLength > 0 ? response.expectedContentLength : 0
-                    totalExpected = contentLength > 0 ? written + contentLength : totalExpected
-                } else {
-                    // Server doesn't support range requests — restart from scratch
-                    try fileHandle.seek(toOffset: 0)
-                    try fileHandle.truncate(atOffset: 0)
-                    written = 0
-                    let (freshBytes, freshResponse) = try await URLSession.shared.bytes(from: entry.firmwareURL)
-                    bytes = freshBytes
-                    totalExpected = freshResponse.expectedContentLength > 0 ? freshResponse.expectedContentLength : 0
-                }
-            } else {
-                let (freshBytes, response) = try await URLSession.shared.bytes(from: entry.firmwareURL)
-                bytes = freshBytes
-                totalExpected = response.expectedContentLength > 0 ? response.expectedContentLength : 0
-            }
+        // Get total size
+        var headReq = URLRequest(url: entry.firmwareURL)
+        headReq.httpMethod = "HEAD"
+        let (_, headResp) = try await Self.downloadSession.data(for: headReq)
+        totalSize = headResp.expectedContentLength
 
-            var buffer = Data()
+        // Download in chunks
+        while written < totalSize {
+            if Task.isCancelled { throw CancellationError() }
 
-            do {
-                for try await byte in bytes {
-                    if Task.isCancelled {
-                        throw CancellationError()
+            let start = written
+            let end = min(start + chunkSize - 1, totalSize - 1)
+
+            var retries = 5
+            while retries > 0 {
+                do {
+                    var req = URLRequest(url: entry.firmwareURL)
+                    req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
+
+                    let (data, _) = try await Self.downloadSession.data(for: req)
+
+                    try fileHandle.write(contentsOf: data)
+                    written += Int64(data.count)
+
+                    // Update speed
+                    let now = Date()
+                    let elapsed = now.timeIntervalSince(lastSpeedCheck)
+                    if elapsed >= 1.0 {
+                        let bytes = written - lastSpeedBytes
+                        currentSpeed = Double(bytes) / elapsed
+                        lastSpeedCheck = now
+                        lastSpeedBytes = written
                     }
-                    buffer.append(byte)
-                    written += 1
 
-                    if buffer.count >= 1 << 20 {
-                        try fileHandle.write(contentsOf: buffer)
-                        buffer.removeAll(keepingCapacity: true)
-                        let elapsed = max(Date().timeIntervalSince(start), 0.001)
-                        let speed = Double(written) / elapsed
-                        progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: totalExpected, speedBytesPerSecond: speed))
-                    }
-                }
+                    let percent = Int((Double(written) / Double(totalSize)) * 100)
+                    let speedMB = currentSpeed / (1024 * 1024)
+                    print("\r📥 \(percent)% (\(ByteCountFormatter.string(fromByteCount: written, countStyle: .file))/\(ByteCountFormatter.string(fromByteCount: totalSize, countStyle: .file))) @ \(String(format: "%.1f", speedMB)) MB/s\u{001B}[K", terminator: "")
+                    fflush(stdout)
 
-                // Stream ended normally — flush remaining buffer
-                if !buffer.isEmpty {
-                    try fileHandle.write(contentsOf: buffer)
-                    let elapsed = max(Date().timeIntervalSince(start), 0.001)
-                    let speed = Double(written) / elapsed
-                    progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: totalExpected, speedBytesPerSecond: speed))
-                }
-                break outerLoop
-            } catch is CancellationError {
-                // Flush what we have before deleting
-                if !buffer.isEmpty {
-                    try? fileHandle.write(contentsOf: buffer)
-                }
-                try? fileManager.removeItem(at: temporary)
-                throw CancellationError()
-            } catch {
-                // Transient error — flush buffer to disk and retry
-                if !buffer.isEmpty {
-                    try? fileHandle.write(contentsOf: buffer)
-                }
-                try? fileHandle.synchronize()
+                    progress(App2IPSWDownloadProgress(bytesWritten: written, totalBytes: totalSize, speedBytesPerSecond: currentSpeed))
+                    break
 
-                retriesRemaining -= 1
-                if retriesRemaining <= 0 {
-                    // Out of retries — keep .download file for manual resume
-                    throw error
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    retries -= 1
+                    if retries == 0 { throw error }
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
                 }
-
-                // Exponential backoff: 1s, 2s, 4s, 8s… capped at 30s
-                let attempt = Self.maxRetries - retriesRemaining
-                let delay = min(pow(2.0, Double(attempt - 1)), 30.0)
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-
-                // Re-check the actual file size before resuming
-                try? fileHandle.synchronize()
-                let offset = try fileHandle.seekToEnd()
-                written = Int64(offset)
             }
         }
 
-        do {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try fileManager.moveItem(at: temporary, to: destination)
-            let values = try destination.resourceValues(forKeys: [.fileSizeKey])
-            let cached = App2IPSWCachedImage(
-                fileURL: destination,
-                sizeBytes: values.fileSize.map { Int64($0) }
-            )
+        print("\n✅ Download complete!")
 
-            // Verify SHA1 if the feed provided one
-            var failure: IPSWVerificationFailure? = nil
-            if let expectedSHA1 = entry.firmwareSHA1, !expectedSHA1.isEmpty {
-                let actualSHA1 = try Self.sha1Hash(of: destination)
-                if actualSHA1.lowercased() != expectedSHA1.lowercased() {
-                    failure = IPSWVerificationFailure(
-                        filename: entry.filename,
-                        expected: expectedSHA1,
-                        actual: actualSHA1
-                    )
-                }
-            }
-
-            return (cached, failure)
-        } catch {
-            try? fileManager.removeItem(at: temporary)
-            try? fileManager.removeItem(at: destination)
-            throw error
+        // Move to final destination
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
         }
+        try fileManager.moveItem(at: temporary, to: destination)
+
+        let values = try destination.resourceValues(forKeys: [.fileSizeKey])
+        let cached = App2IPSWCachedImage(fileURL: destination, sizeBytes: values.fileSize.map { Int64($0) })
+
+        // Verify SHA1
+        var failure: IPSWVerificationFailure? = nil
+        if let expectedSHA1 = entry.firmwareSHA1, !expectedSHA1.isEmpty {
+            let actualSHA1 = try Self.sha1Hash(of: destination)
+            if actualSHA1.lowercased() != expectedSHA1.lowercased() {
+                failure = IPSWVerificationFailure(filename: entry.filename, expected: expectedSHA1, actual: actualSHA1)
+            }
+        }
+
+        return (cached, failure)
     }
+
 
     /// Compute SHA1 hash of a file by streaming in chunks.
     private static func sha1Hash(of url: URL) throws -> String {
