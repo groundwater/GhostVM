@@ -169,15 +169,14 @@ final class PortForwardListener: @unchecked Sendable {
             var optval: Int32 = 1
             setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, &optval, socklen_t(MemoryLayout<Int32>.size))
 
-            // Handle connection on a background GCD queue (not Swift concurrency)
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.handleConnection(clientSocket)
+            Task { [weak self] in
+                await self?.handleConnection(clientSocket)
             }
         }
     }
 
     /// Handle a single forwarded connection
-    private func handleConnection(_ tcpFd: Int32) {
+    private func handleConnection(_ tcpFd: Int32) async {
         connectionLock.lock()
         activeConnections += 1
         let connCount = activeConnections
@@ -194,11 +193,6 @@ final class PortForwardListener: @unchecked Sendable {
             connectionLock.unlock()
             print("[PortForwardListener] [DEFER-DONE] Connection closed for port \(hostPort) (active=\(remaining))")
         }
-
-        // Set TCP socket to non-blocking
-        print("[PortForwardListener] [2] Setting TCP non-blocking")
-        var flags = fcntl(tcpFd, F_GETFL, 0)
-        _ = fcntl(tcpFd, F_SETFL, flags | O_NONBLOCK)
 
         // Connect to guest TunnelServer via vsock
         print("[PortForwardListener] [3] Creating semaphore")
@@ -263,59 +257,44 @@ final class PortForwardListener: @unchecked Sendable {
         let vsockFd = conn.fileDescriptor
         print("[PortForwardListener] [14] Connected to guest vsock, fd=\(vsockFd)")
 
-        // Set vsock to non-blocking
-        print("[PortForwardListener] [15] Setting vsock non-blocking")
-        flags = fcntl(vsockFd, F_GETFL, 0)
-        _ = fcntl(vsockFd, F_SETFL, flags | O_NONBLOCK)
+        let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: false)
+        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: false)
 
         // Send CONNECT command
         print("[PortForwardListener] [16] Sending CONNECT command")
-        let connectCmd = "CONNECT \(guestPort)\r\n"
-        let cmdWritten = connectCmd.withCString { ptr in
-            Darwin.write(vsockFd, ptr, strlen(ptr))
-        }
-        print("[PortForwardListener] [17] CONNECT write returned \(cmdWritten)")
-
-        if cmdWritten < 0 {
-            let err = errno
-            print("[PortForwardListener] [17-ERROR] Failed to send CONNECT command: errno=\(err) \(String(cString: strerror(err)))")
-            conn.close()
-            return
-        }
-
-        // Read response with poll
-        print("[PortForwardListener] [18] Polling for response")
-        var buffer = [UInt8](repeating: 0, count: 256)
-        var pfd = pollfd(fd: vsockFd, events: Int16(POLLIN), revents: 0)
-
-        let pollResult = poll(&pfd, 1, 5000) // 5 second timeout
-        print("[PortForwardListener] [19] poll() returned \(pollResult)")
-
-        if pollResult < 0 {
-            let err = errno
-            print("[PortForwardListener] [19-ERROR] poll() failed: errno=\(err) \(String(cString: strerror(err)))")
-            conn.close()
-            return
-        }
-        if pollResult == 0 {
-            print("[PortForwardListener] [19-TIMEOUT] Timeout waiting for CONNECT response")
+        do {
+            try await vsockIO.writeAll(Data("CONNECT \(guestPort)\r\n".utf8))
+            print("[PortForwardListener] [17] CONNECT write completed")
+        } catch {
+            print("[PortForwardListener] [17-ERROR] Failed to send CONNECT command: \(describe(error: error))")
             conn.close()
             return
         }
 
         print("[PortForwardListener] [20] Reading response")
-        let bytesRead = Darwin.read(vsockFd, &buffer, buffer.count - 1)
-        print("[PortForwardListener] [21] Read returned \(bytesRead)")
-
-        if bytesRead <= 0 {
-            let err = errno
-            print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: bytesRead=\(bytesRead) errno=\(err)")
+        let responseData: Data
+        do {
+            responseData = try await readConnectResponse(vsockIO)
+            print("[PortForwardListener] [21] Read returned \(responseData.count)")
+        } catch let error as ConnectReadError {
+            switch error {
+            case .timeout:
+                print("[PortForwardListener] [19-TIMEOUT] Timeout waiting for CONNECT response")
+            case .eof:
+                print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: bytesRead=0 EOF")
+            case .transport(let ioError):
+                print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: \(describe(error: ioError))")
+            }
+            conn.close()
+            return
+        } catch {
+            print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: \(error)")
             conn.close()
             return
         }
 
         print("[PortForwardListener] [22] Decoding response")
-        guard let response = String(bytes: buffer[0..<bytesRead], encoding: .utf8) else {
+        guard let response = String(data: responseData, encoding: .utf8) else {
             print("[PortForwardListener] [22-ERROR] Invalid CONNECT response encoding")
             conn.close()
             return
@@ -332,13 +311,12 @@ final class PortForwardListener: @unchecked Sendable {
 
         // Bridge the connections
         print("[PortForwardListener] [24] Starting bridge")
-        bridgeConnections(tcpFd: tcpFd, vsockFd: vsockFd, connection: conn)
+        await bridgeConnections(tcpIO: tcpIO, vsockIO: vsockIO, connection: conn)
         print("[PortForwardListener] [25] Bridge returned")
     }
 
-    /// Bridge TCP and vsock connections using two threads - simplest proven approach
-    /// Each direction gets its own thread doing blocking read/write
-    private func bridgeConnections(tcpFd: Int32, vsockFd: Int32, connection: VZVirtioSocketConnection) {
+    /// Bridge TCP and vsock connections using async nonblocking I/O
+    private func bridgeConnections(tcpIO: AsyncVSockIO, vsockIO: AsyncVSockIO, connection: VZVirtioSocketConnection) async {
         let startTime = DispatchTime.now()
 
         defer {
@@ -347,33 +325,18 @@ final class PortForwardListener: @unchecked Sendable {
             connection.close()
         }
 
-        // Keep sockets BLOCKING - simplest and most reliable
-        var flags = fcntl(tcpFd, F_GETFL, 0)
-        _ = fcntl(tcpFd, F_SETFL, flags & ~O_NONBLOCK)
-
-        flags = fcntl(vsockFd, F_GETFL, 0)
-        _ = fcntl(vsockFd, F_SETFL, flags & ~O_NONBLOCK)
-
-        let group = DispatchGroup()
-
-        // Thread 1: TCP -> vsock (request direction)
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.copyData(from: tcpFd, to: vsockFd, label: "tcp->vsock")
-            Darwin.shutdown(vsockFd, SHUT_WR)
-            group.leave()
+        do {
+            try await pipeBidirectional(tcpIO, vsockIO)
+        } catch {
+            if isExpectedBridgeError(error) {
+                print("[PortForwardListener] Bridge closed: \(describe(error: error))")
+            } else {
+                // CRASH with full details
+                let msg = "[PortForwardListener] Bridge failed unexpectedly: \(describe(error: error))"
+                print(msg)
+                fatalError(msg)
+            }
         }
-
-        // Thread 2: vsock -> TCP (response direction)
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.copyData(from: vsockFd, to: tcpFd, label: "vsock->tcp")
-            Darwin.shutdown(tcpFd, SHUT_WR)
-            group.leave()
-        }
-
-        // Wait for both directions to complete
-        group.wait()
     }
 
     /// Error codes that indicate peer disconnected (not a bug)
@@ -393,54 +356,71 @@ final class PortForwardListener: @unchecked Sendable {
         }
     }
 
-    /// Simple blocking copy: read from source, write to dest, repeat until EOF
-    private func copyData(from source: Int32, to dest: Int32, label: String) {
-        var buffer = [UInt8](repeating: 0, count: 65536)
-        var totalBytes: Int = 0
-
-        while true {
-            let bytesRead = Darwin.read(source, &buffer, buffer.count)
-
-            if bytesRead == 0 {
-                print("[PortForwardListener] \(label): EOF after \(totalBytes) bytes")
-                return
+    private func isExpectedBridgeError(_ error: Error) -> Bool {
+        if let ioError = error as? AsyncVSockIOError {
+            switch ioError {
+            case .closed, .cancelled:
+                return true
+            case .syscall(_, let err):
+                return isPeerDisconnected(err)
+            default:
+                return false
             }
-
-            if bytesRead < 0 {
-                let err = errno
-                if err == EINTR { continue }
-                if isPeerDisconnected(err) {
-                    print("[PortForwardListener] \(label): peer closed (errno=\(err)) after \(totalBytes) bytes")
-                    return
-                }
-                // CRASH with full details
-                let msg = "[PortForwardListener] \(label): UNEXPECTED read error: errno=\(err) (\(String(cString: strerror(err)))) after \(totalBytes) bytes, source=\(source), dest=\(dest)"
-                print(msg)
-                fatalError(msg)
-            }
-
-            var offset = 0
-            while offset < bytesRead {
-                let written = buffer.withUnsafeBytes { ptr in
-                    Darwin.write(dest, ptr.baseAddress! + offset, bytesRead - offset)
-                }
-
-                if written <= 0 {
-                    let err = errno
-                    if err == EINTR { continue }
-                    if isPeerDisconnected(err) {
-                        print("[PortForwardListener] \(label): peer closed during write (errno=\(err)) after \(totalBytes) bytes")
-                        return
-                    }
-                    // CRASH with full details
-                    let msg = "[PortForwardListener] \(label): UNEXPECTED write error: errno=\(err) (\(String(cString: strerror(err)))) offset=\(offset)/\(bytesRead), totalBytes=\(totalBytes), source=\(source), dest=\(dest)"
-                    print(msg)
-                    fatalError(msg)
-                }
-                offset += written
-            }
-
-            totalBytes += bytesRead
         }
+        return false
+    }
+
+    private enum ConnectReadError: Error {
+        case timeout
+        case eof
+        case transport(AsyncVSockIOError)
+    }
+
+    private func readConnectResponse(_ io: AsyncVSockIO) async throws -> Data {
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                do {
+                    guard let data = try await io.read(maxBytes: 255), !data.isEmpty else {
+                        throw ConnectReadError.eof
+                    }
+                    return data
+                } catch let error as AsyncVSockIOError {
+                    throw ConnectReadError.transport(error)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                throw ConnectReadError.timeout
+            }
+
+            do {
+                let first = try await group.next()!
+                group.cancelAll()
+                return first
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+    }
+
+    private func describe(error: Error) -> String {
+        if let ioError = error as? AsyncVSockIOError {
+            switch ioError {
+            case .closed:
+                return "closed"
+            case .eofBeforeExpected(let expected, let received):
+                return "eofBeforeExpected expected=\(expected) received=\(received)"
+            case .interrupted:
+                return "interrupted"
+            case .wouldBlock:
+                return "wouldBlock"
+            case .syscall(let op, let err):
+                return "syscall \(op) failed: errno=\(err) (\(String(cString: strerror(err))))"
+            case .cancelled:
+                return "cancelled"
+            }
+        }
+        return String(describing: error)
     }
 }
