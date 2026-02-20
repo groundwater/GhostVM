@@ -115,6 +115,7 @@ launch: app
 # Run unit tests
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
+	swift test --package-path macOS/GhostTools --filter AsyncVSockIOTests
 
 # Generate website screenshots from UI tests
 # Step 1: capture — runs XCUITests, saves raw PNGs to build/screenshots/

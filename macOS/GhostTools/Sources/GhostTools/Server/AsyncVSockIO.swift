@@ -89,8 +89,13 @@ public final class AsyncVSockIO {
         self.ownsFD = ownsFD
 
         let flags = fcntl(fd, F_GETFL, 0)
-        if flags >= 0 {
-            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        if flags < 0 {
+            let err = errno
+            fatalError("[AsyncVSockIO] Failed to read fd flags: fd=\(fd) errno=\(err) (\(String(cString: strerror(err))))")
+        }
+        if fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 {
+            let err = errno
+            fatalError("[AsyncVSockIO] Failed to set O_NONBLOCK: fd=\(fd) errno=\(err) (\(String(cString: strerror(err))))")
         }
     }
 

@@ -270,7 +270,7 @@ final class TunnelServer: @unchecked Sendable {
         do {
             try await io.writeAll(Data(response.utf8))
         } catch {
-            print("[TunnelServer] Failed to send error response: \(describe(error: error))")
+            fatalError("[TunnelServer] Failed to send error response: \(describe(error: error))")
         }
     }
 

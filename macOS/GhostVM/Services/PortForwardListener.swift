@@ -1,4 +1,5 @@
 import Foundation
+import GhostVMKit
 import Virtualization
 
 /// Errors that can occur in port forwarding
@@ -194,63 +195,21 @@ final class PortForwardListener: @unchecked Sendable {
             print("[PortForwardListener] [DEFER-DONE] Connection closed for port \(hostPort) (active=\(remaining))")
         }
 
-        // Connect to guest TunnelServer via vsock
-        print("[PortForwardListener] [3] Creating semaphore")
-        let semaphore = DispatchSemaphore(value: 0)
-        var connection: VZVirtioSocketConnection?
-        var connectError: Error?
+        let connector = AsyncVsockConnector(
+            vm: virtualMachine,
+            vmQueue: vmQueue,
+            port: tunnelServerPort,
+            timeoutSeconds: 5
+        )
 
-        print("[PortForwardListener] [4] Capturing VM reference")
-        let vm = self.virtualMachine
-        let port = self.tunnelServerPort
-
-        print("[PortForwardListener] [5] Dispatching to vmQueue for vsock connect to port \(port)...")
-
-        vmQueue.async {
-            print("[PortForwardListener] [6-vmQueue] Getting socket device")
-            guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-                print("[PortForwardListener] [6-vmQueue] NO SOCKET DEVICE!")
-                connectError = PortForwardError.connectFailed("No socket device - VM may not have vsock configured")
-                semaphore.signal()
-                return
-            }
-            print("[PortForwardListener] [7-vmQueue] Calling socketDevice.connect()")
-            socketDevice.connect(toPort: port) { result in
-                print("[PortForwardListener] [8-callback] Connect callback received")
-                switch result {
-                case .success(let conn):
-                    print("[PortForwardListener] [8-callback] Success, fd=\(conn.fileDescriptor)")
-                    connection = conn
-                case .failure(let error):
-                    print("[PortForwardListener] [8-callback] Failure: \(error)")
-                    connectError = error
-                }
-                semaphore.signal()
-            }
-            print("[PortForwardListener] [7-vmQueue] connect() returned, waiting for callback")
-        }
-
-        // Wait for connection with timeout
-        print("[PortForwardListener] [9] Waiting on semaphore with 5s timeout")
-        let timeout = DispatchTime.now() + .seconds(5)
-        let waitResult = semaphore.wait(timeout: timeout)
-        print("[PortForwardListener] [10] Semaphore returned: \(waitResult == .timedOut ? "TIMEOUT" : "signaled")")
-
-        if waitResult == .timedOut {
-            print("[PortForwardListener] [10-TIMEOUT] Timeout connecting to guest vsock - TunnelServer may not be running")
-            return  // TCP connection will be closed by defer
-        }
-
-        print("[PortForwardListener] [11] Checking connectError")
-        if let error = connectError {
-            print("[PortForwardListener] [11-ERROR] Failed to connect to guest: \(error)")
-            return  // TCP connection will be closed by defer
-        }
-
-        print("[PortForwardListener] [12] Unwrapping connection")
-        guard let conn = connection else {
-            print("[PortForwardListener] [12-NIL] No connection returned from vsock connect")
-            return  // TCP connection will be closed by defer
+        print("[PortForwardListener] [3] Connecting to guest TunnelServer...")
+        let conn: VZVirtioSocketConnection
+        do {
+            conn = try await connector.connect()
+        } catch {
+            let msg = "[PortForwardListener] Failed to connect to guest TunnelServer: \(describe(error: error))"
+            print(msg)
+            fatalError(msg)
         }
 
         print("[PortForwardListener] [13] Getting fileDescriptor")
@@ -266,9 +225,9 @@ final class PortForwardListener: @unchecked Sendable {
             try await vsockIO.writeAll(Data("CONNECT \(guestPort)\r\n".utf8))
             print("[PortForwardListener] [17] CONNECT write completed")
         } catch {
-            print("[PortForwardListener] [17-ERROR] Failed to send CONNECT command: \(describe(error: error))")
-            conn.close()
-            return
+            let msg = "[PortForwardListener] Failed to send CONNECT command: \(describe(error: error))"
+            print(msg)
+            fatalError(msg)
         }
 
         print("[PortForwardListener] [20] Reading response")
@@ -279,34 +238,26 @@ final class PortForwardListener: @unchecked Sendable {
         } catch let error as ConnectReadError {
             switch error {
             case .timeout:
-                print("[PortForwardListener] [19-TIMEOUT] Timeout waiting for CONNECT response")
+                fatalError("[PortForwardListener] Timeout waiting for CONNECT response")
             case .eof:
-                print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: bytesRead=0 EOF")
+                fatalError("[PortForwardListener] Failed to read CONNECT response: bytesRead=0 EOF")
             case .transport(let ioError):
-                print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: \(describe(error: ioError))")
+                fatalError("[PortForwardListener] Failed to read CONNECT response: \(describe(error: ioError))")
             }
-            conn.close()
-            return
         } catch {
-            print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: \(error)")
-            conn.close()
-            return
+            fatalError("[PortForwardListener] Failed to read CONNECT response: \(describe(error: error))")
         }
 
         print("[PortForwardListener] [22] Decoding response")
         guard let response = String(data: responseData, encoding: .utf8) else {
-            print("[PortForwardListener] [22-ERROR] Invalid CONNECT response encoding")
-            conn.close()
-            return
+            fatalError("[PortForwardListener] Invalid CONNECT response encoding")
         }
 
         let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
         print("[PortForwardListener] [23] Response: '\(trimmed)'")
 
         if trimmed != "OK" {
-            print("[PortForwardListener] [23-REFUSED] Guest refused connection: '\(trimmed)'")
-            conn.close()
-            return
+            fatalError("[PortForwardListener] Guest refused connection: '\(trimmed)'")
         }
 
         // Bridge the connections
