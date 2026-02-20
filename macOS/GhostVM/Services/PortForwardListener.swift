@@ -1,6 +1,7 @@
 import Foundation
 import GhostVMKit
 import Virtualization
+import os
 
 /// Errors that can occur in port forwarding
 enum PortForwardError: Error, LocalizedError {
@@ -34,6 +35,7 @@ enum PortForwardError: Error, LocalizedError {
 /// 3. Wait for "OK\r\n"
 /// 4. Bridge TCP <-> vsock bidirectionally
 final class PortForwardListener: @unchecked Sendable {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghostvm", category: "PortForwardListener")
     private let hostPort: UInt16
     private let guestPort: UInt16
     private let vmQueue: DispatchQueue
@@ -128,7 +130,7 @@ final class PortForwardListener: @unchecked Sendable {
         isRunning = true
         acceptSource?.resume()
 
-        print("[PortForwardListener] Listening on localhost:\(hostPort) -> guest:\(guestPort)")
+        Self.logger.info("Listening on localhost hostPort=\(self.hostPort) guestPort=\(self.guestPort)")
     }
 
     /// Stop listening and close all connections
@@ -144,7 +146,7 @@ final class PortForwardListener: @unchecked Sendable {
             serverSocket = -1
         }
 
-        print("[PortForwardListener] Stopped forwarding localhost:\(hostPort)")
+        Self.logger.info("Stopped forwarding hostPort=\(self.hostPort)")
     }
 
     /// Accept all pending connections (called from DispatchSource)
@@ -170,7 +172,7 @@ final class PortForwardListener: @unchecked Sendable {
                 }
                 // CRASH with full details
                 let msg = "[PortForwardListener] accept() FAILED: errno=\(err) (\(String(cString: strerror(err)))) serverSocket=\(serverSocket)"
-                print(msg)
+                Self.logger.fault("\(msg, privacy: .public)")
                 fatalError(msg)
             }
 
@@ -186,21 +188,22 @@ final class PortForwardListener: @unchecked Sendable {
 
     /// Handle a single forwarded connection
     private func handleConnection(_ tcpFd: Int32) async {
+        let connectionID = UUID().uuidString
         connectionLock.lock()
         activeConnections += 1
         let connCount = activeConnections
         connectionLock.unlock()
 
-        print("[PortForwardListener] [1] New connection on port \(hostPort) -> guest:\(guestPort) (active=\(connCount))")
+        Self.logger.debug("New connection id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) active=\(connCount) tcpFd=\(tcpFd)")
 
         defer {
-            print("[PortForwardListener] [DEFER] Closing tcpFd=\(tcpFd)")
+            Self.logger.debug("Closing tcp fd for id=\(connectionID, privacy: .public): tcpFd=\(tcpFd)")
             close(tcpFd)
             connectionLock.lock()
             activeConnections -= 1
             let remaining = activeConnections
             connectionLock.unlock()
-            print("[PortForwardListener] [DEFER-DONE] Connection closed for port \(hostPort) (active=\(remaining))")
+            Self.logger.debug("Connection closed id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) active=\(remaining)")
         }
 
         let connector = AsyncVsockConnector(
@@ -210,90 +213,162 @@ final class PortForwardListener: @unchecked Sendable {
             timeoutSeconds: 5
         )
 
-        print("[PortForwardListener] [3] Connecting to guest TunnelServer...")
+        Self.logger.debug("Connecting to guest tunnel server id=\(connectionID, privacy: .public) tunnelPort=\(self.tunnelServerPort)")
         let conn: VZVirtioSocketConnection
         do {
             conn = try await connector.connect()
         } catch {
-            let msg = "[PortForwardListener] Failed to connect to guest TunnelServer: \(describe(error: error))"
-            print(msg)
-            reportOperationalError(phase: .connectToGuest, message: describe(error: error))
+            reportOperationalError(
+                phase: .connectToGuest,
+                message: describe(error: error),
+                error: error,
+                connectionID: connectionID
+            )
             return
         }
 
-        print("[PortForwardListener] [13] Getting fileDescriptor")
         let vsockFd = conn.fileDescriptor
-        print("[PortForwardListener] [14] Connected to guest vsock, fd=\(vsockFd)")
+        Self.logger.info("Connected to guest vsock id=\(connectionID, privacy: .public) vsockFd=\(vsockFd)")
 
         let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: false)
         let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: false)
 
         // Send CONNECT command
-        print("[PortForwardListener] [16] Sending CONNECT command")
+        Self.logger.debug("Sending CONNECT command id=\(connectionID, privacy: .public) guestPort=\(self.guestPort)")
         do {
             try await vsockIO.writeAll(Data("CONNECT \(guestPort)\r\n".utf8))
-            print("[PortForwardListener] [17] CONNECT write completed")
+            Self.logger.debug("CONNECT command write completed id=\(connectionID, privacy: .public)")
         } catch {
-            reportOperationalError(phase: .handshakeWrite, message: describe(error: error))
+            reportOperationalError(
+                phase: .handshakeWrite,
+                message: describe(error: error),
+                error: error,
+                connectionID: connectionID
+            )
             return
         }
 
-        print("[PortForwardListener] [20] Reading response")
         let responseData: Data
         do {
             responseData = try await readConnectResponse(vsockIO)
-            print("[PortForwardListener] [21] Read returned \(responseData.count)")
+            Self.logger.debug("CONNECT response bytes read id=\(connectionID, privacy: .public) bytes=\(responseData.count)")
         } catch let error as ConnectReadError {
             switch error {
             case .timeout:
-                reportOperationalError(phase: .handshakeRead, message: "Timeout waiting for CONNECT response")
+                reportOperationalError(
+                    phase: .handshakeRead,
+                    message: "Timeout waiting for CONNECT response",
+                    error: error,
+                    connectionID: connectionID
+                )
                 return
             case .eof:
-                reportOperationalError(phase: .handshakeRead, message: "Failed to read CONNECT response: bytesRead=0 EOF")
+                reportOperationalError(
+                    phase: .handshakeRead,
+                    message: "Failed to read CONNECT response: bytesRead=0 EOF",
+                    error: error,
+                    connectionID: connectionID
+                )
                 return
             case .transport(let ioError):
-                reportOperationalError(phase: .handshakeRead, message: describe(error: ioError))
+                reportOperationalError(
+                    phase: .handshakeRead,
+                    message: describe(error: ioError),
+                    error: ioError,
+                    connectionID: connectionID
+                )
                 return
             }
         } catch {
-            reportOperationalError(phase: .handshakeRead, message: describe(error: error))
+            reportOperationalError(
+                phase: .handshakeRead,
+                message: describe(error: error),
+                error: error,
+                connectionID: connectionID
+            )
             return
         }
 
-        print("[PortForwardListener] [22] Decoding response")
         guard let response = String(data: responseData, encoding: .utf8) else {
-            reportOperationalError(phase: .handshakeProtocol, message: "Invalid CONNECT response encoding")
+            reportOperationalError(
+                phase: .handshakeProtocol,
+                message: "Invalid CONNECT response encoding",
+                connectionID: connectionID
+            )
             return
         }
 
         let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[PortForwardListener] [23] Response: '\(trimmed)'")
+        Self.logger.debug("CONNECT response id=\(connectionID, privacy: .public): \(trimmed, privacy: .public)")
 
         if trimmed != "OK" {
-            reportOperationalError(phase: .handshakeProtocol, message: "Guest refused connection: '\(trimmed)'")
+            reportOperationalError(
+                phase: .handshakeProtocol,
+                message: "Guest refused connection: '\(trimmed)'",
+                connectionID: connectionID
+            )
             return
         }
 
-        // Bridge the connections
-        print("[PortForwardListener] [24] Starting bridge")
-        await bridgeConnections(tcpIO: tcpIO, vsockIO: vsockIO, connection: conn)
-        print("[PortForwardListener] [25] Bridge returned")
+        Self.logger.info("Starting bridge id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort)")
+        await bridgeConnections(tcpIO: tcpIO, vsockIO: vsockIO, connection: conn, connectionID: connectionID)
+        Self.logger.debug("Bridge returned id=\(connectionID, privacy: .public)")
     }
 
     /// Bridge TCP and vsock connections using async nonblocking I/O
-    private func bridgeConnections(tcpIO: AsyncVSockIO, vsockIO: AsyncVSockIO, connection: VZVirtioSocketConnection) async {
+    private func bridgeConnections(
+        tcpIO: AsyncVSockIO,
+        vsockIO: AsyncVSockIO,
+        connection: VZVirtioSocketConnection,
+        connectionID: String
+    ) async {
         let startTime = DispatchTime.now()
 
         defer {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000
-            print("[PortForwardListener] BRIDGE CLOSED: elapsed=\(String(format: "%.2f", elapsed))s")
+            Self.logger.info("Bridge closed id=\(connectionID, privacy: .public) elapsed=\(String(format: "%.2f", elapsed), privacy: .public)s")
             connection.close()
         }
 
         do {
             try await pipeBidirectional(tcpIO, vsockIO)
         } catch {
-            reportOperationalError(phase: .bridge, message: describe(error: error))
+            if isOperationalBridgeError(error) {
+                reportOperationalError(
+                    phase: .bridge,
+                    message: describe(error: error),
+                    error: error,
+                    connectionID: connectionID
+                )
+                return
+            }
+
+            let described = describe(error: error)
+            Self.logger.fault("Unexpected bridge error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort): \(described, privacy: .public)")
+            fatalError("[PortForwardListener] Bridge failed unexpectedly: \(described)")
+        }
+    }
+
+    private func isOperationalBridgeError(_ error: Error) -> Bool {
+        guard let ioError = error as? AsyncVSockIOError else {
+            return false
+        }
+        switch ioError {
+        case .closed, .cancelled:
+            return true
+        case .syscall(_, let err):
+            return isDisconnectErrno(err)
+        default:
+            return false
+        }
+    }
+
+    private func isDisconnectErrno(_ err: Int32) -> Bool {
+        switch err {
+        case ECONNRESET, EPIPE, ENOTCONN, ESHUTDOWN, ECONNABORTED, ETIMEDOUT:
+            return true
+        default:
+            return false
         }
     }
 
@@ -351,14 +426,38 @@ final class PortForwardListener: @unchecked Sendable {
         return String(describing: error)
     }
 
-    private func reportOperationalError(phase: PortForwardRuntimeError.Phase, message: String) {
+    private func reportOperationalError(
+        phase: PortForwardRuntimeError.Phase,
+        message: String,
+        error: Error? = nil,
+        connectionID: String
+    ) {
         let runtimeError = PortForwardRuntimeError(
             hostPort: hostPort,
             guestPort: guestPort,
             phase: phase,
             message: message
         )
-        print("[PortForwardListener] Runtime error: phase=\(phase.rawValue) message=\(message)")
+        let errnoValue: Int32?
+        if let ioError = error as? AsyncVSockIOError, case .syscall(_, let err) = ioError {
+            errnoValue = err
+        } else {
+            errnoValue = nil
+        }
+        let useWarningLevel = phase == .bridge && (error.map(isOperationalBridgeError) ?? false)
+        if let err = errnoValue {
+            if useWarningLevel {
+                Self.logger.warning("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public) errno=\(err): \(message, privacy: .public)")
+            } else {
+                Self.logger.error("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public) errno=\(err): \(message, privacy: .public)")
+            }
+        } else {
+            if useWarningLevel {
+                Self.logger.warning("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public): \(message, privacy: .public)")
+            } else {
+                Self.logger.error("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public): \(message, privacy: .public)")
+            }
+        }
         onOperationalError(runtimeError)
     }
 }

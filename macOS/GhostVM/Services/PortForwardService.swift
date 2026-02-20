@@ -1,6 +1,7 @@
 import Foundation
 import Virtualization
 import GhostVMKit
+import os
 
 public struct PortForwardRuntimeError: Equatable, Sendable {
     public enum Phase: String, Equatable, Sendable {
@@ -32,6 +33,7 @@ public struct PortForwardRuntimeError: Equatable, Sendable {
 /// the VM's port forward configuration.
 @MainActor
 public final class PortForwardService: ObservableObject {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghostvm", category: "PortForwardService")
     private let virtualMachine: VZVirtualMachine
     private let vmQueue: DispatchQueue
 
@@ -51,7 +53,7 @@ public final class PortForwardService: ObservableObject {
 
     /// Start all enabled port forwards from the configuration
     public func start(forwards: [PortForwardConfig]) {
-        print("[PortForwardService] Starting \(forwards.count) port forward(s)")
+        Self.logger.info("Starting \(forwards.count) port forward(s)")
 
         for config in forwards {
             guard config.enabled else { continue }
@@ -59,7 +61,7 @@ public final class PortForwardService: ObservableObject {
             do {
                 try addForward(config)
             } catch {
-                print("[PortForwardService] Failed to start forward \(config.hostPort) -> \(config.guestPort): \(error)")
+                Self.logger.error("Failed to start forward hostPort=\(config.hostPort) guestPort=\(config.guestPort): \(error.localizedDescription)")
                 recordRuntimeError(
                     PortForwardRuntimeError(
                         hostPort: config.hostPort,
@@ -74,7 +76,7 @@ public final class PortForwardService: ObservableObject {
 
     /// Stop all port forwards
     public func stop() {
-        print("[PortForwardService] Stopping all port forwards")
+        Self.logger.info("Stopping all port forwards")
 
         for (_, listener) in listeners {
             listener.stop()
@@ -91,7 +93,7 @@ public final class PortForwardService: ObservableObject {
 
         // Check if already listening on this host port
         if listeners[config.hostPort] != nil {
-            print("[PortForwardService] Port \(config.hostPort) already in use")
+            Self.logger.warning("Port already in use hostPort=\(config.hostPort)")
             return
         }
 
@@ -111,7 +113,7 @@ public final class PortForwardService: ObservableObject {
         listeners[config.hostPort] = listener
 
         activeForwards.append(config)
-        print("[PortForwardService] Added forward: localhost:\(config.hostPort) -> guest:\(config.guestPort)")
+        Self.logger.info("Added forward hostPort=\(config.hostPort) guestPort=\(config.guestPort)")
     }
 
     /// Remove a port forward by host port
@@ -119,7 +121,7 @@ public final class PortForwardService: ObservableObject {
         if let listener = listeners.removeValue(forKey: hostPort) {
             listener.stop()
             activeForwards.removeAll { $0.hostPort == hostPort }
-            print("[PortForwardService] Removed forward on port \(hostPort)")
+            Self.logger.info("Removed forward hostPort=\(hostPort)")
         }
     }
 
@@ -139,7 +141,7 @@ public final class PortForwardService: ObservableObject {
             do {
                 try addForward(config)
             } catch {
-                print("[PortForwardService] Failed to add forward \(config.hostPort): \(error)")
+                Self.logger.error("Failed to add forward hostPort=\(config.hostPort) guestPort=\(config.guestPort): \(error.localizedDescription)")
                 recordRuntimeError(
                     PortForwardRuntimeError(
                         hostPort: config.hostPort,
@@ -157,6 +159,7 @@ public final class PortForwardService: ObservableObject {
     }
 
     private func recordRuntimeError(_ runtimeError: PortForwardRuntimeError) {
+        Self.logger.error("Runtime forwarding error hostPort=\(runtimeError.hostPort) guestPort=\(runtimeError.guestPort) phase=\(runtimeError.phase.rawValue): \(runtimeError.message)")
         lastRuntimeError = runtimeError
     }
 }

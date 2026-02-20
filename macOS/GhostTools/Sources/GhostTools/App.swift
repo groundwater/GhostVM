@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import UserNotifications
 import CoreServices
+import os
 
 /// GhostTools version - reads from Info.plist; falls back to "dev" when running bare binary
 let kGhostToolsVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
@@ -39,11 +40,13 @@ struct GhostToolsApp: App {
 /// App delegate handles menu bar setup and server lifecycle
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "App")
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
     private var tunnelServer: TunnelServer?
     private var healthServer: HealthServer?
     private var isServerRunning = false
+    private var lastTunnelError: String?
     private var isFilePickerOpen = false
     private var lockFileHandle: FileHandle?
     // Use bundle ID from Info.plist, fallback to hardcoded for compatibility
@@ -733,6 +736,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.isEnabled = false
         menu.addItem(statusItem)
 
+        if let tunnelError = lastTunnelError {
+            let tunnelErrorItem = NSMenuItem(title: "Tunnel: Error - \(tunnelError)", action: nil, keyEquivalent: "")
+            tunnelErrorItem.isEnabled = false
+            menu.addItem(tunnelErrorItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         // Auto Start toggle
@@ -905,15 +914,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startTunnelServer() {
-        print("[GhostTools] startTunnelServer() called")
+        Self.logger.info("startTunnelServer() called")
         Task {
             do {
                 tunnelServer = TunnelServer()
-                print("[GhostTools] Starting tunnel server on vsock port 5001...")
+                tunnelServer?.onOperationalError = { [weak self] runtimeError in
+                    Task { @MainActor in
+                        self?.lastTunnelError = runtimeError.message
+                        self?.updateMenu()
+                    }
+                    Self.logger.error("Tunnel operational error phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(runtimeError.targetPort ?? 0): \(runtimeError.message, privacy: .public)")
+                }
+                tunnelServer?.onConnectionSuccess = { [weak self] in
+                    Task { @MainActor in
+                        self?.lastTunnelError = nil
+                        self?.updateMenu()
+                    }
+                }
+                Self.logger.info("Starting tunnel server on vsock port 5001...")
                 try await tunnelServer?.start()
-                print("[GhostTools] Tunnel server started successfully")
+                Self.logger.info("Tunnel server started successfully")
             } catch {
-                print("[GhostTools] Failed to start tunnel server: \(error)")
+                Self.logger.error("Failed to start tunnel server: \(error.localizedDescription)")
             }
         }
     }
@@ -955,4 +977,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ForegroundAppService.shared.start()
     }
 }
-
