@@ -21,10 +21,17 @@ enum AsyncVsockConnectorError: Error, LocalizedError {
 private final class ConnectContinuationBox {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<VZVirtioSocketConnection, Error>?
+    private var timeoutTask: Task<Void, Never>?
     private var isDone = false
 
     init(_ continuation: CheckedContinuation<VZVirtioSocketConnection, Error>) {
         self.continuation = continuation
+    }
+
+    func setTimeoutTask(_ timeoutTask: Task<Void, Never>) {
+        lock.lock()
+        self.timeoutTask = timeoutTask
+        lock.unlock()
     }
 
     func resume(with result: Result<VZVirtioSocketConnection, Error>) {
@@ -35,9 +42,12 @@ private final class ConnectContinuationBox {
         }
         isDone = true
         let cont = continuation
+        let timerTask = timeoutTask
         continuation = nil
+        timeoutTask = nil
         lock.unlock()
 
+        timerTask?.cancel()
         cont?.resume(with: result)
     }
 }
@@ -101,12 +111,16 @@ public final class AsyncVsockConnector {
                 let box = ConnectContinuationBox(continuation)
                 holder.set(box)
                 let timeoutTask = Task {
-                    try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+                    do {
+                        try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                    } catch {
+                        return
+                    }
                     box.resume(with: .failure(AsyncVsockConnectorError.timeout(seconds: timeoutSeconds)))
                 }
+                box.setTimeoutTask(timeoutTask)
 
                 connectOperation { result in
-                    timeoutTask.cancel()
                     box.resume(with: result)
                 }
             }

@@ -106,7 +106,7 @@ public final class AsyncVSockIO {
     }
 
     public func read(maxBytes: Int) async throws -> Data? {
-        guard maxBytes > 0 else { return Data() }
+        precondition(maxBytes > 0, "read(maxBytes:) requires maxBytes > 0")
 
         while true {
             if Task.isCancelled { throw AsyncVSockIOError.cancelled }
@@ -135,7 +135,7 @@ public final class AsyncVSockIO {
     }
 
     public func readExactly(_ count: Int) async throws -> Data {
-        guard count >= 0 else { return Data() }
+        precondition(count >= 0, "readExactly(_:) requires non-negative count")
         if count == 0 { return Data() }
 
         var result = Data()

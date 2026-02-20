@@ -1725,6 +1725,21 @@ struct PortForwardEditorView: View {
                     session.removePortForward(hostPort: hostPort)
                 }
             )
+
+            if let runtimeError = portForwardService.lastRuntimeError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(
+                        "Forward localhost:\(runtimeError.hostPort) -> guest:\(runtimeError.guestPort) failed (\(runtimeError.phase.rawValue)): \(runtimeError.message)"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.red)
+
+                    Button("Dismiss") {
+                        portForwardService.clearRuntimeError()
+                    }
+                    .font(.caption)
+                }
+            }
         }
         .padding()
         .frame(width: 300)
@@ -2583,5 +2598,4 @@ struct FileTransferProgressView: View {
         .frame(maxWidth: 300)
     }
 }
-
 

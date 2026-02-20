@@ -38,6 +38,7 @@ final class PortForwardListener: @unchecked Sendable {
     private let guestPort: UInt16
     private let vmQueue: DispatchQueue
     private let virtualMachine: VZVirtualMachine
+    private let onOperationalError: @Sendable (PortForwardRuntimeError) -> Void
 
     private var serverSocket: Int32 = -1
     private var acceptSource: DispatchSourceRead?
@@ -48,11 +49,18 @@ final class PortForwardListener: @unchecked Sendable {
     /// The vsock port where TunnelServer listens in the guest
     private let tunnelServerPort: UInt32 = 5001
 
-    init(hostPort: UInt16, guestPort: UInt16, vm: VZVirtualMachine, queue: DispatchQueue) {
+    init(
+        hostPort: UInt16,
+        guestPort: UInt16,
+        vm: VZVirtualMachine,
+        queue: DispatchQueue,
+        onOperationalError: @escaping @Sendable (PortForwardRuntimeError) -> Void
+    ) {
         self.hostPort = hostPort
         self.guestPort = guestPort
         self.virtualMachine = vm
         self.vmQueue = queue
+        self.onOperationalError = onOperationalError
     }
 
     deinit {
@@ -102,7 +110,7 @@ final class PortForwardListener: @unchecked Sendable {
         }
 
         // Set non-blocking for the server socket
-        var flags = fcntl(serverSocket, F_GETFL, 0)
+        let flags = fcntl(serverSocket, F_GETFL, 0)
         _ = fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK)
 
         // Create DispatchSource for accept
@@ -209,7 +217,8 @@ final class PortForwardListener: @unchecked Sendable {
         } catch {
             let msg = "[PortForwardListener] Failed to connect to guest TunnelServer: \(describe(error: error))"
             print(msg)
-            fatalError(msg)
+            reportOperationalError(phase: .connectToGuest, message: describe(error: error))
+            return
         }
 
         print("[PortForwardListener] [13] Getting fileDescriptor")
@@ -225,9 +234,8 @@ final class PortForwardListener: @unchecked Sendable {
             try await vsockIO.writeAll(Data("CONNECT \(guestPort)\r\n".utf8))
             print("[PortForwardListener] [17] CONNECT write completed")
         } catch {
-            let msg = "[PortForwardListener] Failed to send CONNECT command: \(describe(error: error))"
-            print(msg)
-            fatalError(msg)
+            reportOperationalError(phase: .handshakeWrite, message: describe(error: error))
+            return
         }
 
         print("[PortForwardListener] [20] Reading response")
@@ -238,26 +246,32 @@ final class PortForwardListener: @unchecked Sendable {
         } catch let error as ConnectReadError {
             switch error {
             case .timeout:
-                fatalError("[PortForwardListener] Timeout waiting for CONNECT response")
+                reportOperationalError(phase: .handshakeRead, message: "Timeout waiting for CONNECT response")
+                return
             case .eof:
-                fatalError("[PortForwardListener] Failed to read CONNECT response: bytesRead=0 EOF")
+                reportOperationalError(phase: .handshakeRead, message: "Failed to read CONNECT response: bytesRead=0 EOF")
+                return
             case .transport(let ioError):
-                fatalError("[PortForwardListener] Failed to read CONNECT response: \(describe(error: ioError))")
+                reportOperationalError(phase: .handshakeRead, message: describe(error: ioError))
+                return
             }
         } catch {
-            fatalError("[PortForwardListener] Failed to read CONNECT response: \(describe(error: error))")
+            reportOperationalError(phase: .handshakeRead, message: describe(error: error))
+            return
         }
 
         print("[PortForwardListener] [22] Decoding response")
         guard let response = String(data: responseData, encoding: .utf8) else {
-            fatalError("[PortForwardListener] Invalid CONNECT response encoding")
+            reportOperationalError(phase: .handshakeProtocol, message: "Invalid CONNECT response encoding")
+            return
         }
 
         let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
         print("[PortForwardListener] [23] Response: '\(trimmed)'")
 
         if trimmed != "OK" {
-            fatalError("[PortForwardListener] Guest refused connection: '\(trimmed)'")
+            reportOperationalError(phase: .handshakeProtocol, message: "Guest refused connection: '\(trimmed)'")
+            return
         }
 
         // Bridge the connections
@@ -279,46 +293,8 @@ final class PortForwardListener: @unchecked Sendable {
         do {
             try await pipeBidirectional(tcpIO, vsockIO)
         } catch {
-            if isExpectedBridgeError(error) {
-                print("[PortForwardListener] Bridge closed: \(describe(error: error))")
-            } else {
-                // CRASH with full details
-                let msg = "[PortForwardListener] Bridge failed unexpectedly: \(describe(error: error))"
-                print(msg)
-                fatalError(msg)
-            }
+            reportOperationalError(phase: .bridge, message: describe(error: error))
         }
-    }
-
-    /// Error codes that indicate peer disconnected (not a bug)
-    private func isPeerDisconnected(_ err: Int32) -> Bool {
-        switch err {
-        case ECONNRESET,  // Connection reset by peer
-             EPIPE,       // Broken pipe
-             ENOTCONN,    // Socket not connected
-             ESHUTDOWN,   // Can't send after socket shutdown
-             ECONNABORTED, // Connection aborted
-             EHOSTUNREACH, // Host unreachable
-             ENETUNREACH,  // Network unreachable
-             ETIMEDOUT:    // Connection timed out
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func isExpectedBridgeError(_ error: Error) -> Bool {
-        if let ioError = error as? AsyncVSockIOError {
-            switch ioError {
-            case .closed, .cancelled:
-                return true
-            case .syscall(_, let err):
-                return isPeerDisconnected(err)
-            default:
-                return false
-            }
-        }
-        return false
     }
 
     private enum ConnectReadError: Error {
@@ -373,5 +349,16 @@ final class PortForwardListener: @unchecked Sendable {
             }
         }
         return String(describing: error)
+    }
+
+    private func reportOperationalError(phase: PortForwardRuntimeError.Phase, message: String) {
+        let runtimeError = PortForwardRuntimeError(
+            hostPort: hostPort,
+            guestPort: guestPort,
+            phase: phase,
+            message: message
+        )
+        print("[PortForwardListener] Runtime error: phase=\(phase.rawValue) message=\(message)")
+        onOperationalError(runtimeError)
     }
 }

@@ -2,6 +2,30 @@ import Foundation
 import Virtualization
 import GhostVMKit
 
+public struct PortForwardRuntimeError: Equatable, Sendable {
+    public enum Phase: String, Equatable, Sendable {
+        case connectToGuest
+        case handshakeWrite
+        case handshakeRead
+        case handshakeProtocol
+        case bridge
+    }
+
+    public let hostPort: UInt16
+    public let guestPort: UInt16
+    public let phase: Phase
+    public let message: String
+    public let timestamp: Date
+
+    public init(hostPort: UInt16, guestPort: UInt16, phase: Phase, message: String, timestamp: Date = Date()) {
+        self.hostPort = hostPort
+        self.guestPort = guestPort
+        self.phase = phase
+        self.message = message
+        self.timestamp = timestamp
+    }
+}
+
 /// Manages all active port forwards for a VM.
 ///
 /// This service creates and manages PortForwardListener instances based on
@@ -14,6 +38,7 @@ public final class PortForwardService: ObservableObject {
     private var listeners: [UInt16: PortForwardListener] = [:]
 
     @Published public private(set) var activeForwards: [PortForwardConfig] = []
+    @Published public private(set) var lastRuntimeError: PortForwardRuntimeError?
 
     public init(vm: VZVirtualMachine, queue: DispatchQueue) {
         self.virtualMachine = vm
@@ -35,6 +60,14 @@ public final class PortForwardService: ObservableObject {
                 try addForward(config)
             } catch {
                 print("[PortForwardService] Failed to start forward \(config.hostPort) -> \(config.guestPort): \(error)")
+                recordRuntimeError(
+                    PortForwardRuntimeError(
+                        hostPort: config.hostPort,
+                        guestPort: config.guestPort,
+                        phase: .connectToGuest,
+                        message: error.localizedDescription
+                    )
+                )
             }
         }
     }
@@ -49,6 +82,7 @@ public final class PortForwardService: ObservableObject {
         listeners.removeAll()
 
         activeForwards.removeAll()
+        lastRuntimeError = nil
     }
 
     /// Add a new port forward
@@ -65,7 +99,12 @@ public final class PortForwardService: ObservableObject {
             hostPort: config.hostPort,
             guestPort: config.guestPort,
             vm: virtualMachine,
-            queue: vmQueue
+            queue: vmQueue,
+            onOperationalError: { [weak self] runtimeError in
+                Task { @MainActor in
+                    self?.recordRuntimeError(runtimeError)
+                }
+            }
         )
 
         try listener.start()
@@ -101,7 +140,23 @@ public final class PortForwardService: ObservableObject {
                 try addForward(config)
             } catch {
                 print("[PortForwardService] Failed to add forward \(config.hostPort): \(error)")
+                recordRuntimeError(
+                    PortForwardRuntimeError(
+                        hostPort: config.hostPort,
+                        guestPort: config.guestPort,
+                        phase: .connectToGuest,
+                        message: error.localizedDescription
+                    )
+                )
             }
         }
+    }
+
+    public func clearRuntimeError() {
+        lastRuntimeError = nil
+    }
+
+    private func recordRuntimeError(_ runtimeError: PortForwardRuntimeError) {
+        lastRuntimeError = runtimeError
     }
 }

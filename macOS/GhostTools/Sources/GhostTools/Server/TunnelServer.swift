@@ -158,11 +158,7 @@ final class TunnelServer: @unchecked Sendable {
         do {
             try await pipeBidirectional(vsockIO, tcpIO)
         } catch {
-            if isExpectedBridgeError(error) {
-                print("[TunnelServer] Bridge closed: \(describe(error: error))")
-            } else {
-                fatalError("[TunnelServer] Bridge failed unexpectedly: \(describe(error: error))")
-            }
+            fatalError("[TunnelServer] Bridge failed: \(describe(error: error))")
         }
     }
 
@@ -231,37 +227,6 @@ final class TunnelServer: @unchecked Sendable {
 
         close(fd)
         return nil
-    }
-
-    /// Error codes that indicate peer disconnected (not a bug)
-    private func isPeerDisconnected(_ err: Int32) -> Bool {
-        switch err {
-        case ECONNRESET,  // Connection reset by peer
-             EPIPE,       // Broken pipe
-             ENOTCONN,    // Socket not connected
-             ESHUTDOWN,   // Can't send after socket shutdown
-             ECONNABORTED, // Connection aborted
-             EHOSTUNREACH, // Host unreachable
-             ENETUNREACH,  // Network unreachable
-             ETIMEDOUT:    // Connection timed out
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func isExpectedBridgeError(_ error: Error) -> Bool {
-        if let ioError = error as? AsyncVSockIOError {
-            switch ioError {
-            case .closed, .cancelled:
-                return true
-            case .syscall(_, let err):
-                return isPeerDisconnected(err)
-            default:
-                return false
-            }
-        }
-        return false
     }
 
     /// Send an error response
