@@ -1,5 +1,7 @@
 import Foundation
+import GhostVMKit
 import Virtualization
+import os
 
 /// Errors that can occur in port forwarding
 enum PortForwardError: Error, LocalizedError {
@@ -33,10 +35,12 @@ enum PortForwardError: Error, LocalizedError {
 /// 3. Wait for "OK\r\n"
 /// 4. Bridge TCP <-> vsock bidirectionally
 final class PortForwardListener: @unchecked Sendable {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghostvm", category: "PortForwardListener")
     private let hostPort: UInt16
     private let guestPort: UInt16
     private let vmQueue: DispatchQueue
     private let virtualMachine: VZVirtualMachine
+    private let onOperationalError: @Sendable (PortForwardRuntimeError) -> Void
 
     private var serverSocket: Int32 = -1
     private var acceptSource: DispatchSourceRead?
@@ -47,11 +51,18 @@ final class PortForwardListener: @unchecked Sendable {
     /// The vsock port where TunnelServer listens in the guest
     private let tunnelServerPort: UInt32 = 5001
 
-    init(hostPort: UInt16, guestPort: UInt16, vm: VZVirtualMachine, queue: DispatchQueue) {
+    init(
+        hostPort: UInt16,
+        guestPort: UInt16,
+        vm: VZVirtualMachine,
+        queue: DispatchQueue,
+        onOperationalError: @escaping @Sendable (PortForwardRuntimeError) -> Void
+    ) {
         self.hostPort = hostPort
         self.guestPort = guestPort
         self.virtualMachine = vm
         self.vmQueue = queue
+        self.onOperationalError = onOperationalError
     }
 
     deinit {
@@ -101,7 +112,7 @@ final class PortForwardListener: @unchecked Sendable {
         }
 
         // Set non-blocking for the server socket
-        var flags = fcntl(serverSocket, F_GETFL, 0)
+        let flags = fcntl(serverSocket, F_GETFL, 0)
         _ = fcntl(serverSocket, F_SETFL, flags | O_NONBLOCK)
 
         // Create DispatchSource for accept
@@ -119,7 +130,7 @@ final class PortForwardListener: @unchecked Sendable {
         isRunning = true
         acceptSource?.resume()
 
-        print("[PortForwardListener] Listening on localhost:\(hostPort) -> guest:\(guestPort)")
+        Self.logger.info("Listening on localhost hostPort=\(self.hostPort) guestPort=\(self.guestPort)")
     }
 
     /// Stop listening and close all connections
@@ -135,7 +146,7 @@ final class PortForwardListener: @unchecked Sendable {
             serverSocket = -1
         }
 
-        print("[PortForwardListener] Stopped forwarding localhost:\(hostPort)")
+        Self.logger.info("Stopped forwarding hostPort=\(self.hostPort)")
     }
 
     /// Accept all pending connections (called from DispatchSource)
@@ -159,288 +170,304 @@ final class PortForwardListener: @unchecked Sendable {
                 if err == EINTR {
                     continue
                 }
-                // CRASH with full details
-                let msg = "[PortForwardListener] accept() FAILED: errno=\(err) (\(String(cString: strerror(err)))) serverSocket=\(serverSocket)"
-                print(msg)
-                fatalError(msg)
+                // stop() closes the server socket and can race accept.
+                if !isRunning || err == EBADF || err == EINVAL {
+                    Self.logger.info("Accept loop exiting hostPort=\(self.hostPort) serverSocket=\(self.serverSocket) errno=\(err)")
+                    return
+                }
+
+                reportOperationalError(
+                    phase: .bridge,
+                    message: "accept() failed: errno=\(err) (\(String(cString: strerror(err))))",
+                    error: AsyncVSockIOError.syscall(op: "accept", errno: err),
+                    connectionID: "accept-loop"
+                )
+                usleep(100_000)
+                continue
             }
 
             // Set TCP_NODELAY on accepted socket
             var optval: Int32 = 1
             setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, &optval, socklen_t(MemoryLayout<Int32>.size))
 
-            // Handle connection on a background GCD queue (not Swift concurrency)
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.handleConnection(clientSocket)
+            Task { [weak self] in
+                await self?.handleConnection(clientSocket)
             }
         }
     }
 
     /// Handle a single forwarded connection
-    private func handleConnection(_ tcpFd: Int32) {
+    private func handleConnection(_ tcpFd: Int32) async {
+        let connectionID = UUID().uuidString
         connectionLock.lock()
         activeConnections += 1
         let connCount = activeConnections
         connectionLock.unlock()
 
-        print("[PortForwardListener] [1] New connection on port \(hostPort) -> guest:\(guestPort) (active=\(connCount))")
+        Self.logger.debug("New connection id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) active=\(connCount) tcpFd=\(tcpFd)")
 
         defer {
-            print("[PortForwardListener] [DEFER] Closing tcpFd=\(tcpFd)")
+            Self.logger.debug("Closing tcp fd for id=\(connectionID, privacy: .public): tcpFd=\(tcpFd)")
             close(tcpFd)
             connectionLock.lock()
             activeConnections -= 1
             let remaining = activeConnections
             connectionLock.unlock()
-            print("[PortForwardListener] [DEFER-DONE] Connection closed for port \(hostPort) (active=\(remaining))")
+            Self.logger.debug("Connection closed id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) active=\(remaining)")
         }
 
-        // Set TCP socket to non-blocking
-        print("[PortForwardListener] [2] Setting TCP non-blocking")
-        var flags = fcntl(tcpFd, F_GETFL, 0)
-        _ = fcntl(tcpFd, F_SETFL, flags | O_NONBLOCK)
+        let connector = AsyncVsockConnector(
+            vm: virtualMachine,
+            vmQueue: vmQueue,
+            port: tunnelServerPort,
+            timeoutSeconds: 5
+        )
 
-        // Connect to guest TunnelServer via vsock
-        print("[PortForwardListener] [3] Creating semaphore")
-        let semaphore = DispatchSemaphore(value: 0)
-        var connection: VZVirtioSocketConnection?
-        var connectError: Error?
-
-        print("[PortForwardListener] [4] Capturing VM reference")
-        let vm = self.virtualMachine
-        let port = self.tunnelServerPort
-
-        print("[PortForwardListener] [5] Dispatching to vmQueue for vsock connect to port \(port)...")
-
-        vmQueue.async {
-            print("[PortForwardListener] [6-vmQueue] Getting socket device")
-            guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-                print("[PortForwardListener] [6-vmQueue] NO SOCKET DEVICE!")
-                connectError = PortForwardError.connectFailed("No socket device - VM may not have vsock configured")
-                semaphore.signal()
-                return
-            }
-            print("[PortForwardListener] [7-vmQueue] Calling socketDevice.connect()")
-            socketDevice.connect(toPort: port) { result in
-                print("[PortForwardListener] [8-callback] Connect callback received")
-                switch result {
-                case .success(let conn):
-                    print("[PortForwardListener] [8-callback] Success, fd=\(conn.fileDescriptor)")
-                    connection = conn
-                case .failure(let error):
-                    print("[PortForwardListener] [8-callback] Failure: \(error)")
-                    connectError = error
-                }
-                semaphore.signal()
-            }
-            print("[PortForwardListener] [7-vmQueue] connect() returned, waiting for callback")
+        Self.logger.debug("Connecting to guest tunnel server id=\(connectionID, privacy: .public) tunnelPort=\(self.tunnelServerPort)")
+        let conn: VZVirtioSocketConnection
+        do {
+            conn = try await connector.connect()
+        } catch {
+            reportOperationalError(
+                phase: .connectToGuest,
+                message: describe(error: error),
+                error: error,
+                connectionID: connectionID
+            )
+            return
         }
 
-        // Wait for connection with timeout
-        print("[PortForwardListener] [9] Waiting on semaphore with 5s timeout")
-        let timeout = DispatchTime.now() + .seconds(5)
-        let waitResult = semaphore.wait(timeout: timeout)
-        print("[PortForwardListener] [10] Semaphore returned: \(waitResult == .timedOut ? "TIMEOUT" : "signaled")")
-
-        if waitResult == .timedOut {
-            print("[PortForwardListener] [10-TIMEOUT] Timeout connecting to guest vsock - TunnelServer may not be running")
-            return  // TCP connection will be closed by defer
-        }
-
-        print("[PortForwardListener] [11] Checking connectError")
-        if let error = connectError {
-            print("[PortForwardListener] [11-ERROR] Failed to connect to guest: \(error)")
-            return  // TCP connection will be closed by defer
-        }
-
-        print("[PortForwardListener] [12] Unwrapping connection")
-        guard let conn = connection else {
-            print("[PortForwardListener] [12-NIL] No connection returned from vsock connect")
-            return  // TCP connection will be closed by defer
-        }
-
-        print("[PortForwardListener] [13] Getting fileDescriptor")
         let vsockFd = conn.fileDescriptor
-        print("[PortForwardListener] [14] Connected to guest vsock, fd=\(vsockFd)")
+        Self.logger.info("Connected to guest vsock id=\(connectionID, privacy: .public) vsockFd=\(vsockFd)")
 
-        // Set vsock to non-blocking
-        print("[PortForwardListener] [15] Setting vsock non-blocking")
-        flags = fcntl(vsockFd, F_GETFL, 0)
-        _ = fcntl(vsockFd, F_SETFL, flags | O_NONBLOCK)
+        let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: false)
+        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: false)
 
         // Send CONNECT command
-        print("[PortForwardListener] [16] Sending CONNECT command")
-        let connectCmd = "CONNECT \(guestPort)\r\n"
-        let cmdWritten = connectCmd.withCString { ptr in
-            Darwin.write(vsockFd, ptr, strlen(ptr))
-        }
-        print("[PortForwardListener] [17] CONNECT write returned \(cmdWritten)")
-
-        if cmdWritten < 0 {
-            let err = errno
-            print("[PortForwardListener] [17-ERROR] Failed to send CONNECT command: errno=\(err) \(String(cString: strerror(err)))")
-            conn.close()
+        Self.logger.debug("Sending CONNECT command id=\(connectionID, privacy: .public) guestPort=\(self.guestPort)")
+        do {
+            try await vsockIO.writeAll(Data("CONNECT \(guestPort)\r\n".utf8))
+            Self.logger.debug("CONNECT command write completed id=\(connectionID, privacy: .public)")
+        } catch {
+            reportOperationalError(
+                phase: .handshakeWrite,
+                message: describe(error: error),
+                error: error,
+                connectionID: connectionID
+            )
             return
         }
 
-        // Read response with poll
-        print("[PortForwardListener] [18] Polling for response")
-        var buffer = [UInt8](repeating: 0, count: 256)
-        var pfd = pollfd(fd: vsockFd, events: Int16(POLLIN), revents: 0)
-
-        let pollResult = poll(&pfd, 1, 5000) // 5 second timeout
-        print("[PortForwardListener] [19] poll() returned \(pollResult)")
-
-        if pollResult < 0 {
-            let err = errno
-            print("[PortForwardListener] [19-ERROR] poll() failed: errno=\(err) \(String(cString: strerror(err)))")
-            conn.close()
+        let responseData: Data
+        do {
+            responseData = try await readConnectResponse(vsockIO)
+            Self.logger.debug("CONNECT response bytes read id=\(connectionID, privacy: .public) bytes=\(responseData.count)")
+        } catch let error as ConnectReadError {
+            switch error {
+            case .timeout:
+                reportOperationalError(
+                    phase: .handshakeRead,
+                    message: "Timeout waiting for CONNECT response",
+                    error: error,
+                    connectionID: connectionID
+                )
+                return
+            case .eof:
+                reportOperationalError(
+                    phase: .handshakeRead,
+                    message: "Failed to read CONNECT response: bytesRead=0 EOF",
+                    error: error,
+                    connectionID: connectionID
+                )
+                return
+            case .transport(let ioError):
+                reportOperationalError(
+                    phase: .handshakeRead,
+                    message: describe(error: ioError),
+                    error: ioError,
+                    connectionID: connectionID
+                )
+                return
+            }
+        } catch {
+            reportOperationalError(
+                phase: .handshakeRead,
+                message: describe(error: error),
+                error: error,
+                connectionID: connectionID
+            )
             return
         }
-        if pollResult == 0 {
-            print("[PortForwardListener] [19-TIMEOUT] Timeout waiting for CONNECT response")
-            conn.close()
-            return
-        }
 
-        print("[PortForwardListener] [20] Reading response")
-        let bytesRead = Darwin.read(vsockFd, &buffer, buffer.count - 1)
-        print("[PortForwardListener] [21] Read returned \(bytesRead)")
-
-        if bytesRead <= 0 {
-            let err = errno
-            print("[PortForwardListener] [21-ERROR] Failed to read CONNECT response: bytesRead=\(bytesRead) errno=\(err)")
-            conn.close()
-            return
-        }
-
-        print("[PortForwardListener] [22] Decoding response")
-        guard let response = String(bytes: buffer[0..<bytesRead], encoding: .utf8) else {
-            print("[PortForwardListener] [22-ERROR] Invalid CONNECT response encoding")
-            conn.close()
+        guard let response = String(data: responseData, encoding: .utf8) else {
+            reportOperationalError(
+                phase: .handshakeProtocol,
+                message: "Invalid CONNECT response encoding",
+                connectionID: connectionID
+            )
             return
         }
 
         let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[PortForwardListener] [23] Response: '\(trimmed)'")
+        Self.logger.debug("CONNECT response id=\(connectionID, privacy: .public): \(trimmed, privacy: .public)")
 
         if trimmed != "OK" {
-            print("[PortForwardListener] [23-REFUSED] Guest refused connection: '\(trimmed)'")
-            conn.close()
+            reportOperationalError(
+                phase: .handshakeProtocol,
+                message: "Guest refused connection: '\(trimmed)'",
+                connectionID: connectionID
+            )
             return
         }
 
-        // Bridge the connections
-        print("[PortForwardListener] [24] Starting bridge")
-        bridgeConnections(tcpFd: tcpFd, vsockFd: vsockFd, connection: conn)
-        print("[PortForwardListener] [25] Bridge returned")
+        Self.logger.info("Starting bridge id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort)")
+        await bridgeConnections(tcpIO: tcpIO, vsockIO: vsockIO, connection: conn, connectionID: connectionID)
+        Self.logger.debug("Bridge returned id=\(connectionID, privacy: .public)")
     }
 
-    /// Bridge TCP and vsock connections using two threads - simplest proven approach
-    /// Each direction gets its own thread doing blocking read/write
-    private func bridgeConnections(tcpFd: Int32, vsockFd: Int32, connection: VZVirtioSocketConnection) {
+    /// Bridge TCP and vsock connections using async nonblocking I/O
+    private func bridgeConnections(
+        tcpIO: AsyncVSockIO,
+        vsockIO: AsyncVSockIO,
+        connection: VZVirtioSocketConnection,
+        connectionID: String
+    ) async {
         let startTime = DispatchTime.now()
 
         defer {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startTime.uptimeNanoseconds) / 1_000_000_000
-            print("[PortForwardListener] BRIDGE CLOSED: elapsed=\(String(format: "%.2f", elapsed))s")
+            Self.logger.info("Bridge closed id=\(connectionID, privacy: .public) elapsed=\(String(format: "%.2f", elapsed), privacy: .public)s")
             connection.close()
         }
 
-        // Keep sockets BLOCKING - simplest and most reliable
-        var flags = fcntl(tcpFd, F_GETFL, 0)
-        _ = fcntl(tcpFd, F_SETFL, flags & ~O_NONBLOCK)
+        do {
+            try await pipeBidirectional(tcpIO, vsockIO)
+        } catch {
+            if isOperationalBridgeError(error) {
+                reportOperationalError(
+                    phase: .bridge,
+                    message: describe(error: error),
+                    error: error,
+                    connectionID: connectionID
+                )
+                return
+            }
 
-        flags = fcntl(vsockFd, F_GETFL, 0)
-        _ = fcntl(vsockFd, F_SETFL, flags & ~O_NONBLOCK)
-
-        let group = DispatchGroup()
-
-        // Thread 1: TCP -> vsock (request direction)
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.copyData(from: tcpFd, to: vsockFd, label: "tcp->vsock")
-            Darwin.shutdown(vsockFd, SHUT_WR)
-            group.leave()
+            let described = describe(error: error)
+            Self.logger.fault("Unexpected bridge error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort): \(described, privacy: .public)")
+            fatalError("[PortForwardListener] Bridge failed unexpectedly: \(described)")
         }
-
-        // Thread 2: vsock -> TCP (response direction)
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.copyData(from: vsockFd, to: tcpFd, label: "vsock->tcp")
-            Darwin.shutdown(tcpFd, SHUT_WR)
-            group.leave()
-        }
-
-        // Wait for both directions to complete
-        group.wait()
     }
 
-    /// Error codes that indicate peer disconnected (not a bug)
-    private func isPeerDisconnected(_ err: Int32) -> Bool {
+    private func isOperationalBridgeError(_ error: Error) -> Bool {
+        guard let ioError = error as? AsyncVSockIOError else {
+            return false
+        }
+        switch ioError {
+        case .closed, .cancelled:
+            return true
+        case .syscall(_, let err):
+            return isDisconnectErrno(err)
+        default:
+            return false
+        }
+    }
+
+    private func isDisconnectErrno(_ err: Int32) -> Bool {
         switch err {
-        case ECONNRESET,  // Connection reset by peer
-             EPIPE,       // Broken pipe
-             ENOTCONN,    // Socket not connected
-             ESHUTDOWN,   // Can't send after socket shutdown
-             ECONNABORTED, // Connection aborted
-             EHOSTUNREACH, // Host unreachable
-             ENETUNREACH,  // Network unreachable
-             ETIMEDOUT:    // Connection timed out
+        case ECONNRESET, EPIPE, ENOTCONN, ESHUTDOWN, ECONNABORTED, ETIMEDOUT:
             return true
         default:
             return false
         }
     }
 
-    /// Simple blocking copy: read from source, write to dest, repeat until EOF
-    private func copyData(from source: Int32, to dest: Int32, label: String) {
-        var buffer = [UInt8](repeating: 0, count: 65536)
-        var totalBytes: Int = 0
+    private enum ConnectReadError: Error {
+        case timeout
+        case eof
+        case transport(AsyncVSockIOError)
+    }
 
-        while true {
-            let bytesRead = Darwin.read(source, &buffer, buffer.count)
-
-            if bytesRead == 0 {
-                print("[PortForwardListener] \(label): EOF after \(totalBytes) bytes")
-                return
-            }
-
-            if bytesRead < 0 {
-                let err = errno
-                if err == EINTR { continue }
-                if isPeerDisconnected(err) {
-                    print("[PortForwardListener] \(label): peer closed (errno=\(err)) after \(totalBytes) bytes")
-                    return
-                }
-                // CRASH with full details
-                let msg = "[PortForwardListener] \(label): UNEXPECTED read error: errno=\(err) (\(String(cString: strerror(err)))) after \(totalBytes) bytes, source=\(source), dest=\(dest)"
-                print(msg)
-                fatalError(msg)
-            }
-
-            var offset = 0
-            while offset < bytesRead {
-                let written = buffer.withUnsafeBytes { ptr in
-                    Darwin.write(dest, ptr.baseAddress! + offset, bytesRead - offset)
-                }
-
-                if written <= 0 {
-                    let err = errno
-                    if err == EINTR { continue }
-                    if isPeerDisconnected(err) {
-                        print("[PortForwardListener] \(label): peer closed during write (errno=\(err)) after \(totalBytes) bytes")
-                        return
+    private func readConnectResponse(_ io: AsyncVSockIO) async throws -> Data {
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                do {
+                    guard let data = try await io.read(maxBytes: 255), !data.isEmpty else {
+                        throw ConnectReadError.eof
                     }
-                    // CRASH with full details
-                    let msg = "[PortForwardListener] \(label): UNEXPECTED write error: errno=\(err) (\(String(cString: strerror(err)))) offset=\(offset)/\(bytesRead), totalBytes=\(totalBytes), source=\(source), dest=\(dest)"
-                    print(msg)
-                    fatalError(msg)
+                    return data
+                } catch let error as AsyncVSockIOError {
+                    throw ConnectReadError.transport(error)
                 }
-                offset += written
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                throw ConnectReadError.timeout
             }
 
-            totalBytes += bytesRead
+            do {
+                let first = try await group.next()!
+                group.cancelAll()
+                return first
+            } catch {
+                group.cancelAll()
+                throw error
+            }
         }
+    }
+
+    private func describe(error: Error) -> String {
+        if let ioError = error as? AsyncVSockIOError {
+            switch ioError {
+            case .closed:
+                return "closed"
+            case .eofBeforeExpected(let expected, let received):
+                return "eofBeforeExpected expected=\(expected) received=\(received)"
+            case .interrupted:
+                return "interrupted"
+            case .wouldBlock:
+                return "wouldBlock"
+            case .syscall(let op, let err):
+                return "syscall \(op) failed: errno=\(err) (\(String(cString: strerror(err))))"
+            case .cancelled:
+                return "cancelled"
+            }
+        }
+        return String(describing: error)
+    }
+
+    private func reportOperationalError(
+        phase: PortForwardRuntimeError.Phase,
+        message: String,
+        error: Error? = nil,
+        connectionID: String
+    ) {
+        let runtimeError = PortForwardRuntimeError(
+            hostPort: hostPort,
+            guestPort: guestPort,
+            phase: phase,
+            message: message
+        )
+        let errnoValue: Int32?
+        if let ioError = error as? AsyncVSockIOError, case .syscall(_, let err) = ioError {
+            errnoValue = err
+        } else {
+            errnoValue = nil
+        }
+        let useWarningLevel = phase == .bridge && (error.map(isOperationalBridgeError) ?? false)
+        if let err = errnoValue {
+            if useWarningLevel {
+                Self.logger.warning("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public) errno=\(err): \(message, privacy: .public)")
+            } else {
+                Self.logger.error("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public) errno=\(err): \(message, privacy: .public)")
+            }
+        } else {
+            if useWarningLevel {
+                Self.logger.warning("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public): \(message, privacy: .public)")
+            } else {
+                Self.logger.error("Operational error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort) phase=\(phase.rawValue, privacy: .public): \(message, privacy: .public)")
+            }
+        }
+        onOperationalError(runtimeError)
     }
 }

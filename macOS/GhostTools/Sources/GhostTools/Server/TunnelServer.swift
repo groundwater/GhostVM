@@ -1,4 +1,49 @@
 import Foundation
+import os
+
+struct TunnelRuntimeError: Sendable {
+    enum Phase: String, Sendable {
+        case handshakeRead
+        case handshakeProtocol
+        case connectLocal
+        case bridge
+    }
+
+    let phase: Phase
+    let message: String
+    let targetPort: UInt16?
+    let timestamp: Date
+
+    init(phase: Phase, message: String, targetPort: UInt16? = nil, timestamp: Date = Date()) {
+        self.phase = phase
+        self.message = message
+        self.targetPort = targetPort
+        self.timestamp = timestamp
+    }
+}
+
+func tunnelIsDisconnectErrno(_ err: Int32) -> Bool {
+    switch err {
+    case ECONNRESET, EPIPE, ENOTCONN, ESHUTDOWN, ECONNABORTED, ETIMEDOUT:
+        return true
+    default:
+        return false
+    }
+}
+
+func tunnelIsOperationalBridgeError(_ error: Error) -> Bool {
+    guard let ioError = error as? AsyncVSockIOError else {
+        return false
+    }
+    switch ioError {
+    case .closed, .cancelled:
+        return true
+    case .syscall(_, let err):
+        return tunnelIsDisconnectErrno(err)
+    default:
+        return false
+    }
+}
 
 /// TunnelServer listens on vsock port 5001 and handles CONNECT requests
 /// from the host to bridge TCP connections to localhost services in the guest.
@@ -7,14 +52,17 @@ import Foundation
 /// 1. Host sends: "CONNECT <port>\r\n"
 /// 2. Server connects to localhost:<port>
 /// 3. Server responds: "OK\r\n" or "ERROR <message>\r\n"
-/// 4. Bidirectional bridging via poll()
+/// 4. Bidirectional bridging via async nonblocking I/O
 final class TunnelServer: @unchecked Sendable {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "TunnelServer")
     private let port: UInt32 = 5001
     private var serverSocket: Int32 = -1
     private var isRunning = false
 
     /// Status callback for connection state changes
     var onStatusChange: ((Bool) -> Void)?
+    var onOperationalError: ((TunnelRuntimeError) -> Void)?
+    var onConnectionSuccess: (() -> Void)?
 
     init() {}
 
@@ -24,12 +72,12 @@ final class TunnelServer: @unchecked Sendable {
 
     /// Starts the tunnel server
     func start() async throws {
-        print("[TunnelServer] Creating socket on port \(port)")
+        Self.logger.info("Creating tunnel socket on port \(self.port)")
 
         // Create vsock socket
         serverSocket = socket(AF_VSOCK, SOCK_STREAM, 0)
         guard serverSocket >= 0 else {
-            print("[TunnelServer] Socket creation failed! errno=\(errno)")
+            Self.logger.fault("Socket creation failed errno=\(errno)")
             throw VsockServerError.socketCreationFailed(errno)
         }
 
@@ -59,7 +107,7 @@ final class TunnelServer: @unchecked Sendable {
         // Keep socket BLOCKING — kqueue/poll don't fire for AF_VSOCK on macOS guests
         isRunning = true
         onStatusChange?(true)
-        print("[TunnelServer] Listening on vsock port \(port)")
+        Self.logger.info("Listening on vsock port \(self.port)")
 
         // Blocking accept loop on dedicated thread
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -74,101 +122,181 @@ final class TunnelServer: @unchecked Sendable {
                 }
 
                 if clientSocket < 0 {
-                    if errno == EINTR { continue }
-                    break // socket closed by stop()
+                    let err = errno
+                    if err == EINTR { continue }
+                    if self?.isRunning != true || err == EBADF || err == EINVAL {
+                        Self.logger.info("Accept loop exiting serverSocket=\(self?.serverSocket ?? -1) errno=\(err)")
+                        break
+                    }
+                    self?.reportOperationalError(
+                        TunnelRuntimeError(
+                            phase: .bridge,
+                            message: "accept() failed: errno=\(err) \(String(cString: strerror(err)))"
+                        ),
+                        connectionID: "accept-loop",
+                        error: AsyncVSockIOError.syscall(op: "accept", errno: err)
+                    )
+                    usleep(100_000)
+                    continue
                 }
 
-                // Handle connection on a background GCD queue
-                DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                    self?.handleConnection(clientSocket)
+                Task { [weak self] in
+                    await self?.handleConnection(clientSocket)
                 }
             }
         }
     }
 
     /// Handles a single tunnel connection
-    private func handleConnection(_ vsockFd: Int32) {
-        print("[TunnelServer] New incoming connection from host, fd=\(vsockFd)")
+    private func handleConnection(_ vsockFd: Int32) async {
+        let connectionID = UUID().uuidString
+        Self.logger.debug("New incoming host connection id=\(connectionID, privacy: .public) fd=\(vsockFd)")
 
+        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: true)
         defer {
-            close(vsockFd)
-            print("[TunnelServer] Connection closed, fd=\(vsockFd)")
+            vsockIO.close()
+            Self.logger.debug("Connection closed id=\(connectionID, privacy: .public) fd=\(vsockFd)")
         }
 
-        // Set non-blocking immediately
-        var flags = fcntl(vsockFd, F_GETFL, 0)
-        _ = fcntl(vsockFd, F_SETFL, flags | O_NONBLOCK)
-
-        // Read the CONNECT command with poll
-        var buffer = [UInt8](repeating: 0, count: 256)
-        var pfd = pollfd(fd: vsockFd, events: Int16(POLLIN), revents: 0)
-
-        let pollResult = poll(&pfd, 1, 5000) // 5 second timeout for handshake
-        if pollResult < 0 {
-            let err = errno
-            fatalError("[TunnelServer] handleConnection poll() failed: errno=\(err) \(String(cString: strerror(err)))")
-        }
-        if pollResult == 0 {
-            fatalError("[TunnelServer] Timeout waiting for CONNECT command from host - is PortForwardListener sending the command?")
-        }
-
-        let bytesRead = read(vsockFd, &buffer, buffer.count - 1)
-
-        if bytesRead <= 0 {
-            let err = errno
-            fatalError("[TunnelServer] Failed to read CONNECT command: bytesRead=\(bytesRead) errno=\(err) \(String(cString: strerror(err)))")
+        let commandData: Data
+        do {
+            commandData = try await readHandshakeCommand(vsockIO)
+        } catch let error as HandshakeReadError {
+            switch error {
+            case .timeout:
+                reportOperationalError(
+                    TunnelRuntimeError(
+                        phase: .handshakeRead,
+                        message: "Timeout waiting for CONNECT command from host"
+                    ),
+                    connectionID: connectionID,
+                    error: error
+                )
+                return
+            case .eof:
+                reportOperationalError(
+                    TunnelRuntimeError(
+                        phase: .handshakeRead,
+                        message: "Failed to read CONNECT command: EOF"
+                    ),
+                    connectionID: connectionID,
+                    error: error
+                )
+                return
+            case .transport(let ioError):
+                reportOperationalError(
+                    TunnelRuntimeError(
+                        phase: .handshakeRead,
+                        message: describe(error: ioError)
+                    ),
+                    connectionID: connectionID,
+                    error: ioError
+                )
+                return
+            }
+        } catch {
+            Self.logger.fault("Unexpected handshake read error id=\(connectionID, privacy: .public): \(String(describing: error), privacy: .public)")
+            fatalError("[TunnelServer] Failed to read CONNECT command: unexpected error \(error)")
         }
 
         // Parse "CONNECT <port>\r\n"
-        guard let command = String(bytes: buffer[0..<bytesRead], encoding: .utf8) else {
-            print("[TunnelServer] ERROR: Invalid command encoding")
-            sendError(vsockFd, message: "Invalid command encoding")
+        guard let command = String(data: commandData, encoding: .utf8) else {
+            reportOperationalError(
+                TunnelRuntimeError(
+                    phase: .handshakeProtocol,
+                    message: "Invalid command encoding"
+                ),
+                connectionID: connectionID
+            )
+            await sendError(vsockIO, message: "Invalid command encoding")
             return
         }
 
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[TunnelServer] Received command: '\(trimmed)'")
+        Self.logger.debug("Received command id=\(connectionID, privacy: .public): \(trimmed, privacy: .public)")
 
         guard trimmed.hasPrefix("CONNECT ") else {
-            print("[TunnelServer] ERROR: Expected CONNECT command, got: '\(trimmed)'")
-            sendError(vsockFd, message: "Expected CONNECT command")
+            reportOperationalError(
+                TunnelRuntimeError(
+                    phase: .handshakeProtocol,
+                    message: "Expected CONNECT command, got '\(trimmed)'"
+                ),
+                connectionID: connectionID
+            )
+            await sendError(vsockIO, message: "Expected CONNECT command")
             return
         }
 
         let portString = String(trimmed.dropFirst("CONNECT ".count))
         guard let targetPort = UInt16(portString) else {
-            print("[TunnelServer] ERROR: Invalid port number: '\(portString)'")
-            sendError(vsockFd, message: "Invalid port number")
+            reportOperationalError(
+                TunnelRuntimeError(
+                    phase: .handshakeProtocol,
+                    message: "Invalid port number '\(portString)'"
+                ),
+                connectionID: connectionID
+            )
+            await sendError(vsockIO, message: "Invalid port number")
             return
         }
 
-        print("[TunnelServer] Connecting to localhost:\(targetPort)...")
+        Self.logger.debug("Connecting to localhost id=\(connectionID, privacy: .public) targetPort=\(targetPort)")
 
         // Connect to localhost on the target port
         guard let tcpFd = connectToLocalhost(port: targetPort) else {
-            print("[TunnelServer] ERROR: Failed to connect to localhost:\(targetPort) - is service running?")
-            sendError(vsockFd, message: "Connection refused to port \(targetPort)")
+            reportOperationalError(
+                TunnelRuntimeError(
+                    phase: .connectLocal,
+                    message: "Failed to connect to localhost:\(targetPort)",
+                    targetPort: targetPort
+                ),
+                connectionID: connectionID
+            )
+            await sendError(vsockIO, message: "Connection refused to port \(targetPort)")
+            return
+        }
+        let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: true)
+
+        Self.logger.info("Connected to localhost id=\(connectionID, privacy: .public) targetPort=\(targetPort)")
+
+        // Send OK response
+        do {
+            try await vsockIO.writeAll(Data("OK\r\n".utf8))
+        } catch {
+            reportOperationalError(
+                TunnelRuntimeError(
+                    phase: .handshakeProtocol,
+                    message: "Failed to write OK response: \(describe(error: error))",
+                    targetPort: targetPort
+                ),
+                connectionID: connectionID,
+                error: error
+            )
             return
         }
 
-        print("[TunnelServer] Connected to localhost:\(targetPort), sending OK")
+        onConnectionSuccess?()
+        Self.logger.info("Starting bridge id=\(connectionID, privacy: .public) targetPort=\(targetPort)")
 
-        // Send OK response
-        let okResponse = "OK\r\n"
-        let okWritten = okResponse.withCString { ptr in
-            write(vsockFd, ptr, strlen(ptr))
+        do {
+            try await pipeBidirectional(vsockIO, tcpIO)
+        } catch {
+            if tunnelIsOperationalBridgeError(error) {
+                reportOperationalError(
+                    TunnelRuntimeError(
+                        phase: .bridge,
+                        message: describe(error: error),
+                        targetPort: targetPort
+                    ),
+                    connectionID: connectionID,
+                    error: error
+                )
+                return
+            }
+            let described = describe(error: error)
+            Self.logger.fault("Unexpected bridge failure id=\(connectionID, privacy: .public) targetPort=\(targetPort): \(described, privacy: .public)")
+            fatalError("[TunnelServer] Bridge failed unexpectedly: \(described)")
         }
-        if okWritten < 0 {
-            let err = errno
-            fatalError("[TunnelServer] Failed to write OK response: errno=\(err) \(String(cString: strerror(err)))")
-        }
-
-        print("[TunnelServer] Starting bidirectional bridge for port \(targetPort)")
-
-        // Bridge the connections using poll()
-        bridgeConnections(vsockFd: vsockFd, tcpFd: tcpFd)
-
-        close(tcpFd)
     }
 
     /// Connect to localhost on the specified port
@@ -238,107 +366,100 @@ final class TunnelServer: @unchecked Sendable {
         return nil
     }
 
-    /// Bridge two file descriptors using two threads - simplest proven approach
-    /// Each direction gets its own thread doing blocking read/write
-    private func bridgeConnections(vsockFd: Int32, tcpFd: Int32) {
-        // Keep sockets BLOCKING - simplest and most reliable
-        // Remove any non-blocking flags that might have been set
-        var flags = fcntl(vsockFd, F_GETFL, 0)
-        _ = fcntl(vsockFd, F_SETFL, flags & ~O_NONBLOCK)
-
-        flags = fcntl(tcpFd, F_GETFL, 0)
-        _ = fcntl(tcpFd, F_SETFL, flags & ~O_NONBLOCK)
-
-        let group = DispatchGroup()
-
-        // Thread 1: vsock -> TCP
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.copyData(from: vsockFd, to: tcpFd, label: "vsock->tcp")
-            Darwin.shutdown(tcpFd, SHUT_WR)  // Signal EOF to TCP peer
-            group.leave()
-        }
-
-        // Thread 2: TCP -> vsock
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            self.copyData(from: tcpFd, to: vsockFd, label: "tcp->vsock")
-            Darwin.shutdown(vsockFd, SHUT_WR)  // Signal EOF to vsock peer
-            group.leave()
-        }
-
-        // Wait for both directions to complete
-        group.wait()
-    }
-
-    /// Error codes that indicate peer disconnected (not a bug)
-    private func isPeerDisconnected(_ err: Int32) -> Bool {
-        switch err {
-        case ECONNRESET,  // Connection reset by peer
-             EPIPE,       // Broken pipe
-             ENOTCONN,    // Socket not connected
-             ESHUTDOWN,   // Can't send after socket shutdown
-             ECONNABORTED, // Connection aborted
-             EHOSTUNREACH, // Host unreachable
-             ENETUNREACH,  // Network unreachable
-             ETIMEDOUT:    // Connection timed out
-            return true
-        default:
-            return false
-        }
-    }
-
-    /// Simple blocking copy: read from source, write to dest, repeat until EOF
-    private func copyData(from source: Int32, to dest: Int32, label: String) {
-        var buffer = [UInt8](repeating: 0, count: 65536)
-        var totalBytes: Int = 0
-
-        while true {
-            let bytesRead = Darwin.read(source, &buffer, buffer.count)
-
-            if bytesRead == 0 {
-                print("[TunnelServer] \(label): EOF after \(totalBytes) bytes")
-                return
-            }
-
-            if bytesRead < 0 {
-                let err = errno
-                if err == EINTR { continue }
-                if isPeerDisconnected(err) {
-                    print("[TunnelServer] \(label): peer closed (errno=\(err)) after \(totalBytes) bytes")
-                    return
-                }
-                fatalError("[TunnelServer] \(label): read failed: errno=\(err) \(String(cString: strerror(err)))")
-            }
-
-            var offset = 0
-            while offset < bytesRead {
-                let written = buffer.withUnsafeBytes { ptr in
-                    Darwin.write(dest, ptr.baseAddress! + offset, bytesRead - offset)
-                }
-
-                if written <= 0 {
-                    let err = errno
-                    if err == EINTR { continue }
-                    if isPeerDisconnected(err) {
-                        print("[TunnelServer] \(label): peer closed during write (errno=\(err)) after \(totalBytes) bytes")
-                        return
-                    }
-                    fatalError("[TunnelServer] \(label): write failed: errno=\(err) \(String(cString: strerror(err))) offset=\(offset)/\(bytesRead)")
-                }
-                offset += written
-            }
-
-            totalBytes += bytesRead
-        }
-    }
-
     /// Send an error response
-    private func sendError(_ fd: Int32, message: String) {
+    private func sendError(_ io: AsyncVSockIO, message: String) async {
         let response = "ERROR \(message)\r\n"
-        _ = response.withCString { ptr in
-            write(fd, ptr, strlen(ptr))
+        do {
+            try await io.writeAll(Data(response.utf8))
+        } catch {
+            let described = describe(error: error)
+            Self.logger.warning("Failed to send error response to host: \(described, privacy: .public)")
         }
+    }
+
+    private enum HandshakeReadError: Error {
+        case timeout
+        case eof
+        case transport(AsyncVSockIOError)
+    }
+
+    private func readHandshakeCommand(_ io: AsyncVSockIO) async throws -> Data {
+        try await withThrowingTaskGroup(of: Data.self) { group in
+            group.addTask {
+                do {
+                    guard let data = try await io.read(maxBytes: 255), !data.isEmpty else {
+                        throw HandshakeReadError.eof
+                    }
+                    return data
+                } catch let error as AsyncVSockIOError {
+                    throw HandshakeReadError.transport(error)
+                }
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+                throw HandshakeReadError.timeout
+            }
+
+            do {
+                let first = try await group.next()!
+                group.cancelAll()
+                return first
+            } catch {
+                group.cancelAll()
+                throw error
+            }
+        }
+    }
+
+    private func describe(error: Error) -> String {
+        if let ioError = error as? AsyncVSockIOError {
+            switch ioError {
+            case .closed:
+                return "closed"
+            case .eofBeforeExpected(let expected, let received):
+                return "eofBeforeExpected expected=\(expected) received=\(received)"
+            case .interrupted:
+                return "interrupted"
+            case .wouldBlock:
+                return "wouldBlock"
+            case .syscall(let op, let err):
+                return "syscall \(op) failed: errno=\(err) \(String(cString: strerror(err)))"
+            case .cancelled:
+                return "cancelled"
+            }
+        }
+        return String(describing: error)
+    }
+
+    private func reportOperationalError(
+        _ runtimeError: TunnelRuntimeError,
+        connectionID: String,
+        error: Error? = nil
+    ) {
+        let errnoValue: Int32?
+        if let ioError = error as? AsyncVSockIOError, case .syscall(_, let err) = ioError {
+            errnoValue = err
+        } else {
+            errnoValue = nil
+        }
+
+        let targetPortText = runtimeError.targetPort.map(String.init) ?? "none"
+        let useWarningLevel = runtimeError.phase == .bridge && (error.map(tunnelIsOperationalBridgeError) ?? false)
+
+        if let err = errnoValue {
+            if useWarningLevel {
+                Self.logger.warning("Operational tunnel error id=\(connectionID, privacy: .public) phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(targetPortText, privacy: .public) errno=\(err): \(runtimeError.message, privacy: .public)")
+            } else {
+                Self.logger.error("Operational tunnel error id=\(connectionID, privacy: .public) phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(targetPortText, privacy: .public) errno=\(err): \(runtimeError.message, privacy: .public)")
+            }
+        } else {
+            if useWarningLevel {
+                Self.logger.warning("Operational tunnel error id=\(connectionID, privacy: .public) phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(targetPortText, privacy: .public): \(runtimeError.message, privacy: .public)")
+            } else {
+                Self.logger.error("Operational tunnel error id=\(connectionID, privacy: .public) phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(targetPortText, privacy: .public): \(runtimeError.message, privacy: .public)")
+            }
+        }
+        onOperationalError?(runtimeError)
     }
 
     /// Stops the server
