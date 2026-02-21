@@ -9,14 +9,10 @@ final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 
     func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
         let popover = NSPopover()
-        popover.behavior = .applicationDefined
+        popover.behavior = .transient
         popover.delegate = self
 
         let vc = GuestToolsInfoContentViewController()
-        vc.onDismiss = { [weak self] in
-            self?.close()
-        }
-
         popover.contentViewController = vc
         popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
         self.popover = popover
@@ -41,9 +37,6 @@ final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 // MARK: - Content View Controller
 
 private final class GuestToolsInfoContentViewController: NSViewController {
-
-    var onDismiss: (() -> Void)?
-
     override func loadView() {
         let container = NSVisualEffectView()
         container.material = .popover
@@ -63,13 +56,6 @@ private final class GuestToolsInfoContentViewController: NSViewController {
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(bodyLabel)
 
-        // Dismiss button
-        let dismissButton = NSButton(title: "Dismiss", target: self, action: #selector(dismissClicked))
-        dismissButton.bezelStyle = .rounded
-        dismissButton.keyEquivalent = "\u{1b}" // Escape
-        dismissButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(dismissButton)
-
         // Layout
         let padding: CGFloat = 16
 
@@ -81,18 +67,11 @@ private final class GuestToolsInfoContentViewController: NSViewController {
             bodyLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
             bodyLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
             bodyLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
-
-            dismissButton.topAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: 12),
-            dismissButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
-            dismissButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+            bodyLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
 
             container.widthAnchor.constraint(equalToConstant: 280),
         ])
 
         self.view = container
-    }
-
-    @objc private func dismissClicked() {
-        onDismiss?()
     }
 }

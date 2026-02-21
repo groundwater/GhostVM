@@ -167,7 +167,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         if currentPresentation == .liveStatus(.notFound) && previousPresentation != .liveStatus(.notFound) {
             // Auto-show popover on first transition to notFound
             showGuestToolsInfoPopover()
-        } else if currentPresentation != .liveStatus(.notFound) {
+        } else if currentPresentation == .liveStatus(.connecting) || currentPresentation == .liveStatus(.connected) {
             // Close popover when status recovers
             guestToolsInfoPanel?.close()
             guestToolsInfoPanel = nil
@@ -543,14 +543,18 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             lastAnimatedStatus = nil
             dot.isHidden = true
             button.isBordered = true
+            button.bezelStyle = .rounded
             label.textColor = .labelColor
             label.stringValue = "Install Ghost Tools"
+            label.frame.origin.x = 8
             item.toolTip = "Install Ghost Tools in the guest VM"
             resizeGuestToolsButton()
 
         case .liveStatus(let status):
             dot.isHidden = false
             button.isBordered = false
+            button.bezelStyle = .toolbar
+            label.frame.origin.x = 18
 
             let shouldAnimate = lastAnimatedStatus != status
             lastAnimatedStatus = status
@@ -704,10 +708,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         let width: CGFloat
         if label.stringValue.isEmpty {
             width = 16  // 4 padding + 8 dot + 4 padding
-        } else if dot.isHidden {
-            width = 8 + label.frame.width + 8
         } else {
-            width = 18 + label.frame.width + 4  // dot(4+8) + spacing(6) + text + padding(4)
+            let trailingPadding: CGFloat = dot.isHidden ? 8 : 4
+            width = label.frame.minX + label.frame.width + trailingPadding
         }
         let size = NSSize(width: width, height: button.frame.height)
         button.setFrameSize(size)
@@ -920,7 +923,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
         switch presentation {
         case .installCallToAction, .liveStatus(.notFound):
-            showGuestToolsInfoPopover()
+            if guestToolsInfoPanel?.isShown == true {
+                guestToolsInfoPanel?.close()
+                guestToolsInfoPanel = nil
+            } else {
+                showGuestToolsInfoPopover()
+            }
         case .liveStatus(.connecting), .liveStatus(.connected):
             break
         }
