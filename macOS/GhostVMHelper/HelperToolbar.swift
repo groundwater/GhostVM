@@ -733,23 +733,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private func rebuildCaptureCommandsMenu() {
         captureCommandsMenu.removeAllItems()
 
-        // NSMenuToolbarItem may consume the first menu item as its represented item.
-        // Keep a hidden anchor first so our real section header is always visible.
-        let anchorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        anchorItem.isHidden = true
-        captureCommandsMenu.addItem(anchorItem)
-
-        // --- GhostTools section ---
-        let ghostToolsHeader = NSMenuItem(
-            title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required",
-            action: #selector(showGhostToolsRequiredFromMenu),
-            keyEquivalent: ""
-        )
-        ghostToolsHeader.target = self
-        ghostToolsHeader.isEnabled = true
-        captureCommandsMenu.addItem(ghostToolsHeader)
-        captureCommandsMenu.addItem(NSMenuItem.separator())
-
         // Clipboard Sync submenu
         let clipboardSubmenu = NSMenu()
         let clipModes: [(title: String, mode: String)] = [
@@ -767,13 +750,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         }
         let clipboardItem = NSMenuItem(title: "Clipboard", action: nil, keyEquivalent: "")
         clipboardItem.submenu = clipboardSubmenu
-        clipboardItem.isEnabled = isGhostToolsConnected
         captureCommandsMenu.addItem(clipboardItem)
 
         // Port Forwards
         let portsItem = NSMenuItem(title: "Port Forwards\u{2026}", action: #selector(portForwardsFromMenu), keyEquivalent: "")
         portsItem.target = self
-        portsItem.isEnabled = isGhostToolsConnected
         captureCommandsMenu.addItem(portsItem)
 
         // Shared Folders submenu
@@ -783,7 +764,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             folderItem.target = self
             folderItem.representedObject = entry.path
             folderItem.toolTip = entry.path
-            folderItem.isEnabled = isGhostToolsConnected
             foldersSubmenu.addItem(folderItem)
         }
         if !sharedFolderEntries.isEmpty {
@@ -791,18 +771,15 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         }
         let editFoldersItem = NSMenuItem(title: "Edit Shared Folders\u{2026}", action: #selector(editSharedFoldersFromMenu), keyEquivalent: "")
         editFoldersItem.target = self
-        editFoldersItem.isEnabled = isGhostToolsConnected
         foldersSubmenu.addItem(editFoldersItem)
 
         let foldersItem = NSMenuItem(title: "Shared Folders", action: nil, keyEquivalent: "")
         foldersItem.submenu = foldersSubmenu
-        foldersItem.isEnabled = isGhostToolsConnected
         captureCommandsMenu.addItem(foldersItem)
 
         // VM icon chooser
         let iconItem = NSMenuItem(title: "Change VM Icon\u{2026}", action: #selector(iconChooserFromMenu), keyEquivalent: "")
         iconItem.target = self
-        iconItem.isEnabled = isGhostToolsConnected
         captureCommandsMenu.addItem(iconItem)
 
         captureCommandsMenu.addItem(NSMenuItem.separator())
@@ -1109,7 +1086,16 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func portForwardsFromMenu() {
-        portForwardsClicked()
+        // Menu path intentionally bypasses toolbar GhostTools gating.
+        if portForwardNotificationPanel?.isShown == true {
+            portForwardNotificationPanel?.close()
+            portForwardNotificationPanel = nil
+        }
+        if portForwardPermissionPanel?.isShown == true {
+            portForwardPermissionPanel?.close()
+        } else {
+            showPortForwardPermissionPopover()
+        }
     }
 
     @objc private func revealSharedFolderFromMenu(_ sender: NSMenuItem) {
@@ -1123,10 +1109,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func iconChooserFromMenu() {
         delegate?.toolbarDidRequestIconChooser(self)
-    }
-
-    @objc private func showGhostToolsRequiredFromMenu() {
-        showGhostToolsInstallInfo(from: captureCommandsItem?.view, explainer: genericExplainer)
     }
 
     @objc private func receiveQueuedFiles() {
