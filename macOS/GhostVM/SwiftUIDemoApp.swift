@@ -673,18 +673,18 @@ struct CreateVMDemoView: View {
                         .accessibilityIdentifier("createVM.diskField")
                     Text("GiB")
                         .foregroundStyle(.secondary)
-                    Label("Not resizable after install", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .labelStyle(.titleAndIcon)
-                        .padding(.leading, 8)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Text("Choose disk size carefully: resizing after install is not supported. The disk image is sparse, so a larger limit does not pre-allocate host storage.")
+            HStack(alignment: .top, spacing: 12) {
+                Color.clear.frame(width: labelWidth)
+                Label(
+                    "APFS sparse file: Finder may show the full 256 GiB logical size, but physical usage only grows as blocks are written. Resize after install is not supported.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
+            }
 
             labeledRow("Restore Image*") {
                 restorePicker
