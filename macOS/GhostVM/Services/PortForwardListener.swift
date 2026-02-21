@@ -170,10 +170,20 @@ final class PortForwardListener: @unchecked Sendable {
                 if err == EINTR {
                     continue
                 }
-                // CRASH with full details
-                let msg = "[PortForwardListener] accept() FAILED: errno=\(err) (\(String(cString: strerror(err)))) serverSocket=\(serverSocket)"
-                Self.logger.fault("\(msg, privacy: .public)")
-                fatalError(msg)
+                // stop() closes the server socket and can race accept.
+                if !isRunning || err == EBADF || err == EINVAL {
+                    Self.logger.info("Accept loop exiting hostPort=\(self.hostPort) serverSocket=\(self.serverSocket) errno=\(err)")
+                    return
+                }
+
+                reportOperationalError(
+                    phase: .bridge,
+                    message: "accept() failed: errno=\(err) (\(String(cString: strerror(err))))",
+                    error: AsyncVSockIOError.syscall(op: "accept", errno: err),
+                    connectionID: "accept-loop"
+                )
+                usleep(100_000)
+                continue
             }
 
             // Set TCP_NODELAY on accepted socket

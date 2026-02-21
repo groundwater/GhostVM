@@ -935,7 +935,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try await tunnelServer?.start()
                 Self.logger.info("Tunnel server started successfully")
             } catch {
-                Self.logger.error("Failed to start tunnel server: \(error.localizedDescription)")
+                let message = "Failed to start tunnel server: \(error.localizedDescription)"
+                Self.logger.error("\(message, privacy: .public)")
+                lastTunnelError = message
+                updateMenu()
             }
         }
     }

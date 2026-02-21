@@ -122,8 +122,22 @@ final class TunnelServer: @unchecked Sendable {
                 }
 
                 if clientSocket < 0 {
-                    if errno == EINTR { continue }
-                    break // socket closed by stop()
+                    let err = errno
+                    if err == EINTR { continue }
+                    if self?.isRunning != true || err == EBADF || err == EINVAL {
+                        Self.logger.info("Accept loop exiting serverSocket=\(self?.serverSocket ?? -1) errno=\(err)")
+                        break
+                    }
+                    self?.reportOperationalError(
+                        TunnelRuntimeError(
+                            phase: .bridge,
+                            message: "accept() failed: errno=\(err) \(String(cString: strerror(err)))"
+                        ),
+                        connectionID: "accept-loop",
+                        error: AsyncVSockIOError.syscall(op: "accept", errno: err)
+                    )
+                    usleep(100_000)
+                    continue
                 }
 
                 Task { [weak self] in
