@@ -622,7 +622,7 @@ struct CreateVMDemoView: View {
 
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
-    @State private var diskGiB: String = "64"
+    @State private var diskGiB: String = "256"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
@@ -675,6 +675,10 @@ struct CreateVMDemoView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            Text("Choose disk size carefully: resizing after install is not supported. The disk image is sparse, so a larger limit does not pre-allocate host storage.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             labeledRow("Restore Image*") {
                 restorePicker
@@ -821,7 +825,7 @@ struct CreateVMDemoView: View {
         var opts = InitOptions()
         opts.cpus = Int(cpuCount) ?? 4
         opts.memoryGiB = UInt64(memoryGiB) ?? 8
-        opts.diskGiB = UInt64(diskGiB) ?? 64
+        opts.diskGiB = UInt64(diskGiB) ?? 256
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
 
