@@ -44,7 +44,7 @@ export default function MacOSVMs() {
           </tr>
           <tr>
             <td><code>--disk</code></td>
-            <td>64</td>
+            <td>256</td>
             <td>Disk size in GiB (sparse file)</td>
           </tr>
           <tr>

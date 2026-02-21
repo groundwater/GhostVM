@@ -6,7 +6,7 @@ final class InitOptionsTests: XCTestCase {
         let options = InitOptions()
         XCTAssertEqual(options.cpus, 4)
         XCTAssertEqual(options.memoryGiB, 8)
-        XCTAssertEqual(options.diskGiB, 64)
+        XCTAssertEqual(options.diskGiB, 256)
         XCTAssertNil(options.restoreImagePath)
         XCTAssertNil(options.sharedFolderPath)
         XCTAssertFalse(options.sharedFolderWritable)

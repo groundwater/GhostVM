@@ -25,7 +25,7 @@ export default function CLIReference() {
 Options:
   --cpus N              Number of virtual CPUs (default: 4)
   --memory GiB          Memory in GiB (default: 8)
-  --disk GiB            Disk size in GiB (default: 64)
+  --disk GiB            Disk size in GiB (default: 256)
   --restore-image PATH  Path to IPSW restore image
   --shared-folder PATH  Host folder to share with guest
   --writable            Make shared folder writable`}
