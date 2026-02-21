@@ -734,11 +734,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         captureCommandsMenu.removeAllItems()
 
         // --- GhostTools section ---
-        let ghostToolsHeader = NSMenuItem(
-            title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required",
-            action: nil,
-            keyEquivalent: ""
-        )
+        let ghostToolsHeader = NSMenuItem(title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required", action: nil, keyEquivalent: "")
+        if !isGhostToolsConnected {
+            ghostToolsHeader.action = #selector(showGhostToolsRequiredFromMenu)
+            ghostToolsHeader.target = self
+        } else {
+            ghostToolsHeader.isEnabled = false
+        }
         captureCommandsMenu.addItem(ghostToolsHeader)
         captureCommandsMenu.addItem(NSMenuItem.separator())
 
@@ -1115,6 +1117,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func iconChooserFromMenu() {
         delegate?.toolbarDidRequestIconChooser(self)
+    }
+
+    @objc private func showGhostToolsRequiredFromMenu() {
+        showGhostToolsInstallInfo(from: captureCommandsItem?.view, explainer: genericExplainer)
     }
 
     @objc private func receiveQueuedFiles() {
