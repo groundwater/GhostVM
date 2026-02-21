@@ -50,26 +50,6 @@ private final class HighlightingMenuItemView: NSView {
     }
 }
 
-/// Fixed-height section header view for menu grouping labels.
-private final class MenuSectionHeaderView: NSView {
-    init(title: String) {
-        let width: CGFloat = 240
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 22))
-
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.frame = NSRect(x: 10, y: 4, width: width - 20, height: 14)
-        label.autoresizingMask = [.width]
-        addSubview(label)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-}
-
 /// NSToolbar implementation for the VM helper window.
 /// Provides quick access to VM status and controls.
 final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, URLPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
@@ -482,6 +462,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         item.maxSize = NSSize(width: 36, height: 32)
 
         captureCommandsMenu.delegate = self
+        captureCommandsMenu.autoenablesItems = false
         item.menu = captureCommandsMenu
         captureCommandsItem = item
         rebuildCaptureCommandsMenu()
@@ -754,8 +735,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         captureCommandsMenu.removeAllItems()
 
         // --- GhostTools section ---
-        let ghostToolsHeader = NSMenuItem()
-        ghostToolsHeader.view = MenuSectionHeaderView(title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required")
+        let ghostToolsHeader = NSMenuItem(
+            title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required",
+            action: #selector(showGhostToolsRequiredFromMenu),
+            keyEquivalent: ""
+        )
+        ghostToolsHeader.target = self
+        ghostToolsHeader.isEnabled = !isGhostToolsConnected
+        ghostToolsHeader.isHidden = false
         captureCommandsMenu.addItem(ghostToolsHeader)
         captureCommandsMenu.addItem(NSMenuItem.separator())
 
