@@ -264,6 +264,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
+            ItemID.guestToolsStatus,
             ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
@@ -279,6 +280,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
+            ItemID.guestToolsStatus,
             ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
@@ -295,6 +297,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
+        case ItemID.guestToolsStatus:
+            return makeGuestToolsItem()
         case ItemID.iconChooser:
             return makeIconChooserItem()
         case ItemID.portForwards:
