@@ -1816,6 +1816,8 @@ struct VMContextMenu: View {
         let lowerStatus = vm.status.lowercased()
         let isRunning = lowerStatus.contains("running") || lowerStatus.contains("starting") || lowerStatus.contains("stopping")
         let isSuspended = lowerStatus.contains("suspended")
+        let canSuspend = lowerStatus.contains("running")
+        let canShutDown = lowerStatus.contains("running")
 
         // Show Install for macOS VMs that need installation
         if vm.needsInstall {
@@ -1835,11 +1837,15 @@ struct VMContextMenu: View {
         }
         .disabled(vm.needsInstall || isRunning)
 
-        Button("Stop") {
-            // VM stop is coordinated by closing the VM window; for now this
-            // entry is present but handled via the window close behavior.
+        Button("Suspend") {
+            App2VMSessionRegistry.shared.session(for: vm.bundlePath)?.suspend()
         }
-        .disabled(!isRunning)
+        .disabled(!canSuspend)
+
+        Button("Shut Down") {
+            App2VMSessionRegistry.shared.session(for: vm.bundlePath)?.stop()
+        }
+        .disabled(!canShutDown)
 
         Button("Terminate") {
             requestTerminate()
