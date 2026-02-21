@@ -132,6 +132,23 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var lastAnimatedStatus: GuestToolsStatus?
     private var isGhostToolsConnected: Bool { guestToolsStatus == .connected }
 
+    private let iconExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "Changing the VM icon requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+    private let clipboardExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "Clipboard sync requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+    private let portForwardsExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "Port forwarding requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+    private let genericExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "This feature requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+
     // MARK: - Initialization
 
     override init() {
@@ -919,13 +936,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
         switch presentation {
         case .installCallToAction, .liveStatus(.notFound):
-            showGhostToolsInstallInfo(from: guestToolsItem?.view)
+            showGhostToolsInstallInfo(from: guestToolsItem?.view, explainer: genericExplainer)
         case .liveStatus(.connecting), .liveStatus(.connected):
             break
         }
     }
 
-    private func showGhostToolsInstallInfo(from view: NSView?) {
+    private func showGhostToolsInstallInfo(from view: NSView?, explainer: GhostToolsInstallExplainer) {
         guard let view = view else { return }
 
         if guestToolsInfoPanel?.isShown == true {
@@ -938,13 +955,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         panel.onClose = { [weak self] in
             self?.guestToolsInfoPanel = nil
         }
-        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY, explainer: explainer)
         guestToolsInfoPanel = panel
     }
 
     @objc private func iconChooserClicked() {
         if !isGhostToolsConnected {
-            showGhostToolsInstallInfo(from: iconChooserItem?.view)
+            showGhostToolsInstallInfo(from: iconChooserItem?.view, explainer: iconExplainer)
             return
         }
         if iconChooserPanel?.isShown == true {
@@ -956,7 +973,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func toggleClipboardSync() {
         if !isGhostToolsConnected {
-            showGhostToolsInstallInfo(from: clipboardSyncItem?.view)
+            showGhostToolsInstallInfo(from: clipboardSyncItem?.view, explainer: clipboardExplainer)
             return
         }
         let newMode = (clipboardSyncMode == "disabled") ? "bidirectional" : "disabled"
@@ -967,7 +984,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func portForwardsClicked() {
         if !isGhostToolsConnected {
-            showGhostToolsInstallInfo(from: portForwardsItem?.view)
+            showGhostToolsInstallInfo(from: portForwardsItem?.view, explainer: portForwardsExplainer)
             return
         }
         // Close notification panel if shown

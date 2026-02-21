@@ -1,5 +1,10 @@
 import AppKit
 
+struct GhostToolsInstallExplainer {
+    let title: String
+    let body: String
+}
+
 /// NSPopover-based panel showing GhostTools installation help
 final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 
@@ -7,12 +12,17 @@ final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 
     private var popover: NSPopover?
 
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
+    func show(
+        relativeTo positioningRect: NSRect,
+        of positioningView: NSView,
+        preferredEdge: NSRectEdge,
+        explainer: GhostToolsInstallExplainer
+    ) {
         let popover = NSPopover()
         popover.behavior = .transient
         popover.delegate = self
 
-        let vc = GuestToolsInfoContentViewController()
+        let vc = GuestToolsInfoContentViewController(explainer: explainer)
         popover.contentViewController = vc
         popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
         self.popover = popover
@@ -37,6 +47,18 @@ final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 // MARK: - Content View Controller
 
 private final class GuestToolsInfoContentViewController: NSViewController {
+    private let explainer: GhostToolsInstallExplainer
+
+    init(explainer: GhostToolsInstallExplainer) {
+        self.explainer = explainer
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
     override func loadView() {
         let container = NSVisualEffectView()
         container.material = .popover
@@ -44,13 +66,13 @@ private final class GuestToolsInfoContentViewController: NSViewController {
         container.state = .active
 
         // Title
-        let titleLabel = NSTextField(labelWithString: "Guest Tools Not Found")
+        let titleLabel = NSTextField(labelWithString: explainer.title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(titleLabel)
 
         // Body
-        let bodyLabel = NSTextField(wrappingLabelWithString: "GhostTools should install automatically from the mounted disk image. If it didn\u{2019}t start, open the GhostTools volume in Finder and launch GhostTools.app.")
+        let bodyLabel = NSTextField(wrappingLabelWithString: explainer.body)
         bodyLabel.font = .systemFont(ofSize: 11)
         bodyLabel.textColor = .secondaryLabelColor
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
