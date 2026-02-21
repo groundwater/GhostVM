@@ -130,6 +130,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var statusAnimationTarget: String = ""
     private var statusAnimationIndex: Int = 0
     private var lastAnimatedStatus: GuestToolsStatus?
+    private var isGhostToolsConnected: Bool { guestToolsStatus == .connected }
 
     // MARK: - Initialization
 
@@ -151,24 +152,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - State Updates
 
     func setGuestToolsStatus(_ status: GuestToolsStatus) {
-        let previousPresentation = GhostToolsToolbarPolicy.presentation(
-            installState: ghostToolsInstallState,
-            healthStatus: guestToolsStatus
-        )
         guestToolsStatus = status
         ghostToolsInstallState.record(healthStatus: status)
         updateGuestToolsButton()
+        updatePortForwardsButton()
+        updateClipboardSyncButton()
 
-        let currentPresentation = GhostToolsToolbarPolicy.presentation(
-            installState: ghostToolsInstallState,
-            healthStatus: guestToolsStatus
-        )
-
-        if currentPresentation == .liveStatus(.notFound) && previousPresentation != .liveStatus(.notFound) {
-            // Auto-show popover on first transition to notFound
-            showGuestToolsInfoPopover()
-        } else if currentPresentation == .liveStatus(.connecting) || currentPresentation == .liveStatus(.connected) {
-            // Close popover when status recovers
+        if status == .connected {
             guestToolsInfoPanel?.close()
             guestToolsInfoPanel = nil
         }
@@ -256,7 +246,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
-            ItemID.guestToolsStatus,
             ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
@@ -272,7 +261,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
-            ItemID.guestToolsStatus,
             ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
@@ -289,8 +277,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
-        case ItemID.guestToolsStatus:
-            return makeGuestToolsItem()
         case ItemID.iconChooser:
             return makeIconChooserItem()
         case ItemID.portForwards:
@@ -593,6 +579,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             item.label = "Ports"
         }
         (item.view as? NSButton)?.image = portForwardsIcon()
+        item.toolTip = isGhostToolsConnected ? "Manage port forwards" : "Install Ghost Tools to manage port forwards"
     }
 
     private func updateSharedFoldersButton() {
@@ -609,10 +596,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private func updateClipboardSyncButton() {
         guard let item = clipboardSyncItem, let button = item.view as? NSButton else { return }
 
-        let enabled = clipboardSyncMode != "disabled"
+        let enabled = isGhostToolsConnected && clipboardSyncMode != "disabled"
         let symbolName = enabled ? "clipboard.fill" : "clipboard"
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Clipboard Sync")?.withSymbolConfiguration(iconConfig)
-        item.toolTip = enabled ? "Clipboard sync enabled" : "Clipboard sync disabled"
+        if !isGhostToolsConnected {
+            item.toolTip = "Install Ghost Tools to use clipboard sync"
+        } else {
+            item.toolTip = enabled ? "Clipboard sync enabled" : "Clipboard sync disabled"
+        }
     }
 
     private func updateCaptureKeysButton() {
@@ -831,7 +822,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     private func portForwardsIcon() -> NSImage? {
-        let symbolName = autoPortMapEnabled ? "powerplug.fill" : "powerplug"
+        let symbolName: String
+        if !isGhostToolsConnected {
+            symbolName = "powerplug"
+        } else {
+            symbolName = autoPortMapEnabled ? "powerplug.fill" : "powerplug"
+        }
         return NSImage(systemSymbolName: symbolName, accessibilityDescription: "Port Forwards")?.withSymbolConfiguration(iconConfig)
     }
 
@@ -923,21 +919,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
         switch presentation {
         case .installCallToAction, .liveStatus(.notFound):
-            if guestToolsInfoPanel?.isShown == true {
-                guestToolsInfoPanel?.close()
-                guestToolsInfoPanel = nil
-            } else {
-                showGuestToolsInfoPopover()
-            }
+            showGhostToolsInstallInfo(from: guestToolsItem?.view)
         case .liveStatus(.connecting), .liveStatus(.connected):
             break
         }
     }
 
-    private func showGuestToolsInfoPopover() {
-        guard let view = guestToolsItem?.view else { return }
+    private func showGhostToolsInstallInfo(from view: NSView?) {
+        guard let view = view else { return }
 
-        guestToolsInfoPanel?.close()
+        if guestToolsInfoPanel?.isShown == true {
+            guestToolsInfoPanel?.close()
+            guestToolsInfoPanel = nil
+            return
+        }
 
         let panel = GuestToolsInfoPanel()
         panel.onClose = { [weak self] in
@@ -948,6 +943,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func iconChooserClicked() {
+        if !isGhostToolsConnected {
+            showGhostToolsInstallInfo(from: iconChooserItem?.view)
+            return
+        }
         if iconChooserPanel?.isShown == true {
             iconChooserPanel?.close()
         } else {
@@ -956,6 +955,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func toggleClipboardSync() {
+        if !isGhostToolsConnected {
+            showGhostToolsInstallInfo(from: clipboardSyncItem?.view)
+            return
+        }
         let newMode = (clipboardSyncMode == "disabled") ? "bidirectional" : "disabled"
         clipboardSyncMode = newMode
         updateClipboardSyncButton()
@@ -963,6 +966,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func portForwardsClicked() {
+        if !isGhostToolsConnected {
+            showGhostToolsInstallInfo(from: portForwardsItem?.view)
+            return
+        }
         // Close notification panel if shown
         if portForwardNotificationPanel?.isShown == true {
             portForwardNotificationPanel?.close()
