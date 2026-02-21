@@ -734,10 +734,13 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         captureCommandsMenu.removeAllItems()
 
         // --- GhostTools section ---
-        if !isGhostToolsConnected {
-            let requiredItem = NSMenuItem(title: "GhostTools Required", action: nil, keyEquivalent: "")
-            captureCommandsMenu.addItem(requiredItem)
-        }
+        let ghostToolsHeader = NSMenuItem(
+            title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required",
+            action: nil,
+            keyEquivalent: ""
+        )
+        captureCommandsMenu.addItem(ghostToolsHeader)
+        captureCommandsMenu.addItem(NSMenuItem.separator())
 
         // Clipboard Sync submenu
         let clipboardSubmenu = NSMenu()
