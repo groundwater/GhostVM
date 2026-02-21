@@ -3,7 +3,11 @@ import AppKit
 import UniformTypeIdentifiers
 
 enum SavePanelAdapter {
-    static func chooseVMBundleURL(suggestedName: String, completion: @MainActor @escaping (URL?) -> Void) {
+    static func chooseVMBundleURL(
+        suggestedName: String,
+        initialDirectoryURL: URL? = nil,
+        completion: @MainActor @escaping (URL?) -> Void
+    ) {
         DispatchQueue.main.async {
             let panel = NSSavePanel()
             panel.canCreateDirectories = true
@@ -16,6 +20,7 @@ enum SavePanelAdapter {
                 panel.allowsOtherFileTypes = false
             }
             panel.nameFieldStringValue = suggestedName.isEmpty ? "Virtual Machine.GhostVM" : "\(suggestedName).GhostVM"
+            panel.directoryURL = initialDirectoryURL
             panel.prompt = "Create"
             panel.title = "Create Virtual Machine"
 
