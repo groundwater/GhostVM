@@ -1,12 +1,7 @@
 import Foundation
 import Combine
 import Virtualization
-
-public enum GuestToolsStatus: Equatable {
-    case connecting
-    case connected
-    case notFound
-}
+import GhostVMKit
 
 /// Persistent health check via vsock port 5002.
 /// Connects once, reads version line, then blocks on read until EOF.

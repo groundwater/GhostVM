@@ -1999,6 +1999,7 @@ struct VMWindowView: View {
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
     @StateObject private var healthCheckService = HealthCheckService()
+    @State private var ghostToolsInstallState: GhostToolsInstallState = .notInstalled
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
     @State private var showPortForwardEditor = false
     @State private var shutDownCooldown = false
@@ -2056,6 +2057,40 @@ struct VMWindowView: View {
 
     private var clipboardSyncHelp: String {
         "Clipboard Sync: \(session.clipboardSyncMode.displayName)"
+    }
+
+    private var ghostToolsToolbarPresentation: GhostToolsToolbarPresentation {
+        GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: healthCheckService.status
+        )
+    }
+
+    private var ghostToolsStatusText: String {
+        switch healthCheckService.status {
+        case .connecting:
+            return "Connecting"
+        case .connected:
+            return "Connected"
+        case .notFound:
+            return "Not Found"
+        }
+    }
+
+    private var ghostToolsStatusColor: Color {
+        switch healthCheckService.status {
+        case .connected:
+            return .green
+        case .notFound:
+            return .red
+        case .connecting:
+            return .yellow
+        }
+    }
+
+    private func openGhostToolsInstallDocs() {
+        guard let url = URL(string: "https://ghostvm.org/docs/ghosttools") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     var body: some View {
@@ -2122,15 +2157,28 @@ struct VMWindowView: View {
         }
         .toolbar {
             ToolbarItem(placement: .automatic) {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(healthCheckService.isConnected ? Color.green : Color.gray.opacity(0.5))
-                        .frame(width: 8, height: 8)
-                    Text("Guest Tools")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Group {
+                    switch ghostToolsToolbarPresentation {
+                    case .installCallToAction:
+                        Button("Install Ghost Tools") {
+                            openGhostToolsInstallDocs()
+                        }
+                    case .liveStatus:
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(ghostToolsStatusColor)
+                                .frame(width: 8, height: 8)
+                            Text("Guest Tools: \(ghostToolsStatusText)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
-                .help(healthCheckService.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
+                .help(
+                    ghostToolsToolbarPresentation == .installCallToAction
+                    ? "Install Ghost Tools in the guest VM"
+                    : "Ghost Tools status: \(ghostToolsStatusText)"
+                )
             }
             ToolbarItem(placement: .automatic) {
                 Menu {
@@ -2252,6 +2300,9 @@ struct VMWindowView: View {
             } else {
                 healthCheckService.stop()
             }
+        }
+        .onChange(of: healthCheckService.status) { _, status in
+            ghostToolsInstallState.record(healthStatus: status)
         }
         .onDisappear {
             healthCheckService.stop()
@@ -2598,4 +2649,3 @@ struct FileTransferProgressView: View {
         .frame(maxWidth: 300)
     }
 }
-
