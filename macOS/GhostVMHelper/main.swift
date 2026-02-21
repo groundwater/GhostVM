@@ -513,9 +513,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         alert.addButton(withTitle: "Cancel")
         alert.buttons[0].hasDestructiveAction = true
 
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            terminateVM()
+        guard let window else {
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                terminateVM()
+            }
+            return
+        }
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            if response == .alertFirstButtonReturn {
+                self?.terminateVM()
+            }
         }
     }
 
