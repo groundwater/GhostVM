@@ -35,6 +35,7 @@ framework: $(XCODE_PROJECT)
 		-scheme GhostVMKit \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 
 # Build the vmctl CLI (depends on framework)
@@ -43,6 +44,7 @@ cli: $(XCODE_PROJECT)
 		-scheme vmctl \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl"
 
@@ -60,6 +62,7 @@ endif
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
