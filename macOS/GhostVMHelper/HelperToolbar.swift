@@ -174,6 +174,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         updateGuestToolsButton()
         updatePortForwardsButton()
         updateClipboardSyncButton()
+        rebuildCaptureCommandsMenu()
 
         if status == .connected {
             guestToolsInfoPanel?.close()
@@ -735,7 +736,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         // --- GhostTools section ---
         if !isGhostToolsConnected {
             let requiredItem = NSMenuItem(title: "GhostTools Required", action: nil, keyEquivalent: "")
-            requiredItem.isEnabled = false
             captureCommandsMenu.addItem(requiredItem)
         }
 
