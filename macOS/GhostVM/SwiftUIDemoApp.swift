@@ -673,16 +673,17 @@ struct CreateVMDemoView: View {
                         .accessibilityIdentifier("createVM.diskField")
                     Text("GiB")
                         .foregroundStyle(.secondary)
+                    Label("Resize after install not supported", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .padding(.leading, 8)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             HStack(alignment: .top, spacing: 12) {
                 Color.clear.frame(width: labelWidth)
-                Label(
-                    "APFS sparse file: Finder may show the full 256 GiB logical size, but physical usage only grows as blocks are written. Resize after install is not supported.",
-                    systemImage: "exclamationmark.triangle.fill"
-                )
+                Text("APFS sparse file: Finder may show the full 256 GiB logical size, but physical usage only grows as blocks are written.")
                 .font(.caption)
-                .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
