@@ -1,4 +1,5 @@
 import AppKit
+import GhostVMKit
 
 // MARK: - Shared Folder Menu Helpers
 
