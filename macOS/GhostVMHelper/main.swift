@@ -1548,12 +1548,22 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.helperToolbar?.setGuestToolsStatus(status)
             }
 
-        // 3. Port forwarding
+        // 3. Port forwarding (only in NAT mode)
         let pfService = PortForwardService(vm: vm, queue: queue)
         self.portForwardService = pfService
+
+        // Load port forwards from config
         let forwards = loadPortForwards()
-        if !forwards.isEmpty {
-            pfService.start(forwards: forwards)
+
+        // Check network mode - only start port forwarding in NAT mode
+        let networkConfig = (try? VMConfigStore(layout: layout!).load().networkConfig) ?? NetworkConfig.defaultConfig
+        if networkConfig.mode == .nat {
+            if !forwards.isEmpty {
+                pfService.start(forwards: forwards)
+            }
+            NSLog("GhostVMHelper: Port forwarding enabled (NAT mode)")
+        } else {
+            NSLog("GhostVMHelper: Port forwarding disabled (bridged mode)")
         }
         updateToolbarPortForwards()
 

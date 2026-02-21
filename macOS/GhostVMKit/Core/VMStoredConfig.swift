@@ -40,6 +40,8 @@ public struct VMStoredConfig: Codable {
     public var macAddress: String?
     // Port forwarding configuration
     public var portForwards: [PortForwardConfig]
+    // Network configuration (NAT vs bridged)
+    public var networkConfig: NetworkConfig?
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
 
@@ -66,6 +68,7 @@ public struct VMStoredConfig: Codable {
         case isSuspended
         case macAddress
         case portForwards
+        case networkConfig
         case iconMode
     }
 
@@ -92,6 +95,7 @@ public struct VMStoredConfig: Codable {
         isSuspended: Bool = false,
         macAddress: String? = nil,
         portForwards: [PortForwardConfig] = [],
+        networkConfig: NetworkConfig? = nil,
         iconMode: String? = nil
     ) {
         self.version = version
@@ -116,6 +120,7 @@ public struct VMStoredConfig: Codable {
         self.isSuspended = isSuspended
         self.macAddress = macAddress
         self.portForwards = portForwards
+        self.networkConfig = networkConfig
         self.iconMode = iconMode
     }
 
@@ -144,6 +149,7 @@ public struct VMStoredConfig: Codable {
         macAddress = try container.decodeIfPresent(String.self, forKey: .macAddress)
         // Port forwards - defaults to empty for backwards compatibility
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
+        networkConfig = try container.decodeIfPresent(NetworkConfig.self, forKey: .networkConfig)
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
     }
 
