@@ -76,6 +76,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     private let toolbar: NSToolbar
     private var guestToolsStatus: GuestToolsStatus = .connecting
+    private var ghostToolsInstallState: GhostToolsInstallState = .notInstalled
     private var portForwardCount = 0
     private var sharedFolderCount = 0
     private var clipboardSyncMode = "disabled"
@@ -90,6 +91,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var shutDownEnabled = true
 
     private var guestToolsItem: NSToolbarItem?
+    private weak var guestToolsButton: NSButton?
     private weak var guestToolsDot: NSView?
     private weak var guestToolsLabel: NSTextField?
     private var iconChooserItem: NSToolbarItem?
@@ -149,14 +151,23 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - State Updates
 
     func setGuestToolsStatus(_ status: GuestToolsStatus) {
-        let wasNotFound = guestToolsStatus == .notFound
+        let previousPresentation = GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: guestToolsStatus
+        )
         guestToolsStatus = status
+        ghostToolsInstallState.record(healthStatus: status)
         updateGuestToolsButton()
 
-        if status == .notFound && !wasNotFound {
+        let currentPresentation = GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: guestToolsStatus
+        )
+
+        if currentPresentation == .liveStatus(.notFound) && previousPresentation != .liveStatus(.notFound) {
             // Auto-show popover on first transition to notFound
             showGuestToolsInfoPopover()
-        } else if status != .notFound {
+        } else if currentPresentation != .liveStatus(.notFound) {
             // Close popover when status recovers
             guestToolsInfoPanel?.close()
             guestToolsInfoPanel = nil
@@ -320,6 +331,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         button.title = ""
         button.target = self
         button.action = #selector(guestToolsClicked)
+        guestToolsButton = button
 
         // Status dot (8×8 colored circle)
         let dot = NSView(frame: NSRect(x: 4, y: 7, width: 8, height: 8))
@@ -517,33 +529,54 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - Button Updates
 
     private func updateGuestToolsButton() {
-        guard let item = guestToolsItem else { return }
+        guard let item = guestToolsItem, let button = guestToolsButton else { return }
         guard let dot = guestToolsDot, let label = guestToolsLabel else { return }
 
-        let shouldAnimate = lastAnimatedStatus != guestToolsStatus
-        lastAnimatedStatus = guestToolsStatus
+        let presentation = GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: guestToolsStatus
+        )
 
-        switch guestToolsStatus {
-        case .connecting:
-            dot.layer?.backgroundColor = NSColor.systemYellow.cgColor
-            label.textColor = .secondaryLabelColor
-            item.toolTip = "GhostTools is connecting"
-            if shouldAnimate {
-                animateStatusText(to: "Connecting\u{2026}", disappearAfter: nil)
-            }
-        case .connected:
-            dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        switch presentation {
+        case .installCallToAction:
+            cancelStatusAnimation()
+            lastAnimatedStatus = nil
+            dot.isHidden = true
+            button.isBordered = true
             label.textColor = .labelColor
-            item.toolTip = "GhostTools is connected"
-            if shouldAnimate {
-                animateStatusText(to: "Guest Tools Connected", disappearAfter: 1.5)
-            }
-        case .notFound:
-            dot.layer?.backgroundColor = NSColor.systemRed.cgColor
-            label.textColor = .secondaryLabelColor
-            item.toolTip = "GhostTools not found — click for help"
-            if shouldAnimate {
-                animateStatusText(to: "Not Found", disappearAfter: nil)
+            label.stringValue = "Install Ghost Tools"
+            item.toolTip = "Install Ghost Tools in the guest VM"
+            resizeGuestToolsButton()
+
+        case .liveStatus(let status):
+            dot.isHidden = false
+            button.isBordered = false
+
+            let shouldAnimate = lastAnimatedStatus != status
+            lastAnimatedStatus = status
+
+            switch status {
+            case .connecting:
+                dot.layer?.backgroundColor = NSColor.systemYellow.cgColor
+                label.textColor = .secondaryLabelColor
+                item.toolTip = "GhostTools is connecting"
+                if shouldAnimate {
+                    animateStatusText(to: "Connecting\u{2026}", disappearAfter: nil)
+                }
+            case .connected:
+                dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+                label.textColor = .labelColor
+                item.toolTip = "GhostTools is connected"
+                if shouldAnimate {
+                    animateStatusText(to: "Guest Tools Connected", disappearAfter: 1.5)
+                }
+            case .notFound:
+                dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+                label.textColor = .secondaryLabelColor
+                item.toolTip = "GhostTools not found — click for help"
+                if shouldAnimate {
+                    animateStatusText(to: "Not Found", disappearAfter: nil)
+                }
             }
         }
     }
@@ -665,11 +698,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     /// Resize the guest tools button to fit the dot + current label text.
     private func resizeGuestToolsButton() {
         guard let button = guestToolsItem?.view,
+              let dot = guestToolsDot,
               let label = guestToolsLabel else { return }
         label.sizeToFit()
         let width: CGFloat
         if label.stringValue.isEmpty {
             width = 16  // 4 padding + 8 dot + 4 padding
+        } else if dot.isHidden {
+            width = 8 + label.frame.width + 8
         } else {
             width = 18 + label.frame.width + 4  // dot(4+8) + spacing(6) + text + padding(4)
         }
@@ -877,8 +913,17 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - Actions
 
     @objc private func guestToolsClicked() {
-        guard guestToolsStatus == .notFound else { return }
-        showGuestToolsInfoPopover()
+        let presentation = GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: guestToolsStatus
+        )
+
+        switch presentation {
+        case .installCallToAction, .liveStatus(.notFound):
+            showGuestToolsInfoPopover()
+        case .liveStatus(.connecting), .liveStatus(.connected):
+            break
+        }
     }
 
     private func showGuestToolsInfoPopover() {
