@@ -462,7 +462,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         item.maxSize = NSSize(width: 36, height: 32)
 
         captureCommandsMenu.delegate = self
-        captureCommandsMenu.autoenablesItems = false
         item.menu = captureCommandsMenu
         captureCommandsItem = item
         rebuildCaptureCommandsMenu()
@@ -734,6 +733,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private func rebuildCaptureCommandsMenu() {
         captureCommandsMenu.removeAllItems()
 
+        // NSMenuToolbarItem may consume the first menu item as its represented item.
+        // Keep a hidden anchor first so our real section header is always visible.
+        let anchorItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        anchorItem.isHidden = true
+        captureCommandsMenu.addItem(anchorItem)
+
         // --- GhostTools section ---
         let ghostToolsHeader = NSMenuItem(
             title: isGhostToolsConnected ? "GhostTools" : "GhostTools Required",
@@ -741,8 +746,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             keyEquivalent: ""
         )
         ghostToolsHeader.target = self
-        ghostToolsHeader.isEnabled = !isGhostToolsConnected
-        ghostToolsHeader.isHidden = false
+        ghostToolsHeader.isEnabled = true
         captureCommandsMenu.addItem(ghostToolsHeader)
         captureCommandsMenu.addItem(NSMenuItem.separator())
 
