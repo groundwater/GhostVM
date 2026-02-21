@@ -474,9 +474,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - Menu Actions
 
     @objc private func showAboutPanel() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
         let alert = NSAlert()
         alert.messageText = "GhostVM Helper"
-        alert.informativeText = "Running VM: \(vmName)\n\nThis helper app hosts a single virtual machine with its own Dock icon."
+        alert.informativeText = """
+        Version: \(version) (\(build))
+        Running VM: \(vmName)
+
+        This helper app hosts a single virtual machine with its own Dock icon.
+        """
         alert.alertStyle = .informational
         alert.runModal()
     }
