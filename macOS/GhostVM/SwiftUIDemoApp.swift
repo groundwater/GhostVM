@@ -635,6 +635,7 @@ struct CreateVMDemoView: View {
     private struct RestoreItem: Identifiable {
         let path: String
         let title: String
+        let version: String?
         var id: String { path }
     }
 
@@ -780,9 +781,16 @@ struct CreateVMDemoView: View {
         var items: [RestoreItem] = []
         for image in cached {
             if let restore = restoreStore.images.first(where: { $0.filename == image.filename }) {
-                items.append(RestoreItem(path: image.fileURL.path, title: restore.name))
+                let normalizedVersion: String?
+                let trimmedVersion = restore.version.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedVersion.isEmpty || trimmedVersion.caseInsensitiveCompare("unknown") == .orderedSame {
+                    normalizedVersion = nil
+                } else {
+                    normalizedVersion = trimmedVersion
+                }
+                items.append(RestoreItem(path: image.fileURL.path, title: restore.name, version: normalizedVersion))
             } else {
-                items.append(RestoreItem(path: image.fileURL.path, title: image.filename))
+                items.append(RestoreItem(path: image.fileURL.path, title: image.filename, version: nil))
             }
         }
 
@@ -801,13 +809,23 @@ struct CreateVMDemoView: View {
         guard canCreate, !isCreating else { return }
 
         guard let restorePath = selectedRestorePath else { return }
-        let filename = URL(fileURLWithPath: restorePath)
-            .deletingPathExtension()
-            .lastPathComponent
-        let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
-        let suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
+        let suggestedName: String
+        if let selectedItem = restoreItems.first(where: { $0.path == restorePath }),
+           let version = selectedItem.version {
+            suggestedName = "macOS \(version)"
+        } else {
+            let filename = URL(fileURLWithPath: restorePath)
+                .deletingPathExtension()
+                .lastPathComponent
+            let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+            suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
+        }
 
-        SavePanelAdapter.chooseVMBundleURL(suggestedName: suggestedName) { url in
+        let vmRootDirectory = VMController().currentRootDirectory
+        SavePanelAdapter.chooseVMBundleURL(
+            suggestedName: suggestedName,
+            initialDirectoryURL: vmRootDirectory
+        ) { url in
             guard let url else { return }
             DispatchQueue.main.async {
                 self.performCreate(at: url)
