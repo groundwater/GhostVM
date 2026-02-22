@@ -119,7 +119,6 @@ final class URLPermissionContentViewController: NSViewController {
         // Buttons
         let denyButton = NSButton(title: "Deny", target: self, action: #selector(denyClicked))
         denyButton.bezelStyle = .rounded
-        denyButton.keyEquivalent = "\u{1b}"
         denyButton.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(denyButton)
 
@@ -159,15 +158,6 @@ final class URLPermissionContentViewController: NSViewController {
         ])
 
         self.view = container
-    }
-
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        view.window?.makeKeyAndOrderFront(nil)
-    }
-
-    override func keyDown(with event: NSEvent) {
-        delegate?.contentViewControllerDidDeny(self)
     }
 
     @objc private func denyClicked() {
