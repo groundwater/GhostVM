@@ -92,7 +92,7 @@ export default function Footer() {
         <div className="mt-8 pt-8 border-t border-gray-200 dark:border-gray-800 text-center text-sm text-gray-500 space-y-1">
           <p>GhostVM &mdash; Native macOS Virtual Machines for Apple Silicon</p>
           <p className="text-gray-400 dark:text-gray-600">
-            Designed by Humans in California. Assembled by AI.
+            Designed by Humans in California. Assembled by agents.
           </p>
         </div>
       </div>
