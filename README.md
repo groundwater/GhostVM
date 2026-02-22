@@ -127,8 +127,7 @@ make app
 - GhostTools provides clipboard sync, file transfer, and port discovery
 - Apple's EULA requires macOS guests to run on Apple-branded hardware
 
-<details>
-<summary><strong>Project Structure</strong></summary>
+## Project Structure
 
 ```
 .
@@ -143,10 +142,7 @@ make app
 └── Website/              # Documentation site (ghostvm.org)
 ```
 
-</details>
-
-<details>
-<summary><strong>Screenshots</strong></summary>
+## Screenshots
 
 <p align="center">
   <img src="Website/public/images/screenshots/vm-list-with-vms.png" width="250" alt="VM List">&nbsp;
@@ -159,5 +155,3 @@ make app
   <img src="Website/public/images/screenshots/port-forward-notification.png" width="250" alt="Port Forwarding">&nbsp;
   <img src="Website/public/images/screenshots/restore-images.png" width="250" alt="Restore Images">
 </p>
-
-</details>
