@@ -40,7 +40,7 @@ export default function GhostTools() {
           The GhostTools.dmg is located inside GhostVM.app at{" "}
           <code>Contents/Resources/GhostTools.dmg</code>
         </li>
-        <li>Transfer the DMG to the guest VM (via shared folder or file transfer)</li>
+        <li>Transfer the DMG to the guest VM — drag and drop onto the VM window, use a shared folder, or copy via the file transfer feature</li>
         <li>Open the DMG and drag GhostTools.app to the guest&apos;s Applications folder</li>
         <li>Launch GhostTools — it will appear as a menu bar app</li>
       </ol>
@@ -52,7 +52,7 @@ export default function GhostTools() {
 
       <h2>What GhostTools Provides</h2>
       <p>
-        GhostTools runs an HTTP-like server over vsock that handles requests
+        GhostTools runs an HTTP/1.1 server over vsock that handles requests
         from the host:
       </p>
       <ul>
