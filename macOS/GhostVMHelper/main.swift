@@ -476,10 +476,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     @objc private func showAboutPanel() {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+        let buildDateLine: String
+        if let formatted = formattedBuildDate(from: version) {
+            buildDateLine = "\nBuilt \(formatted)"
+        } else {
+            buildDateLine = ""
+        }
         let alert = NSAlert()
         alert.messageText = "GhostVM Helper"
         alert.informativeText = """
-        Version: \(version) (\(build))
+        Version: \(version) (\(build))\(buildDateLine)
         Running VM: \(vmName)
 
         This helper app hosts a single virtual machine with its own Dock icon.
@@ -900,7 +906,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard let service = clipboardSyncService, service.syncMode != .disabled else { return }
 
         // Never prompt for empty clipboard
-        guard let content = NSPasteboard.general.string(forType: .string), !content.isEmpty else { return }
+        let pb = NSPasteboard.general
+        let hasContent = pb.data(forType: .png) != nil
+            || pb.data(forType: .tiff) != nil
+            || (pb.string(forType: .string).map { !$0.isEmpty } ?? false)
+        guard hasContent else { return }
 
         if clipboardAlwaysAllowed {
             service.windowDidBecomeKey()
@@ -2066,6 +2076,23 @@ final class HelperApplication: NSApplication {
 // after the remote end has closed (e.g., browser reload, guest
 // disconnect), the OS sends SIGPIPE which terminates the process.
 // By ignoring SIGPIPE, write() returns -1 with errno=EPIPE instead,
+/// Parse a dev build timestamp (YYYYMMDDHHMMSS) from the patch component of a version string.
+/// Returns a formatted date string like "Feb 20, 2026 11:59 PM", or nil if not parseable.
+private func formattedBuildDate(from version: String) -> String? {
+    let parts = version.split(separator: ".")
+    guard parts.count >= 3 else { return nil }
+    let patch = String(parts[2])
+    guard patch.count == 14, patch.allSatisfy(\.isNumber) else { return nil }
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMddHHmmss"
+    df.timeZone = TimeZone.current
+    guard let date = df.date(from: patch) else { return nil }
+    let out = DateFormatter()
+    out.dateStyle = .medium
+    out.timeStyle = .short
+    return out.string(from: date)
+}
+
 // which PortForwardListener handles gracefully.
 signal(SIGPIPE, SIG_IGN)
 

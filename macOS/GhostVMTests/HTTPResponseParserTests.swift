@@ -10,8 +10,8 @@ final class HTTPResponseParserTests: XCTestCase {
         XCTAssertEqual(statusCode, 200)
         XCTAssertNotNil(body)
 
-        let json = try JSONDecoder().decode(ClipboardGetResponse.self, from: body!)
-        XCTAssertEqual(json.content, "hello")
+        let json = try JSONSerialization.jsonObject(with: body!) as? [String: Any]
+        XCTAssertEqual(json?["content"] as? String, "hello")
     }
 
     func testParse204NoBody() throws {

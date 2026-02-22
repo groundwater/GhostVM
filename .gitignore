@@ -7,4 +7,5 @@ tools/
 *.xcodeproj/
 *.profraw
 .claude/
+.codex/
 .vscode/

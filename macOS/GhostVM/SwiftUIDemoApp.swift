@@ -4,6 +4,23 @@ import Combine
 import GhostVMKit
 import Sparkle
 
+/// Parse a dev build timestamp (YYYYMMDDHHMMSS) from the patch component of a version string.
+/// Returns a formatted date string like "Feb 20, 2026 11:59 PM", or nil if not parseable.
+private func formattedBuildDate(from version: String) -> String? {
+    let parts = version.split(separator: ".")
+    guard parts.count >= 3 else { return nil }
+    let patch = String(parts[2])
+    guard patch.count == 14, patch.allSatisfy(\.isNumber) else { return nil }
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMddHHmmss"
+    df.timeZone = TimeZone.current
+    guard let date = df.date(from: patch) else { return nil }
+    let out = DateFormatter()
+    out.dateStyle = .medium
+    out.timeStyle = .short
+    return out.string(from: date)
+}
+
 @main
 @available(macOS 13.0, *)
 struct GhostVMSwiftUIApp: App {
@@ -131,6 +148,21 @@ struct DemoAppCommands: Commands {
     }
 
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About GhostVM") {
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+                var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+                if let formatted = formattedBuildDate(from: version) {
+                    let credits = NSAttributedString(
+                        string: "Built \(formatted)",
+                        attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+                    )
+                    options[.credits] = credits
+                }
+                NSApplication.shared.orderFrontStandardAboutPanel(options: options)
+            }
+        }
+
         CommandGroup(replacing: .appSettings) {
             Button("Settings\u{2026}") {
                 openWindow(id: "settings")

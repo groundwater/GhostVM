@@ -74,33 +74,31 @@ final class Router: @unchecked Sendable {
 
     private func getClipboard() -> HTTPResponse {
         log("[Router] GET /clipboard")
-        guard let content = ClipboardService.shared.getClipboardContents() else {
+        guard let (data, type) = ClipboardService.shared.getClipboardData() else {
             log("[Router] No clipboard content")
             return HTTPResponse(status: .noContent)
         }
 
-        log("[Router] Returning clipboard: \(content.prefix(50))...")
-        let response = ClipboardResponse(content: content)
-        guard let data = try? JSONEncoder().encode(response) else {
-            return HTTPResponse.error(.internalServerError, message: "Failed to encode response")
-        }
-        return HTTPResponse.json(data)
+        log("[Router] Returning clipboard: type=\(type), \(data.count) bytes")
+        let headers: [String: String] = [
+            "Content-Type": "application/octet-stream",
+            "Content-Length": "\(data.count)",
+            "X-Clipboard-Type": type,
+        ]
+        return HTTPResponse(status: .ok, headers: headers, body: data)
     }
 
     private func setClipboard(_ request: HTTPRequest) -> HTTPResponse {
         log("[Router] POST /clipboard")
-        guard let body = request.body else {
+        guard let body = request.body, !body.isEmpty else {
             log("[Router] No request body")
             return HTTPResponse.error(.badRequest, message: "Request body required")
         }
 
-        guard let clipboardRequest = try? JSONDecoder().decode(ClipboardRequest.self, from: body) else {
-            log("[Router] Invalid JSON in request body")
-            return HTTPResponse.error(.badRequest, message: "Invalid JSON")
-        }
+        let type = request.header("X-Clipboard-Type") ?? "public.utf8-plain-text"
 
-        log("[Router] Setting clipboard: \(clipboardRequest.content.prefix(50))...")
-        guard ClipboardService.shared.setClipboardContents(clipboardRequest.content) else {
+        log("[Router] Setting clipboard: type=\(type), \(body.count) bytes")
+        guard ClipboardService.shared.setClipboardData(body, type: type) else {
             log("[Router] Failed to set clipboard")
             return HTTPResponse.error(.internalServerError, message: "Failed to set clipboard")
         }
@@ -578,14 +576,6 @@ final class Router: @unchecked Sendable {
 struct HealthResponse: Codable {
     let status: String
     let version: String
-}
-
-struct ClipboardRequest: Codable {
-    let content: String
-}
-
-struct ClipboardResponse: Codable {
-    let content: String
 }
 
 

@@ -147,15 +147,19 @@ final class HostAPIService {
         }
 
         // Parse method, path, body
-        let (method, path, body) = parseHTTPRequest(requestStr, rawData: requestData)
+        let (method, path, headers, body) = parseHTTPRequest(requestStr, rawData: requestData)
 
         // Route and get response
-        let response = await route(method: method, path: path, body: body)
+        let response = await route(method: method, path: path, headers: headers, body: body)
 
         // Write response on background queue
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                let headerStr = "HTTP/1.1 \(response.statusCode) \(response.statusText)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n\r\n"
+                var headerStr = "HTTP/1.1 \(response.statusCode) \(response.statusText)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n"
+                for (key, value) in response.extraHeaders {
+                    headerStr += "\(key): \(value)\r\n"
+                }
+                headerStr += "\r\n"
                 let headerData = Data(headerStr.utf8)
                 headerData.withUnsafeBytes { ptr in
                     _ = Darwin.write(fd, ptr.baseAddress!, headerData.count)
@@ -173,12 +177,23 @@ final class HostAPIService {
 
     // MARK: - HTTP Parsing
 
-    private func parseHTTPRequest(_ str: String, rawData: Data) -> (method: String, path: String, body: Data?) {
+    private func parseHTTPRequest(_ str: String, rawData: Data) -> (method: String, path: String, headers: [String: String]?, body: Data?) {
         let lines = str.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else { return ("GET", "/", nil) }
+        guard let requestLine = lines.first else { return ("GET", "/", nil, nil) }
         let parts = requestLine.components(separatedBy: " ")
         let method = parts.count > 0 ? parts[0] : "GET"
         let path = parts.count > 1 ? parts[1] : "/"
+
+        // Parse headers
+        var headers: [String: String] = [:]
+        for line in lines.dropFirst() {
+            if line.isEmpty { break }
+            if let colonIndex = line.firstIndex(of: ":") {
+                let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                headers[key] = value
+            }
+        }
 
         // Extract body after \r\n\r\n
         // IMPORTANT: Search in raw bytes, not the UTF-8 string, to avoid character/byte offset misalignment
@@ -186,10 +201,10 @@ final class HostAPIService {
         if let delimiterRange = rawData.range(of: delimiter) {
             let headerEndIndex = delimiterRange.upperBound
             if rawData.count > headerEndIndex {
-                return (method, path, Data(rawData[headerEndIndex...]))
+                return (method, path, headers, Data(rawData[headerEndIndex...]))
             }
         }
-        return (method, path, nil)
+        return (method, path, headers.isEmpty ? nil : headers, nil)
     }
 
     // MARK: - Response Type
@@ -199,6 +214,15 @@ final class HostAPIService {
         let statusText: String
         let contentType: String
         let body: Data
+        let extraHeaders: [String: String]
+
+        init(statusCode: Int, statusText: String, contentType: String, body: Data, extraHeaders: [String: String] = [:]) {
+            self.statusCode = statusCode
+            self.statusText = statusText
+            self.contentType = contentType
+            self.body = body
+            self.extraHeaders = extraHeaders
+        }
 
         static func json(_ data: Data, status: Int = 200) -> Response {
             let httpStatus = HTTPUtilities.HTTPStatus.from(code: status)
@@ -216,6 +240,14 @@ final class HostAPIService {
 
         static func jpeg(_ data: Data) -> Response {
             Response(statusCode: 200, statusText: "OK", contentType: "image/jpeg", body: data)
+        }
+
+        static func binary(_ data: Data, headers: [String: String] = [:]) -> Response {
+            Response(statusCode: 200, statusText: "OK", contentType: "application/octet-stream", body: data, extraHeaders: headers)
+        }
+
+        static func noContent() -> Response {
+            Response(statusCode: 204, statusText: "No Content", contentType: "application/json", body: Data())
         }
 
         static func error(_ status: Int, message: String) -> Response {
@@ -236,7 +268,7 @@ final class HostAPIService {
 
     // MARK: - Router
 
-    private func route(method: String, path: String, body: Data?) async -> Response {
+    private func route(method: String, path: String, headers: [String: String]?, body: Data?) async -> Response {
         let cleanPath = path.components(separatedBy: "?").first ?? path
 
         // Health
@@ -246,16 +278,16 @@ final class HostAPIService {
 
         // Screenshot and batch are now guest-side only.
         if cleanPath == "/vm/screenshot" || cleanPath == "/vm/screenshot/annotated" || cleanPath == "/api/v1/batch" {
-            return await proxyToGuest(method: method, path: path, body: body)
+            return await proxyToGuest(method: method, path: path, headers: headers, body: body)
         }
 
         // Everything else: proxy to guest via GhostClient
-        return await proxyToGuest(method: method, path: path, body: body)
+        return await proxyToGuest(method: method, path: path, headers: headers, body: body)
     }
 
     // MARK: - Guest Proxy
 
-    private func proxyToGuest(method: String, path: String, body: Data?) async -> Response {
+    private func proxyToGuest(method: String, path: String, headers: [String: String]?, body: Data?) async -> Response {
         guard let client = client else {
             return .error(500, message: "Guest client not available")
         }
@@ -292,14 +324,20 @@ final class HostAPIService {
             if cleanPath == "/api/v1/clipboard" {
                 if method == "GET" {
                     let resp = try await client.getClipboard()
-                    let data = try JSONEncoder().encode(resp)
-                    return .json(data)
-                } else if method == "POST" {
-                    guard let body = body,
-                          let req = try? JSONDecoder().decode(ClipboardPostRequest.self, from: body) else {
-                        return .error(400, message: "Invalid JSON")
+                    if let data = resp.data {
+                        let clipType = resp.type ?? "public.utf8-plain-text"
+                        return .binary(data, headers: [
+                            "Content-Type": "application/octet-stream",
+                            "X-Clipboard-Type": clipType,
+                        ])
                     }
-                    try await client.setClipboard(content: req.content, type: req.type)
+                    return .noContent()
+                } else if method == "POST" {
+                    guard let body = body, !body.isEmpty else {
+                        return .error(400, message: "Request body required")
+                    }
+                    let clipType = headers?["X-Clipboard-Type"] ?? headers?["x-clipboard-type"] ?? "public.utf8-plain-text"
+                    try await client.setClipboard(data: body, type: clipType)
                     return .ok()
                 }
             }

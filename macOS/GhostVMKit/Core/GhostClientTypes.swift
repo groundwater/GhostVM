@@ -33,16 +33,20 @@ public enum GhostClientError: Error, LocalizedError {
     }
 }
 
-/// Response from GET /clipboard endpoint
-public struct ClipboardGetResponse: Codable {
-    public let content: String?
+/// Response from GET /clipboard endpoint (binary-safe)
+public struct ClipboardGetResponse {
+    public let data: Data?
     public let type: String?
-    public let changeCount: Int?
 
-    public init(content: String?, type: String? = nil, changeCount: Int? = nil) {
-        self.content = content
+    public init(data: Data?, type: String? = nil) {
+        self.data = data
         self.type = type
-        self.changeCount = changeCount
+    }
+
+    /// Convenience: interpret data as UTF-8 string (for text types)
+    public var content: String? {
+        guard let data = data else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 }
 
@@ -82,16 +86,6 @@ public struct LogListResponse: Codable {
     }
 }
 
-/// Request body for POST /clipboard endpoint
-public struct ClipboardPostRequest: Codable {
-    public let content: String
-    public let type: String
-
-    public init(content: String, type: String = "public.utf8-plain-text") {
-        self.content = content
-        self.type = type
-    }
-}
 
 // MARK: - App Management Types
 
