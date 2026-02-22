@@ -10,6 +10,23 @@ let kGhostToolsVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString
 /// GhostTools build number (Unix timestamp) - used for update detection
 let kGhostToolsBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
 
+/// Parse a dev build timestamp (YYYYMMDDHHMMSS) from the patch component of a version string.
+/// Returns a formatted date string like "Feb 20, 2026 11:59 PM", or nil if not parseable.
+private func formattedBuildDate(from version: String) -> String? {
+    let parts = version.split(separator: ".")
+    guard parts.count >= 3 else { return nil }
+    let patch = String(parts[2])
+    guard patch.count == 14, patch.allSatisfy(\.isNumber) else { return nil }
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMddHHmmss"
+    df.timeZone = TimeZone.current
+    guard let date = df.date(from: patch) else { return nil }
+    let out = DateFormatter()
+    out.dateStyle = .medium
+    out.timeStyle = .short
+    return out.string(from: date)
+}
+
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
 
@@ -727,6 +744,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let titleItem = NSMenuItem(title: "GhostTools v\(kGhostToolsVersion)", action: nil, keyEquivalent: "")
         titleItem.isEnabled = false
         menu.addItem(titleItem)
+
+        if let buildDate = formattedBuildDate(from: kGhostToolsVersion) {
+            let dateItem = NSMenuItem(title: "Built \(buildDate)", action: nil, keyEquivalent: "")
+            dateItem.isEnabled = false
+            menu.addItem(dateItem)
+        }
 
         menu.addItem(NSMenuItem.separator())
 
