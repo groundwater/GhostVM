@@ -19,8 +19,8 @@ export default function CreatingVMs() {
         >
           <h3 className="text-lg font-semibold mb-2">macOS VMs</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            Create macOS virtual machines using IPSW restore images. Supports
-            macOS 13 Ventura and later.
+            Create macOS virtual machines using IPSW restore images. Guest VMs
+            support macOS 13 Ventura and later.
           </p>
         </Link>
       </div>
