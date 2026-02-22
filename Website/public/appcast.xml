@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 1.85.0</title>
+      <pubDate>Sun, 22 Feb 2026 13:22:09 -0800</pubDate>
+      <sparkle:version>1.85.0</sparkle:version>
+      <sparkle:shortVersionString>1.85.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Fix URL permission popover z-order above port forward notifications</li><li>Add AsyncVSockIO and deduplicate transport layer</li><li>Delay Ghost Tools connection status until install is confirmed</li><li>Fix no-op Stop action in VM context menu</li><li>Use 256 GiB default disk and clarify sparse/non-resizable behavior</li><li>Fix terminate confirmation dialog to attach to VM window</li><li>Fix default VM naming and Create dialog start directory</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v1.85.0/GhostVM-1.85.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="sYEOFM20DP2355QWyY+CsuERGJ5a7gjYF/IKZ3lR5nVxfAEXow1eapfTC/gmBY8YsiTUAXCc0RWtcMMmNgChCQ=="
+        length="32233553"
+      />
+    </item>
+    <item>
       <title>GhostVM 1.84.0</title>
       <pubDate>Wed, 18 Feb 2026 18:34:16 -0800</pubDate>
       <sparkle:version>1.84.0</sparkle:version>
