@@ -906,7 +906,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         guard let service = clipboardSyncService, service.syncMode != .disabled else { return }
 
         // Never prompt for empty clipboard
-        guard let content = NSPasteboard.general.string(forType: .string), !content.isEmpty else { return }
+        let pb = NSPasteboard.general
+        let hasContent = pb.data(forType: .png) != nil
+            || pb.data(forType: .tiff) != nil
+            || (pb.string(forType: .string).map { !$0.isEmpty } ?? false)
+        guard hasContent else { return }
 
         if clipboardAlwaysAllowed {
             service.windowDidBecomeKey()
