@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import CryptoKit
 import Combine
 import GhostVMKit
 
@@ -18,10 +19,37 @@ public final class ClipboardSyncService: ObservableObject {
 
     private let hostPasteboard = NSPasteboard.general
     public private(set) var lastHostChangeCount: Int = 0
-    private var lastGuestContent: String?
+    private var lastGuestDataHash: Data?
 
     private var guestClient: (any GhostClientProtocol)?
     private let bundlePath: String
+
+    /// Pasteboard types to check, in priority order (richest first)
+    private static let typePriority: [NSPasteboard.PasteboardType] = [
+        .png,
+        .tiff,
+        .string,
+    ]
+
+    /// Map NSPasteboard.PasteboardType to UTI strings
+    private static func utiString(for type: NSPasteboard.PasteboardType) -> String {
+        switch type {
+        case .png: return "public.png"
+        case .tiff: return "public.tiff"
+        case .string: return "public.utf8-plain-text"
+        default: return type.rawValue
+        }
+    }
+
+    /// Map UTI string back to NSPasteboard.PasteboardType
+    private static func pasteboardType(for uti: String) -> NSPasteboard.PasteboardType {
+        switch uti {
+        case "public.png": return .png
+        case "public.tiff": return .tiff
+        case "public.utf8-plain-text": return .string
+        default: return NSPasteboard.PasteboardType(uti)
+        }
+    }
 
     public init(bundlePath: String) {
         self.bundlePath = bundlePath
@@ -79,19 +107,25 @@ public final class ClipboardSyncService: ObservableObject {
 
     // MARK: - Private
 
+    private static func sha256(_ data: Data) -> Data {
+        Data(SHA256.hash(data: data))
+    }
+
     private func pushHostToGuest(client: any GhostClientProtocol) async {
         let currentCount = hostPasteboard.changeCount
         guard currentCount != lastHostChangeCount else { return }
 
         lastHostChangeCount = currentCount
 
-        guard let content = hostPasteboard.string(forType: .string) else { return }
+        // Find the richest available type
+        guard let (data, type) = bestPasteboardItem() else { return }
 
         // Avoid echo: don't send if this is what we just received from guest
-        if content == lastGuestContent { return }
+        let hash = Self.sha256(data)
+        if hash == lastGuestDataHash { return }
 
         do {
-            try await client.setClipboard(content: content, type: "public.utf8-plain-text")
+            try await client.setClipboard(data: data, type: type)
             isConnected = true
             lastError = nil
         } catch {
@@ -106,14 +140,18 @@ public final class ClipboardSyncService: ObservableObject {
             isConnected = true
             lastError = nil
 
-            guard let content = response.content else { return }
-            guard content != lastGuestContent else { return }
+            guard let data = response.data else { return }
 
-            lastGuestContent = content
+            let hash = Self.sha256(data)
+            guard hash != lastGuestDataHash else { return }
+
+            lastGuestDataHash = hash
 
             // Update host clipboard
+            let uti = response.type ?? "public.utf8-plain-text"
+            let pbType = Self.pasteboardType(for: uti)
             hostPasteboard.clearContents()
-            hostPasteboard.setString(content, forType: .string)
+            hostPasteboard.setData(data, forType: pbType)
             lastHostChangeCount = hostPasteboard.changeCount
 
         } catch GhostClientError.noContent {
@@ -123,5 +161,15 @@ public final class ClipboardSyncService: ObservableObject {
             lastError = "Failed to get from guest: \(error.localizedDescription)"
             isConnected = false
         }
+    }
+
+    /// Read the best available pasteboard item by type priority
+    private func bestPasteboardItem() -> (data: Data, type: String)? {
+        for pbType in Self.typePriority {
+            if let data = hostPasteboard.data(forType: pbType) {
+                return (data, Self.utiString(for: pbType))
+            }
+        }
+        return nil
     }
 }

@@ -2,24 +2,26 @@ import XCTest
 @testable import GhostVMKit
 
 final class GhostClientTypesTests: XCTestCase {
-    func testClipboardGetResponseDecode() throws {
-        let json = """
-        {"content": "hello", "type": "public.utf8-plain-text", "changeCount": 5}
-        """
-        let response = try JSONDecoder().decode(ClipboardGetResponse.self, from: json.data(using: .utf8)!)
+    func testClipboardGetResponseWithData() throws {
+        let response = ClipboardGetResponse(data: Data("hello".utf8), type: "public.utf8-plain-text")
         XCTAssertEqual(response.content, "hello")
         XCTAssertEqual(response.type, "public.utf8-plain-text")
-        XCTAssertEqual(response.changeCount, 5)
+        XCTAssertEqual(response.data, Data("hello".utf8))
     }
 
-    func testClipboardGetResponseWithNulls() throws {
-        let json = """
-        {"content": null, "type": null, "changeCount": null}
-        """
-        let response = try JSONDecoder().decode(ClipboardGetResponse.self, from: json.data(using: .utf8)!)
+    func testClipboardGetResponseWithNils() throws {
+        let response = ClipboardGetResponse(data: nil, type: nil)
         XCTAssertNil(response.content)
         XCTAssertNil(response.type)
-        XCTAssertNil(response.changeCount)
+        XCTAssertNil(response.data)
+    }
+
+    func testClipboardGetResponseBinaryData() throws {
+        let pngHeader = Data([0x89, 0x50, 0x4E, 0x47])
+        let response = ClipboardGetResponse(data: pngHeader, type: "public.png")
+        XCTAssertEqual(response.type, "public.png")
+        XCTAssertEqual(response.data, pngHeader)
+        XCTAssertNil(response.content) // binary data won't decode as UTF-8
     }
 
     func testFileReceiveResponseDecode() throws {
@@ -46,12 +48,14 @@ final class GhostClientTypesTests: XCTestCase {
         XCTAssertTrue(response.files.isEmpty)
     }
 
-    func testClipboardPostRequestEncode() throws {
-        let request = ClipboardPostRequest(content: "test content")
-        let data = try JSONEncoder().encode(request)
-        let decoded = try JSONDecoder().decode(ClipboardPostRequest.self, from: data)
-        XCTAssertEqual(decoded.content, "test content")
-        XCTAssertEqual(decoded.type, "public.utf8-plain-text")
+    func testClipboardGetResponseConvenienceContent() throws {
+        // UTF-8 text data should produce non-nil content
+        let response = ClipboardGetResponse(data: Data("test content".utf8), type: "public.utf8-plain-text")
+        XCTAssertEqual(response.content, "test content")
+
+        // Empty data should produce empty content
+        let empty = ClipboardGetResponse(data: Data(), type: "public.utf8-plain-text")
+        XCTAssertEqual(empty.content, "")
     }
 
     func testGhostClientErrorDescriptions() {
@@ -88,15 +92,15 @@ final class GhostClientTypesTests: XCTestCase {
 
     func testMockGhostClientProtocolConformance() async throws {
         let mock = MockGhostClient()
-        mock.clipboardContent = "test"
+        mock.clipboardData = Data("test".utf8)
 
         let response = try await mock.getClipboard()
         XCTAssertEqual(response.content, "test")
         XCTAssertEqual(mock.getClipboardCallCount, 1)
 
-        try await mock.setClipboard(content: "new", type: "text")
+        try await mock.setClipboard(data: Data("new".utf8), type: "public.utf8-plain-text")
         XCTAssertEqual(mock.setClipboardCalls.count, 1)
-        XCTAssertEqual(mock.setClipboardCalls[0].content, "new")
+        XCTAssertEqual(String(data: mock.setClipboardCalls[0].data, encoding: .utf8), "new")
 
         let healthy = await mock.checkHealth()
         XCTAssertTrue(healthy)
