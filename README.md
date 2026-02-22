@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="Website/public/images/ghostvm-icon.png" width="128" height="128" alt="GhostVM icon">
+  <img src="Website/public/images/ghostvm-icon.png" width="80" height="80" alt="GhostVM icon">
 </p>
 
 <h1 align="center">GhostVM</h1>
@@ -9,57 +9,36 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/groundwater/GhostVM/releases/latest">
-    <img src="https://img.shields.io/github/v/release/groundwater/GhostVM?style=flat-square&label=Download&color=5D5CDE" alt="Latest Release">
-  </a>
-  <a href="#">
-    <img src="https://img.shields.io/badge/Platform-macOS%2015%2B-blue?style=flat-square" alt="Platform">
-  </a>
-  <a href="#">
-    <img src="https://img.shields.io/badge/Architecture-Apple%20Silicon-orange?style=flat-square" alt="Architecture">
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/github/license/groundwater/GhostVM?style=flat-square" alt="License">
-  </a>
+  <img src="https://img.shields.io/github/v/release/groundwater/GhostVM?style=flat-square&label=Latest&color=5D5CDE" alt="Latest Release">
+  &nbsp;
+  <img src="https://img.shields.io/badge/Platform-macOS%2015%2B-blue?style=flat-square" alt="Platform">
+  &nbsp;
+  <img src="https://img.shields.io/badge/Architecture-Apple%20Silicon-orange?style=flat-square" alt="Architecture">
 </p>
 
 <p align="center">
-  <a href="https://ghostvm.dev">Website</a> •
-  <a href="https://ghostvm.dev/docs/getting-started">Documentation</a> •
+  <a href="https://ghostvm.org">Website</a> •
+  <a href="https://ghostvm.org/docs/getting-started">Documentation</a> •
   <a href="https://github.com/groundwater/GhostVM/releases/latest">Download</a>
 </p>
 
 ---
 
 <p align="center">
-  <img src="Website/public/images/screenshots/hero-screenshot.jpg" width="800" alt="GhostVM running VS Code inside a virtual machine">
+  <img src="Website/public/images/screenshots/hero-screenshot.jpg" width="600" alt="GhostVM running VS Code inside a virtual machine">
 </p>
 
 GhostVM is a native macOS app for creating and managing macOS virtual machines on Apple Silicon using Apple's `Virtualization.framework`. Each VM is stored as a self-contained `.GhostVM` bundle that you can copy, move, or back up like any file.
 
-## Screenshots
-
-<p align="center">
-  <img src="Website/public/images/screenshots/vm-list-with-vms.png" width="280" alt="VM List">&nbsp;&nbsp;
-  <img src="Website/public/images/screenshots/create-vm-sheet.png" width="280" alt="Create VM">&nbsp;&nbsp;
-  <img src="Website/public/images/screenshots/restore-images.png" width="280" alt="Restore Images">
-</p>
-
-<p align="center">
-  <img src="Website/public/images/screenshots/clipboard-permission.png" width="280" alt="Clipboard Sync">&nbsp;&nbsp;
-  <img src="Website/public/images/screenshots/port-forward-notification.png" width="280" alt="Port Forwarding">&nbsp;&nbsp;
-  <img src="Website/public/images/screenshots/context-menu.png" width="280" alt="Context Menu">
-</p>
+**Perfect for:** AI agent sandboxing, disposable dev environments, testing across macOS versions, and isolating client work.
 
 ## Features
 
-- **Native Performance** — Built on Apple's Virtualization.framework, near-native speed with no emulation
-- **Self-Contained Bundles** — Each workspace is a single `.GhostVM` folder you can copy, move, or back up
-- **Snapshots & Clones** — Checkpoint before risky changes; clone instantly with APFS copy-on-write
-- **Deep Host Integration** — Clipboard sync, file transfer, shared folders, and automatic port forwarding
-- **Per-VM Dock Icons** — Each workspace appears in the Dock with its own custom icon
-- **CLI & Scripting** — Full control via `vmctl` for headless operation and automation
-- **Host API** — Programmatic access via Unix socket for agent integration
+- **Native Performance** — Near-native speed with Apple's Virtualization.framework
+- **Self-Contained Bundles** — Each workspace is a portable `.GhostVM` folder
+- **Snapshots & Clones** — Checkpoint and clone instantly with APFS copy-on-write
+- **Deep Host Integration** — Clipboard, files, folders, and automatic port forwarding
+- **Scriptable** — Full CLI (`vmctl`) and Unix socket API for automation
 
 ## Installation
 
@@ -141,7 +120,15 @@ make app
 
 </details>
 
-## Project Structure
+## Notes
+
+- VMs use NAT networking via `VZNATNetworkDeviceAttachment`
+- Shared folders use VirtioFS via `VZVirtioFileSystemDeviceConfiguration`
+- GhostTools provides clipboard sync, file transfer, and port discovery
+- Apple's EULA requires macOS guests to run on Apple-branded hardware
+
+<details>
+<summary><strong>Project Structure</strong></summary>
 
 ```
 .
@@ -153,16 +140,24 @@ make app
 │   ├── GhostVMKit/       # Shared framework (types, VM controller, utilities)
 │   ├── GhostTools/       # Guest agent (runs inside VM, vsock communication)
 │   └── GhostVMTests/     # Unit tests
-└── Website/              # Documentation site (ghostvm.dev)
+└── Website/              # Documentation site (ghostvm.org)
 ```
 
-## Notes
+</details>
 
-- VMs use NAT networking via `VZNATNetworkDeviceAttachment`
-- Shared folders use VirtioFS via `VZVirtioFileSystemDeviceConfiguration`
-- GhostTools provides clipboard sync, file transfer, and port discovery
-- Apple's EULA requires macOS guests to run on Apple-branded hardware
+<details>
+<summary><strong>Screenshots</strong></summary>
 
-## License
+<p align="center">
+  <img src="Website/public/images/screenshots/vm-list-with-vms.png" width="250" alt="VM List">&nbsp;
+  <img src="Website/public/images/screenshots/create-vm-sheet.png" width="250" alt="Create VM">&nbsp;
+  <img src="Website/public/images/screenshots/context-menu.png" width="250" alt="Context Menu">
+</p>
 
-[MIT License](LICENSE)
+<p align="center">
+  <img src="Website/public/images/screenshots/clipboard-permission.png" width="250" alt="Clipboard Sync">&nbsp;
+  <img src="Website/public/images/screenshots/port-forward-notification.png" width="250" alt="Port Forwarding">&nbsp;
+  <img src="Website/public/images/screenshots/restore-images.png" width="250" alt="Restore Images">
+</p>
+
+</details>
