@@ -30,6 +30,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var vmBundleURL: URL!
     private var vmName: String = ""
     private var state: State = .stopped
+    private var lastErrorMessage: String?
     private var bootToRecovery: Bool = false
 
     private var window: NSWindow?
@@ -1299,14 +1300,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let bundlePathHash = vmBundleURL.path.stableHash
         NSLog("GhostVMHelper: Posting state '\(state.rawValue)' for hash \(bundlePathHash)")
         NSLog("GhostVMHelper: Bundle path: \(vmBundleURL.path)")
+        var userInfo: [String: Any] = [
+            "state": state.rawValue,
+            "bundlePath": vmBundleURL.path,
+            "pid": ProcessInfo.processInfo.processIdentifier
+        ]
+        if state == .failed, let lastErrorMessage {
+            userInfo["error"] = lastErrorMessage
+        }
         center.postNotificationName(
             NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
             object: nil,
-            userInfo: [
-                "state": state.rawValue,
-                "bundlePath": vmBundleURL.path,
-                "pid": ProcessInfo.processInfo.processIdentifier
-            ],
+            userInfo: userInfo,
             deliverImmediately: true
         )
     }
@@ -2103,6 +2108,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - Error Handling
 
     private func showErrorAndQuit(_ message: String) {
+        lastErrorMessage = message
         state = .failed
         postStateChange()
 

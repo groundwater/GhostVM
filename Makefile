@@ -138,10 +138,12 @@ endif
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Copy GhostTools.dmg into app bundle Resources
 	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
-	@# If restricted entitlements are present, Xcode already performed proper Development signing above.
+	@# Re-sign after adding resources; always required because the app bundle was modified.
 	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 || \
 	    /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1; then \
-		echo "Skipping ad-hoc re-sign for Debug (restricted entitlement requires Development signing)."; \
+		echo "Re-signing Debug app with Development identity after resource copy."; \
+		codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"; \
+		codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"; \
 	else \
 		codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"; \
 		codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"; \

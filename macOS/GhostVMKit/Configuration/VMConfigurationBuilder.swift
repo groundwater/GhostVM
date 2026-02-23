@@ -59,16 +59,15 @@ public final class VMConfigurationBuilder {
             let availableInterfaces = VZBridgedNetworkInterface.networkInterfaces
             print("[VMConfigurationBuilder] Available interfaces: \(availableInterfaces.map { $0.identifier }.joined(separator: ", "))")
 
-            if let interfaceId = networkConfig.bridgeInterfaceIdentifier,
-               let interface = availableInterfaces.first(where: { $0.identifier == interfaceId }) {
-                print("[VMConfigurationBuilder] Found interface \(interfaceId), creating bridged attachment")
-                networkDevice.attachment = VZBridgedNetworkDeviceAttachment(interface: interface)
-                print("[VMConfigurationBuilder] Successfully created bridged attachment")
-            } else {
-                // Fallback to NAT if configured interface is unavailable
-                print("[VMConfigurationBuilder] Warning: Bridged interface '\(networkConfig.bridgeInterfaceIdentifier ?? "nil")' not found, falling back to NAT")
-                networkDevice.attachment = VZNATNetworkDeviceAttachment()
+            guard let interfaceId = networkConfig.bridgeInterfaceIdentifier, !interfaceId.isEmpty else {
+                throw VMError.message("Bridged networking requires a selected host network interface.")
             }
+            guard let interface = availableInterfaces.first(where: { $0.identifier == interfaceId }) else {
+                throw VMError.message("Bridged network interface '\(interfaceId)' is not available on this Mac.")
+            }
+            print("[VMConfigurationBuilder] Found interface \(interfaceId), creating bridged attachment")
+            networkDevice.attachment = VZBridgedNetworkDeviceAttachment(interface: interface)
+            print("[VMConfigurationBuilder] Successfully created bridged attachment")
         }
 
         // Use persistent MAC address from config to ensure suspend/resume consistency.

@@ -389,8 +389,9 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             cleanupHelper()
             transition(to: .stopped, message: "Stopped")
         case "failed":
+            let errorMessage = notification.userInfo?["error"] as? String ?? "VM error"
             cleanupHelper()
-            transition(to: .failed("VM error"))
+            transition(to: .failed(errorMessage))
         default:
             break
         }
@@ -486,10 +487,25 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
             return
         }
 
+        if let forcedError = Self.uiTestingForcedStartErrorMessage() {
+            transition(to: .failed(forcedError))
+            return
+        }
+
         transition(to: .starting, message: "Starting…")
 
         // Launch the helper app which hosts and runs the VM
         launchHelperApp()
+    }
+
+    private static func uiTestingForcedStartErrorMessage() -> String? {
+        let args = ProcessInfo.processInfo.arguments
+        guard args.contains("--ui-testing") else { return nil }
+        guard let index = args.firstIndex(of: "--ui-testing-force-start-error"),
+              args.indices.contains(index + 1) else {
+            return nil
+        }
+        return args[index + 1]
     }
 
     // Legacy in-process start method (kept for reference, not used)
