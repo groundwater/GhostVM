@@ -9,3 +9,4 @@ tools/
 .claude/
 .codex/
 .vscode/
+.var/

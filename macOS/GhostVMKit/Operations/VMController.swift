@@ -452,7 +452,8 @@ public final class VMController {
             lastInstallVersion: nil,
             lastInstallDate: nil,
             legacyName: nil,
-            macAddress: macAddress.string
+            macAddress: macAddress.string,
+            networkConfig: options.networkConfig
         )
 
         let store = VMConfigStore(layout: layout)
@@ -608,6 +609,7 @@ public final class VMController {
                 isSuspended: false,
                 macAddress: macAddress.string,
                 portForwards: [],
+                networkConfig: sourceConfig.networkConfig,
                 iconMode: nil
             )
 

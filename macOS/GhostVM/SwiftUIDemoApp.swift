@@ -656,6 +656,7 @@ struct CreateVMDemoView: View {
     @State private var memoryGiB: String = "8"
     @State private var diskGiB: String = "256"
     @State private var sharedFolders: [SharedFolderConfig] = []
+    @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
     @State private var isCreating: Bool = false
@@ -725,6 +726,10 @@ struct CreateVMDemoView: View {
 
             labeledRow("Shared Folders") {
                 SharedFolderListView(folders: $sharedFolders)
+            }
+
+            labeledRow("Network") {
+                NetworkSettingsView(networkConfig: $networkConfig)
             }
 
             Spacer(minLength: 8)
@@ -884,6 +889,7 @@ struct CreateVMDemoView: View {
         opts.diskGiB = UInt64(diskGiB) ?? 256
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
+        opts.networkConfig = networkConfig
 
         isCreating = true
 
@@ -1256,6 +1262,7 @@ struct EditVMView: View {
     @State private var memoryGiB: String = "8"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
+    @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
     @State private var diskGiB: String = ""
     @State private var customIcon: NSImage?
     @State private var customIconChanged: Bool = false
@@ -1342,8 +1349,27 @@ struct EditVMView: View {
                             SharedFolderListView(folders: $sharedFolders)
                         }
 
-                        labeledRow("Port Forwards") {
-                            PortForwardListView(forwards: $portForwards)
+                        labeledRow("Network") {
+                            NetworkSettingsView(networkConfig: $networkConfig)
+                        }
+
+                        if networkConfig.mode == .nat {
+                            labeledRow("Port Forwards") {
+                                PortForwardListView(forwards: $portForwards)
+                            }
+                        } else {
+                            labeledRow("Port Forwards") {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Port forwarding is only available in NAT mode")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                    if !portForwards.isEmpty {
+                                        Text("\(portForwards.count) port forward(s) will be disabled in bridged mode")
+                                            .font(.caption)
+                                            .foregroundStyle(.orange)
+                                    }
+                                }
+                            }
                         }
 
                         Text("Changes will take effect the next time you start the VM.")
@@ -1616,6 +1642,9 @@ struct EditVMView: View {
                     // Load port forwards
                     self.portForwards = config.portForwards
 
+                    // Load network config
+                    self.networkConfig = config.networkConfig ?? NetworkConfig.defaultConfig
+
                     // Load icon mode
                     self.isDynamicIconMode = config.iconMode == "stack"
                     self.isAppIconMode = config.iconMode == "app"
@@ -1662,7 +1691,7 @@ struct EditVMView: View {
                     portForwards: validForwards
                 )
 
-                // Save icon mode
+                // Save icon mode and network config
                 let layout = VMFileLayout(bundleURL: vm.bundleURL)
                 let store = VMConfigStore(layout: layout)
                 var storedConfig = try store.load()
@@ -1675,6 +1704,7 @@ struct EditVMView: View {
                 } else {
                     storedConfig.iconMode = nil
                 }
+                storedConfig.networkConfig = networkConfig
                 try store.save(storedConfig)
 
                 // Save or remove custom icon
