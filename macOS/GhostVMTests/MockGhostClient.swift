@@ -3,9 +3,9 @@ import Foundation
 
 /// Test double for GhostClientProtocol that records calls and returns canned responses.
 final class MockGhostClient: GhostClientProtocol {
-    var clipboardContent: String?
+    var clipboardData: Data?
     var clipboardType: String?
-    var setClipboardCalls: [(content: String, type: String)] = []
+    var setClipboardCalls: [(data: Data, type: String)] = []
     var sentFiles: [(url: URL, relativePath: String?, batchID: String?, isLastInBatch: Bool, permissions: Int?)] = []
     var healthResult: Bool = true
     var shouldThrow: Error?
@@ -20,12 +20,12 @@ final class MockGhostClient: GhostClientProtocol {
     func getClipboard() async throws -> ClipboardGetResponse {
         getClipboardCallCount += 1
         if let error = shouldThrow { throw error }
-        return ClipboardGetResponse(content: clipboardContent, type: clipboardType, changeCount: nil)
+        return ClipboardGetResponse(data: clipboardData, type: clipboardType)
     }
 
-    func setClipboard(content: String, type: String) async throws {
+    func setClipboard(data: Data, type: String) async throws {
         if let error = shouldThrow { throw error }
-        setClipboardCalls.append((content: content, type: type))
+        setClipboardCalls.append((data: data, type: type))
     }
 
     func sendFile(fileURL: URL, relativePath: String?, batchID: String?, isLastInBatch: Bool, permissions: Int?, progressHandler: ((Double) -> Void)?) async throws -> String {

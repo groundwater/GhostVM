@@ -14,7 +14,7 @@ public struct InitOptions {
     public init(
         cpus: Int = 4,
         memoryGiB: UInt64 = 8,
-        diskGiB: UInt64 = 64,
+        diskGiB: UInt64 = 256,
         restoreImagePath: String? = nil,
         sharedFolderPath: String? = nil,
         sharedFolderWritable: Bool = false,

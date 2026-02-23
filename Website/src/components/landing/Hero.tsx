@@ -6,15 +6,14 @@ export default function Hero() {
     <section className="py-20 sm:py-28">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
         <h1 className="text-4xl sm:text-5xl lg:text-6xl font-bold tracking-tight mb-6">
-          Agent Workspace
+          Your agents need more than a container.
           <br />
           <span className="text-ghost-600 dark:text-ghost-400">
-            Virtualization for macOS
+            Give them a Mac.
           </span>
         </h1>
         <p className="text-lg sm:text-xl text-gray-600 dark:text-gray-400 max-w-2xl mx-auto mb-10">
-          Isolated macOS VMs with deep host integration. Switch between
-          workspaces like apps. Drive them with the GUI, the CLI, or an agent.
+          GhostVM runs fully isolated macOS workspaces on your machine, one per agent, project, or client. You control what data each one can see.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-14">
           <Link

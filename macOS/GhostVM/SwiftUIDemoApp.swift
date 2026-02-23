@@ -4,6 +4,23 @@ import Combine
 import GhostVMKit
 import Sparkle
 
+/// Parse a dev build timestamp (YYYYMMDDHHMMSS) from the patch component of a version string.
+/// Returns a formatted date string like "Feb 20, 2026 11:59 PM", or nil if not parseable.
+private func formattedBuildDate(from version: String) -> String? {
+    let parts = version.split(separator: ".")
+    guard parts.count >= 3 else { return nil }
+    let patch = String(parts[2])
+    guard patch.count == 14, patch.allSatisfy(\.isNumber) else { return nil }
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMddHHmmss"
+    df.timeZone = TimeZone.current
+    guard let date = df.date(from: patch) else { return nil }
+    let out = DateFormatter()
+    out.dateStyle = .medium
+    out.timeStyle = .short
+    return out.string(from: date)
+}
+
 @main
 @available(macOS 13.0, *)
 struct GhostVMSwiftUIApp: App {
@@ -131,6 +148,21 @@ struct DemoAppCommands: Commands {
     }
 
     var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About GhostVM") {
+                let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+                var options: [NSApplication.AboutPanelOptionKey: Any] = [:]
+                if let formatted = formattedBuildDate(from: version) {
+                    let credits = NSAttributedString(
+                        string: "Built \(formatted)",
+                        attributes: [.font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)]
+                    )
+                    options[.credits] = credits
+                }
+                NSApplication.shared.orderFrontStandardAboutPanel(options: options)
+            }
+        }
+
         CommandGroup(replacing: .appSettings) {
             Button("Settings\u{2026}") {
                 openWindow(id: "settings")
@@ -622,7 +654,7 @@ struct CreateVMDemoView: View {
 
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
-    @State private var diskGiB: String = "64"
+    @State private var diskGiB: String = "256"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
     @State private var restoreItems: [RestoreItem] = []
@@ -636,6 +668,7 @@ struct CreateVMDemoView: View {
     private struct RestoreItem: Identifiable {
         let path: String
         let title: String
+        let version: String?
         var id: String { path }
     }
 
@@ -675,6 +708,16 @@ struct CreateVMDemoView: View {
                     Text("GiB")
                         .foregroundStyle(.secondary)
                 }
+            }
+            HStack(alignment: .top, spacing: 12) {
+                Color.clear.frame(width: labelWidth)
+                Label(
+                    "APFS sparse file: Finder may show the full 256 GiB logical size, but physical usage only grows as blocks are written. Resize after install is not supported.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             labeledRow("Restore Image*") {
@@ -775,9 +818,16 @@ struct CreateVMDemoView: View {
         var items: [RestoreItem] = []
         for image in cached {
             if let restore = restoreStore.images.first(where: { $0.filename == image.filename }) {
-                items.append(RestoreItem(path: image.fileURL.path, title: restore.name))
+                let normalizedVersion: String?
+                let trimmedVersion = restore.version.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmedVersion.isEmpty || trimmedVersion.caseInsensitiveCompare("unknown") == .orderedSame {
+                    normalizedVersion = nil
+                } else {
+                    normalizedVersion = trimmedVersion
+                }
+                items.append(RestoreItem(path: image.fileURL.path, title: restore.name, version: normalizedVersion))
             } else {
-                items.append(RestoreItem(path: image.fileURL.path, title: image.filename))
+                items.append(RestoreItem(path: image.fileURL.path, title: image.filename, version: nil))
             }
         }
 
@@ -796,13 +846,23 @@ struct CreateVMDemoView: View {
         guard canCreate, !isCreating else { return }
 
         guard let restorePath = selectedRestorePath else { return }
-        let filename = URL(fileURLWithPath: restorePath)
-            .deletingPathExtension()
-            .lastPathComponent
-        let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
-        let suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
+        let suggestedName: String
+        if let selectedItem = restoreItems.first(where: { $0.path == restorePath }),
+           let version = selectedItem.version {
+            suggestedName = "macOS \(version)"
+        } else {
+            let filename = URL(fileURLWithPath: restorePath)
+                .deletingPathExtension()
+                .lastPathComponent
+            let trimmed = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+            suggestedName = trimmed.isEmpty ? "Virtual Machine" : trimmed
+        }
 
-        SavePanelAdapter.chooseVMBundleURL(suggestedName: suggestedName) { url in
+        let vmRootDirectory = VMController().currentRootDirectory
+        SavePanelAdapter.chooseVMBundleURL(
+            suggestedName: suggestedName,
+            initialDirectoryURL: vmRootDirectory
+        ) { url in
             guard let url else { return }
             DispatchQueue.main.async {
                 self.performCreate(at: url)
@@ -826,7 +886,7 @@ struct CreateVMDemoView: View {
         var opts = InitOptions()
         opts.cpus = Int(cpuCount) ?? 4
         opts.memoryGiB = UInt64(memoryGiB) ?? 8
-        opts.diskGiB = UInt64(diskGiB) ?? 64
+        opts.diskGiB = UInt64(diskGiB) ?? 256
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
         opts.networkConfig = networkConfig
@@ -1755,6 +1815,21 @@ struct PortForwardEditorView: View {
                     session.removePortForward(hostPort: hostPort)
                 }
             )
+
+            if let runtimeError = portForwardService.lastRuntimeError {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(
+                        "Forward localhost:\(runtimeError.hostPort) -> guest:\(runtimeError.guestPort) failed (\(runtimeError.phase.rawValue)): \(runtimeError.message)"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.red)
+
+                    Button("Dismiss") {
+                        portForwardService.clearRuntimeError()
+                    }
+                    .font(.caption)
+                }
+            }
         }
         .padding()
         .frame(width: 300)
@@ -1831,6 +1906,8 @@ struct VMContextMenu: View {
         let lowerStatus = vm.status.lowercased()
         let isRunning = lowerStatus.contains("running") || lowerStatus.contains("starting") || lowerStatus.contains("stopping")
         let isSuspended = lowerStatus.contains("suspended")
+        let canSuspend = lowerStatus.contains("running")
+        let canShutDown = lowerStatus.contains("running")
 
         // Show Install for macOS VMs that need installation
         if vm.needsInstall {
@@ -1850,11 +1927,15 @@ struct VMContextMenu: View {
         }
         .disabled(vm.needsInstall || isRunning)
 
-        Button("Stop") {
-            // VM stop is coordinated by closing the VM window; for now this
-            // entry is present but handled via the window close behavior.
+        Button("Suspend") {
+            App2VMSessionRegistry.shared.session(for: vm.bundlePath)?.suspend()
         }
-        .disabled(!isRunning)
+        .disabled(!canSuspend)
+
+        Button("Shut Down") {
+            App2VMSessionRegistry.shared.session(for: vm.bundlePath)?.stop()
+        }
+        .disabled(!canShutDown)
 
         Button("Terminate") {
             requestTerminate()
@@ -2014,6 +2095,7 @@ struct VMWindowView: View {
     @StateObject private var session: App2VMRunSession
     @StateObject private var fileTransferService = FileTransferService()
     @StateObject private var healthCheckService = HealthCheckService()
+    @State private var ghostToolsInstallState: GhostToolsInstallState = .notInstalled
     @AppStorage("captureSystemKeys") private var captureSystemKeys: Bool = true
     @State private var showPortForwardEditor = false
     @State private var shutDownCooldown = false
@@ -2071,6 +2153,40 @@ struct VMWindowView: View {
 
     private var clipboardSyncHelp: String {
         "Clipboard Sync: \(session.clipboardSyncMode.displayName)"
+    }
+
+    private var ghostToolsToolbarPresentation: GhostToolsToolbarPresentation {
+        GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: healthCheckService.status
+        )
+    }
+
+    private var ghostToolsStatusText: String {
+        switch healthCheckService.status {
+        case .connecting:
+            return "Connecting"
+        case .connected:
+            return "Connected"
+        case .notFound:
+            return "Not Found"
+        }
+    }
+
+    private var ghostToolsStatusColor: Color {
+        switch healthCheckService.status {
+        case .connected:
+            return .green
+        case .notFound:
+            return .red
+        case .connecting:
+            return .yellow
+        }
+    }
+
+    private func openGhostToolsInstallDocs() {
+        guard let url = URL(string: "https://ghostvm.org/docs/ghosttools") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     var body: some View {
@@ -2137,15 +2253,28 @@ struct VMWindowView: View {
         }
         .toolbar {
             ToolbarItem(placement: .automatic) {
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(healthCheckService.isConnected ? Color.green : Color.gray.opacity(0.5))
-                        .frame(width: 8, height: 8)
-                    Text("Guest Tools")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Group {
+                    switch ghostToolsToolbarPresentation {
+                    case .installCallToAction:
+                        Button("Install Ghost Tools") {
+                            openGhostToolsInstallDocs()
+                        }
+                    case .liveStatus:
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(ghostToolsStatusColor)
+                                .frame(width: 8, height: 8)
+                            Text("Guest Tools: \(ghostToolsStatusText)")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                 }
-                .help(healthCheckService.isConnected ? "GhostTools is connected" : "GhostTools is not connected")
+                .help(
+                    ghostToolsToolbarPresentation == .installCallToAction
+                    ? "Install Ghost Tools in the guest VM"
+                    : "Ghost Tools status: \(ghostToolsStatusText)"
+                )
             }
             ToolbarItem(placement: .automatic) {
                 Menu {
@@ -2267,6 +2396,9 @@ struct VMWindowView: View {
             } else {
                 healthCheckService.stop()
             }
+        }
+        .onChange(of: healthCheckService.status) { _, status in
+            ghostToolsInstallState.record(healthStatus: status)
         }
         .onDisappear {
             healthCheckService.stop()
@@ -2613,5 +2745,3 @@ struct FileTransferProgressView: View {
         .frame(maxWidth: 300)
     }
 }
-
-

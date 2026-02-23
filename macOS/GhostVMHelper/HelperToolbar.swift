@@ -1,4 +1,5 @@
 import AppKit
+import GhostVMKit
 
 // MARK: - Shared Folder Menu Helpers
 
@@ -75,6 +76,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     private let toolbar: NSToolbar
     private var guestToolsStatus: GuestToolsStatus = .connecting
+    private var ghostToolsInstallState: GhostToolsInstallState = .notInstalled
     private var portForwardCount = 0
     private var sharedFolderCount = 0
     private var clipboardSyncMode = "disabled"
@@ -89,6 +91,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var shutDownEnabled = true
 
     private var guestToolsItem: NSToolbarItem?
+    private weak var guestToolsButton: NSButton?
     private weak var guestToolsDot: NSView?
     private weak var guestToolsLabel: NSTextField?
     private var iconChooserItem: NSToolbarItem?
@@ -127,6 +130,24 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var statusAnimationTarget: String = ""
     private var statusAnimationIndex: Int = 0
     private var lastAnimatedStatus: GuestToolsStatus?
+    private var isGhostToolsConnected: Bool { guestToolsStatus == .connected }
+
+    private let iconExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "Changing the VM icon requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+    private let clipboardExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "Clipboard sync requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+    private let portForwardsExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "Port forwarding requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
+    private let genericExplainer = GhostToolsInstallExplainer(
+        title: "GhostTools Required",
+        body: "This feature requires GhostTools.\n\nGhostTools should start automatically. If it does not, open the GhostTools volume and launch GhostTools.app."
+    )
 
     // MARK: - Initialization
 
@@ -148,15 +169,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - State Updates
 
     func setGuestToolsStatus(_ status: GuestToolsStatus) {
-        let wasNotFound = guestToolsStatus == .notFound
         guestToolsStatus = status
+        ghostToolsInstallState.record(healthStatus: status)
         updateGuestToolsButton()
+        updatePortForwardsButton()
+        updateClipboardSyncButton()
+        rebuildCaptureCommandsMenu()
 
-        if status == .notFound && !wasNotFound {
-            // Auto-show popover on first transition to notFound
-            showGuestToolsInfoPopover()
-        } else if status != .notFound {
-            // Close popover when status recovers
+        if status == .connected {
             guestToolsInfoPanel?.close()
             guestToolsInfoPanel = nil
         }
@@ -244,7 +264,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
-            ItemID.guestToolsStatus,
             ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
@@ -260,7 +279,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [
-            ItemID.guestToolsStatus,
             ItemID.iconChooser,
             ItemID.portForwards,
             ItemID.sharedFolders,
@@ -277,8 +295,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch itemIdentifier {
-        case ItemID.guestToolsStatus:
-            return makeGuestToolsItem()
         case ItemID.iconChooser:
             return makeIconChooserItem()
         case ItemID.portForwards:
@@ -319,6 +335,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         button.title = ""
         button.target = self
         button.action = #selector(guestToolsClicked)
+        guestToolsButton = button
 
         // Status dot (8×8 colored circle)
         let dot = NSView(frame: NSRect(x: 4, y: 7, width: 8, height: 8))
@@ -516,33 +533,58 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - Button Updates
 
     private func updateGuestToolsButton() {
-        guard let item = guestToolsItem else { return }
+        guard let item = guestToolsItem, let button = guestToolsButton else { return }
         guard let dot = guestToolsDot, let label = guestToolsLabel else { return }
 
-        let shouldAnimate = lastAnimatedStatus != guestToolsStatus
-        lastAnimatedStatus = guestToolsStatus
+        let presentation = GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: guestToolsStatus
+        )
 
-        switch guestToolsStatus {
-        case .connecting:
-            dot.layer?.backgroundColor = NSColor.systemYellow.cgColor
-            label.textColor = .secondaryLabelColor
-            item.toolTip = "GhostTools is connecting"
-            if shouldAnimate {
-                animateStatusText(to: "Connecting\u{2026}", disappearAfter: nil)
-            }
-        case .connected:
-            dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+        switch presentation {
+        case .installCallToAction:
+            cancelStatusAnimation()
+            lastAnimatedStatus = nil
+            dot.isHidden = true
+            button.isBordered = true
+            button.bezelStyle = .rounded
             label.textColor = .labelColor
-            item.toolTip = "GhostTools is connected"
-            if shouldAnimate {
-                animateStatusText(to: "Guest Tools Connected", disappearAfter: 1.5)
-            }
-        case .notFound:
-            dot.layer?.backgroundColor = NSColor.systemRed.cgColor
-            label.textColor = .secondaryLabelColor
-            item.toolTip = "GhostTools not found — click for help"
-            if shouldAnimate {
-                animateStatusText(to: "Not Found", disappearAfter: nil)
+            label.stringValue = "Install Ghost Tools"
+            label.frame.origin.x = 8
+            item.toolTip = "Install Ghost Tools in the guest VM"
+            resizeGuestToolsButton()
+
+        case .liveStatus(let status):
+            dot.isHidden = false
+            button.isBordered = false
+            button.bezelStyle = .toolbar
+            label.frame.origin.x = 18
+
+            let shouldAnimate = lastAnimatedStatus != status
+            lastAnimatedStatus = status
+
+            switch status {
+            case .connecting:
+                dot.layer?.backgroundColor = NSColor.systemYellow.cgColor
+                label.textColor = .secondaryLabelColor
+                item.toolTip = "GhostTools is connecting"
+                if shouldAnimate {
+                    animateStatusText(to: "Connecting\u{2026}", disappearAfter: nil)
+                }
+            case .connected:
+                dot.layer?.backgroundColor = NSColor.systemGreen.cgColor
+                label.textColor = .labelColor
+                item.toolTip = "GhostTools is connected"
+                if shouldAnimate {
+                    animateStatusText(to: "Guest Tools Connected", disappearAfter: 1.5)
+                }
+            case .notFound:
+                dot.layer?.backgroundColor = NSColor.systemRed.cgColor
+                label.textColor = .secondaryLabelColor
+                item.toolTip = "GhostTools not found — click for help"
+                if shouldAnimate {
+                    animateStatusText(to: "Not Found", disappearAfter: nil)
+                }
             }
         }
     }
@@ -555,6 +597,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             item.label = "Ports"
         }
         (item.view as? NSButton)?.image = portForwardsIcon()
+        item.toolTip = isGhostToolsConnected ? "Manage port forwards" : "Install Ghost Tools to manage port forwards"
     }
 
     private func updateSharedFoldersButton() {
@@ -571,10 +614,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private func updateClipboardSyncButton() {
         guard let item = clipboardSyncItem, let button = item.view as? NSButton else { return }
 
-        let enabled = clipboardSyncMode != "disabled"
+        let enabled = isGhostToolsConnected && clipboardSyncMode != "disabled"
         let symbolName = enabled ? "clipboard.fill" : "clipboard"
         button.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Clipboard Sync")?.withSymbolConfiguration(iconConfig)
-        item.toolTip = enabled ? "Clipboard sync enabled" : "Clipboard sync disabled"
+        if !isGhostToolsConnected {
+            item.toolTip = "Install Ghost Tools to use clipboard sync"
+        } else {
+            item.toolTip = enabled ? "Clipboard sync enabled" : "Clipboard sync disabled"
+        }
     }
 
     private func updateCaptureKeysButton() {
@@ -664,13 +711,15 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     /// Resize the guest tools button to fit the dot + current label text.
     private func resizeGuestToolsButton() {
         guard let button = guestToolsItem?.view,
+              let dot = guestToolsDot,
               let label = guestToolsLabel else { return }
         label.sizeToFit()
         let width: CGFloat
         if label.stringValue.isEmpty {
             width = 16  // 4 padding + 8 dot + 4 padding
         } else {
-            width = 18 + label.frame.width + 4  // dot(4+8) + spacing(6) + text + padding(4)
+            let trailingPadding: CGFloat = dot.isHidden ? 8 : 4
+            width = label.frame.minX + label.frame.width + trailingPadding
         }
         let size = NSSize(width: width, height: button.frame.height)
         button.setFrameSize(size)
@@ -684,7 +733,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private func rebuildCaptureCommandsMenu() {
         captureCommandsMenu.removeAllItems()
 
-        // --- Clipboard Sync submenu ---
+        // Clipboard Sync submenu
         let clipboardSubmenu = NSMenu()
         let clipModes: [(title: String, mode: String)] = [
             ("Off", "disabled"),
@@ -703,14 +752,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         clipboardItem.submenu = clipboardSubmenu
         captureCommandsMenu.addItem(clipboardItem)
 
-        captureCommandsMenu.addItem(NSMenuItem.separator())
-
-        // --- Port Forwards ---
+        // Port Forwards
         let portsItem = NSMenuItem(title: "Port Forwards\u{2026}", action: #selector(portForwardsFromMenu), keyEquivalent: "")
         portsItem.target = self
         captureCommandsMenu.addItem(portsItem)
 
-        // --- Shared Folders submenu ---
+        // Shared Folders submenu
         let foldersSubmenu = NSMenu()
         for entry in sharedFolderEntries {
             let folderItem = NSMenuItem(title: "\(entry.displayName)\(entry.readOnly ? " (R/O)" : "")", action: #selector(revealSharedFolderFromMenu(_:)), keyEquivalent: "")
@@ -729,6 +776,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         let foldersItem = NSMenuItem(title: "Shared Folders", action: nil, keyEquivalent: "")
         foldersItem.submenu = foldersSubmenu
         captureCommandsMenu.addItem(foldersItem)
+
+        // VM icon chooser
+        let iconItem = NSMenuItem(title: "Change VM Icon\u{2026}", action: #selector(iconChooserFromMenu), keyEquivalent: "")
+        iconItem.target = self
+        captureCommandsMenu.addItem(iconItem)
 
         captureCommandsMenu.addItem(NSMenuItem.separator())
 
@@ -766,10 +818,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             captureCommandsMenu.addItem(filesItem)
         }
 
-        let iconItem = NSMenuItem(title: "Change VM Icon\u{2026}", action: #selector(iconChooserFromMenu), keyEquivalent: "")
-        iconItem.target = self
-        captureCommandsMenu.addItem(iconItem)
-
         captureCommandsMenu.addItem(NSMenuItem.separator())
 
         // --- VM lifecycle ---
@@ -791,7 +839,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     private func portForwardsIcon() -> NSImage? {
-        let symbolName = autoPortMapEnabled ? "powerplug.fill" : "powerplug"
+        let symbolName: String
+        if !isGhostToolsConnected {
+            symbolName = "powerplug"
+        } else {
+            symbolName = autoPortMapEnabled ? "powerplug.fill" : "powerplug"
+        }
         return NSImage(systemSymbolName: symbolName, accessibilityDescription: "Port Forwards")?.withSymbolConfiguration(iconConfig)
     }
 
@@ -876,24 +929,41 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - Actions
 
     @objc private func guestToolsClicked() {
-        guard guestToolsStatus == .notFound else { return }
-        showGuestToolsInfoPopover()
+        let presentation = GhostToolsToolbarPolicy.presentation(
+            installState: ghostToolsInstallState,
+            healthStatus: guestToolsStatus
+        )
+
+        switch presentation {
+        case .installCallToAction, .liveStatus(.notFound):
+            showGhostToolsInstallInfo(from: guestToolsItem?.view, explainer: genericExplainer)
+        case .liveStatus(.connecting), .liveStatus(.connected):
+            break
+        }
     }
 
-    private func showGuestToolsInfoPopover() {
-        guard let view = guestToolsItem?.view else { return }
+    private func showGhostToolsInstallInfo(from view: NSView?, explainer: GhostToolsInstallExplainer) {
+        guard let view = view else { return }
 
-        guestToolsInfoPanel?.close()
+        if guestToolsInfoPanel?.isShown == true {
+            guestToolsInfoPanel?.close()
+            guestToolsInfoPanel = nil
+            return
+        }
 
         let panel = GuestToolsInfoPanel()
         panel.onClose = { [weak self] in
             self?.guestToolsInfoPanel = nil
         }
-        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY, explainer: explainer)
         guestToolsInfoPanel = panel
     }
 
     @objc private func iconChooserClicked() {
+        if !isGhostToolsConnected {
+            showGhostToolsInstallInfo(from: iconChooserItem?.view, explainer: iconExplainer)
+            return
+        }
         if iconChooserPanel?.isShown == true {
             iconChooserPanel?.close()
         } else {
@@ -902,6 +972,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func toggleClipboardSync() {
+        if !isGhostToolsConnected {
+            showGhostToolsInstallInfo(from: clipboardSyncItem?.view, explainer: clipboardExplainer)
+            return
+        }
         let newMode = (clipboardSyncMode == "disabled") ? "bidirectional" : "disabled"
         clipboardSyncMode = newMode
         updateClipboardSyncButton()
@@ -909,6 +983,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func portForwardsClicked() {
+        if !isGhostToolsConnected {
+            showGhostToolsInstallInfo(from: portForwardsItem?.view, explainer: portForwardsExplainer)
+            return
+        }
         // Close notification panel if shown
         if portForwardNotificationPanel?.isShown == true {
             portForwardNotificationPanel?.close()
@@ -1008,7 +1086,16 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func portForwardsFromMenu() {
-        portForwardsClicked()
+        // Menu path intentionally bypasses toolbar GhostTools gating.
+        if portForwardNotificationPanel?.isShown == true {
+            portForwardNotificationPanel?.close()
+            portForwardNotificationPanel = nil
+        }
+        if portForwardPermissionPanel?.isShown == true {
+            portForwardPermissionPanel?.close()
+        } else {
+            showPortForwardPermissionPopover()
+        }
     }
 
     @objc private func revealSharedFolderFromMenu(_ sender: NSMenuItem) {
@@ -1104,9 +1191,17 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         clipboardPermissionPanel?.isShown ?? false
     }
 
-    func showURLPermissionPopover() {
-        guard let view = guestToolsItem?.view else { return }
+    func clipboardPermissionAllowOnce() {
+        guard let panel = clipboardPermissionPanel else { return }
+        clipboardPermissionPanelDidAllowOnce(panel)
+    }
 
+    func clipboardPermissionDeny() {
+        guard let panel = clipboardPermissionPanel else { return }
+        clipboardPermissionPanelDidDeny(panel)
+    }
+
+    func showURLPermissionPopover() {
         urlPermissionPanel?.close()
 
         let panel = URLPermissionPanel()
@@ -1116,7 +1211,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             self.urlPermissionPanel = nil
             self.delegate?.toolbarURLPermissionPanelDidClose(self)
         }
-        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+
+        if let button = clipboardSyncItem?.view, button.window != nil {
+            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else if let button = captureKeysItem?.view, button.window != nil {
+            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else {
+            return
+        }
         urlPermissionPanel = panel
     }
 
@@ -1127,6 +1229,16 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     var isURLPermissionPopoverShown: Bool {
         urlPermissionPanel?.isShown ?? false
+    }
+
+    func urlPermissionAllowOnce() {
+        guard let panel = urlPermissionPanel else { return }
+        urlPermissionPanelDidAllowOnce(panel)
+    }
+
+    func urlPermissionDeny() {
+        guard let panel = urlPermissionPanel else { return }
+        urlPermissionPanelDidDeny(panel)
     }
 
     func setURLPermissionURLs(_ urls: [String]) {

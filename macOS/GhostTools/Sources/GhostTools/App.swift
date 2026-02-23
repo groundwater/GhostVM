@@ -2,12 +2,30 @@ import AppKit
 import SwiftUI
 import UserNotifications
 import CoreServices
+import os
 
 /// GhostTools version - reads from Info.plist; falls back to "dev" when running bare binary
 let kGhostToolsVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
 
 /// GhostTools build number (Unix timestamp) - used for update detection
 let kGhostToolsBuild = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+
+/// Parse a dev build timestamp (YYYYMMDDHHMMSS) from the patch component of a version string.
+/// Returns a formatted date string like "Feb 20, 2026 11:59 PM", or nil if not parseable.
+private func formattedBuildDate(from version: String) -> String? {
+    let parts = version.split(separator: ".")
+    guard parts.count >= 3 else { return nil }
+    let patch = String(parts[2])
+    guard patch.count == 14, patch.allSatisfy(\.isNumber) else { return nil }
+    let df = DateFormatter()
+    df.dateFormat = "yyyyMMddHHmmss"
+    df.timeZone = TimeZone.current
+    guard let date = df.date(from: patch) else { return nil }
+    let out = DateFormatter()
+    out.dateStyle = .medium
+    out.timeStyle = .short
+    return out.string(from: date)
+}
 
 /// Target install location
 let kApplicationsPath = "/Applications/GhostTools.app"
@@ -39,11 +57,13 @@ struct GhostToolsApp: App {
 /// App delegate handles menu bar setup and server lifecycle
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "App")
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
     private var tunnelServer: TunnelServer?
     private var healthServer: HealthServer?
     private var isServerRunning = false
+    private var lastTunnelError: String?
     private var isFilePickerOpen = false
     private var lockFileHandle: FileHandle?
     // Use bundle ID from Info.plist, fallback to hardcoded for compatibility
@@ -725,6 +745,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         titleItem.isEnabled = false
         menu.addItem(titleItem)
 
+        if let buildDate = formattedBuildDate(from: kGhostToolsVersion) {
+            let dateItem = NSMenuItem(title: "Built \(buildDate)", action: nil, keyEquivalent: "")
+            dateItem.isEnabled = false
+            menu.addItem(dateItem)
+        }
+
         menu.addItem(NSMenuItem.separator())
 
         // Status item
@@ -732,6 +758,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let statusItem = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
         statusItem.isEnabled = false
         menu.addItem(statusItem)
+
+        if let tunnelError = lastTunnelError {
+            let tunnelErrorItem = NSMenuItem(title: "Tunnel: Error - \(tunnelError)", action: nil, keyEquivalent: "")
+            tunnelErrorItem.isEnabled = false
+            menu.addItem(tunnelErrorItem)
+        }
 
         menu.addItem(NSMenuItem.separator())
 
@@ -905,15 +937,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func startTunnelServer() {
-        print("[GhostTools] startTunnelServer() called")
+        Self.logger.info("startTunnelServer() called")
         Task {
             do {
                 tunnelServer = TunnelServer()
-                print("[GhostTools] Starting tunnel server on vsock port 5001...")
+                tunnelServer?.onOperationalError = { [weak self] runtimeError in
+                    Task { @MainActor in
+                        self?.lastTunnelError = runtimeError.message
+                        self?.updateMenu()
+                    }
+                    Self.logger.error("Tunnel operational error phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(runtimeError.targetPort ?? 0): \(runtimeError.message, privacy: .public)")
+                }
+                tunnelServer?.onConnectionSuccess = { [weak self] in
+                    Task { @MainActor in
+                        self?.lastTunnelError = nil
+                        self?.updateMenu()
+                    }
+                }
+                Self.logger.info("Starting tunnel server on vsock port 5001...")
                 try await tunnelServer?.start()
-                print("[GhostTools] Tunnel server started successfully")
+                Self.logger.info("Tunnel server started successfully")
             } catch {
-                print("[GhostTools] Failed to start tunnel server: \(error)")
+                let message = "Failed to start tunnel server: \(error.localizedDescription)"
+                Self.logger.error("\(message, privacy: .public)")
+                lastTunnelError = message
+                updateMenu()
             }
         }
     }
@@ -955,4 +1003,3 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ForegroundAppService.shared.start()
     }
 }
-

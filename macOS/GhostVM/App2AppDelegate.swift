@@ -83,6 +83,7 @@ final class App2AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppIconAdapter.shared.start()
+        updaterController.updater.checkForUpdatesInBackground()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

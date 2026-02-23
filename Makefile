@@ -35,6 +35,7 @@ framework: $(XCODE_PROJECT)
 		-scheme GhostVMKit \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 
 # Build the vmctl CLI (depends on framework)
@@ -43,6 +44,7 @@ cli: $(XCODE_PROJECT)
 		-scheme vmctl \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl"
 
@@ -60,6 +62,7 @@ endif
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
@@ -115,6 +118,7 @@ launch: app
 # Run unit tests
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
+	swift test --package-path macOS/GhostTools --filter AsyncVSockIOTests
 
 # Generate website screenshots from UI tests
 # Step 1: capture — runs XCUITests, saves raw PNGs to build/screenshots/

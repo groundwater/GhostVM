@@ -1,5 +1,10 @@
 import AppKit
 
+struct GhostToolsInstallExplainer {
+    let title: String
+    let body: String
+}
+
 /// NSPopover-based panel showing GhostTools installation help
 final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 
@@ -7,16 +12,17 @@ final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 
     private var popover: NSPopover?
 
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
+    func show(
+        relativeTo positioningRect: NSRect,
+        of positioningView: NSView,
+        preferredEdge: NSRectEdge,
+        explainer: GhostToolsInstallExplainer
+    ) {
         let popover = NSPopover()
-        popover.behavior = .applicationDefined
+        popover.behavior = .transient
         popover.delegate = self
 
-        let vc = GuestToolsInfoContentViewController()
-        vc.onDismiss = { [weak self] in
-            self?.close()
-        }
-
+        let vc = GuestToolsInfoContentViewController(explainer: explainer)
         popover.contentViewController = vc
         popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
         self.popover = popover
@@ -41,8 +47,17 @@ final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
 // MARK: - Content View Controller
 
 private final class GuestToolsInfoContentViewController: NSViewController {
+    private let explainer: GhostToolsInstallExplainer
 
-    var onDismiss: (() -> Void)?
+    init(explainer: GhostToolsInstallExplainer) {
+        self.explainer = explainer
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
 
     override func loadView() {
         let container = NSVisualEffectView()
@@ -51,24 +66,17 @@ private final class GuestToolsInfoContentViewController: NSViewController {
         container.state = .active
 
         // Title
-        let titleLabel = NSTextField(labelWithString: "Guest Tools Not Found")
+        let titleLabel = NSTextField(labelWithString: explainer.title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(titleLabel)
 
         // Body
-        let bodyLabel = NSTextField(wrappingLabelWithString: "GhostTools should install automatically from the mounted disk image. If it didn\u{2019}t start, open the GhostTools volume in Finder and launch GhostTools.app.")
+        let bodyLabel = NSTextField(wrappingLabelWithString: explainer.body)
         bodyLabel.font = .systemFont(ofSize: 11)
         bodyLabel.textColor = .secondaryLabelColor
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(bodyLabel)
-
-        // Dismiss button
-        let dismissButton = NSButton(title: "Dismiss", target: self, action: #selector(dismissClicked))
-        dismissButton.bezelStyle = .rounded
-        dismissButton.keyEquivalent = "\u{1b}" // Escape
-        dismissButton.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(dismissButton)
 
         // Layout
         let padding: CGFloat = 16
@@ -81,18 +89,11 @@ private final class GuestToolsInfoContentViewController: NSViewController {
             bodyLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6),
             bodyLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
             bodyLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
-
-            dismissButton.topAnchor.constraint(equalTo: bodyLabel.bottomAnchor, constant: 12),
-            dismissButton.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
-            dismissButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+            bodyLabel.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
 
             container.widthAnchor.constraint(equalToConstant: 280),
         ])
 
         self.view = container
-    }
-
-    @objc private func dismissClicked() {
-        onDismiss?()
     }
 }

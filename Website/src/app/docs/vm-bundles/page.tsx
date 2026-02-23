@@ -57,7 +57,7 @@ export default function VMBundles() {
 
       <h2>Disk Images</h2>
       <p>
-        Disk images are raw sparse files. The default size is 64 GiB, but the
+        Disk images are raw sparse files. The default size is 256 GiB, but the
         file only consumes actual used space on the host filesystem. You can
         check actual disk usage with:
       </p>

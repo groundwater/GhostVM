@@ -56,14 +56,12 @@ public final class GhostClient: GhostClientProtocol {
         }
     }
 
-    /// Set guest clipboard contents
-    public func setClipboard(content: String, type: String = "public.utf8-plain-text") async throws {
-        let request = ClipboardPostRequest(content: content, type: type)
-
+    /// Set guest clipboard contents (binary-safe)
+    public func setClipboard(data: Data, type: String = "public.utf8-plain-text") async throws {
         if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            try await setClipboardViaTCP(host: tcpHost, port: tcpPort, request: request)
+            try await setClipboardViaTCP(host: tcpHost, port: tcpPort, data: data, type: type)
         } else if let vm = virtualMachine {
-            try await setClipboardViaVsock(vm: vm, request: request)
+            try await setClipboardViaVsock(vm: vm, data: data, type: type)
         } else {
             throw GhostClientError.notConnected
         }
@@ -780,31 +778,23 @@ public final class GhostClient: GhostClientProtocol {
             throw GhostClientError.invalidResponse(httpResponse.statusCode)
         }
 
-        do {
-            let decoder = JSONDecoder()
-            return try decoder.decode(ClipboardGetResponse.self, from: data)
-        } catch {
-            throw GhostClientError.decodingError
-        }
+        let clipType = httpResponse.value(forHTTPHeaderField: "X-Clipboard-Type") ?? "public.utf8-plain-text"
+        return ClipboardGetResponse(data: data, type: clipType)
     }
 
-    private func setClipboardViaTCP(host: String, port: Int, request: ClipboardPostRequest) async throws {
+    private func setClipboardViaTCP(host: String, port: Int, data: Data, type: String) async throws {
         guard let session = urlSession else {
             throw GhostClientError.notConnected
         }
 
         var urlRequest = URLRequest(url: URL(string: "http://\(host):\(port)/api/v1/clipboard")!)
         urlRequest.httpMethod = "POST"
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue(type, forHTTPHeaderField: "X-Clipboard-Type")
         if let token = authToken {
             urlRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-
-        let encoder = JSONEncoder()
-        guard let body = try? encoder.encode(request) else {
-            throw GhostClientError.encodingError
-        }
-        urlRequest.httpBody = body
+        urlRequest.httpBody = data
 
         let (_, response) = try await session.data(for: urlRequest)
 
@@ -985,8 +975,7 @@ public final class GhostClient: GhostClientProtocol {
             body: nil
         )
 
-        // Parse HTTP response
-        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+        let (statusCode, headers, body) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
 
         if statusCode == 204 {
             throw GhostClientError.noContent
@@ -1000,26 +989,18 @@ public final class GhostClient: GhostClientProtocol {
             throw GhostClientError.noContent
         }
 
-        do {
-            let decoder = JSONDecoder()
-            return try decoder.decode(ClipboardGetResponse.self, from: body)
-        } catch {
-            throw GhostClientError.decodingError
-        }
+        let clipType = headers["X-Clipboard-Type"] ?? "public.utf8-plain-text"
+        return ClipboardGetResponse(data: body, type: clipType)
     }
 
-    private func setClipboardViaVsock(vm: VZVirtualMachine, request: ClipboardPostRequest) async throws {
-        let encoder = JSONEncoder()
-        guard let body = try? encoder.encode(request) else {
-            throw GhostClientError.encodingError
-        }
-
+    private func setClipboardViaVsock(vm: VZVirtualMachine, data: Data, type: String) async throws {
         let responseData = try await sendHTTPRequest(
             vm: vm,
             method: "POST",
             path: "/api/v1/clipboard",
-            body: body,
-            contentType: "application/json"
+            body: data,
+            contentType: "application/octet-stream",
+            extraHeaders: ["X-Clipboard-Type": type]
         )
 
         let (statusCode, _) = try HTTPResponseParser.parse(responseData)
