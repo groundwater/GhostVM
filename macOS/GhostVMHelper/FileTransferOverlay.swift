@@ -30,6 +30,11 @@ final class FocusableVMView: VZVirtualMachineView {
 
     private var isDragging = false
 
+    /// When true, the VM view will not reclaim first responder.
+    /// Set this while a permission popover is shown so keyboard input
+    /// doesn't reach the guest via HID capture.
+    var suspendKeyboardCapture = false
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         setupDropZone()
@@ -78,6 +83,7 @@ final class FocusableVMView: VZVirtualMachineView {
     }
 
     @objc private func windowDidBecomeKey(_ notification: Notification) {
+        guard !suspendKeyboardCapture else { return }
         window?.makeFirstResponder(self)
     }
 

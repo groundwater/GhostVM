@@ -77,6 +77,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var urlAlwaysAllowed = false  // true when persisted setting OR "Always Allow" clicked
     private var pendingURLsToOpen: [String] = []
     private var urlPermissionCancellable: AnyCancellable?
+    private var urlAutoDismissMonitor: Any?
 
     // Port forward notification state
     private var newlyForwardedCancellable: AnyCancellable?
@@ -726,15 +727,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar) {
         pendingURLsToOpen = []
         eventStreamService?.clearPendingURLs()
+        removeURLAutoDismissMonitor()
         restoreVMViewFocus()
     }
 
     func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar) {
+        removeURLAutoDismissMonitor()
         openPendingURLs()
         restoreVMViewFocus()
     }
 
     func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
+        removeURLAutoDismissMonitor()
         urlAlwaysAllowed = true
         helperToolbar?.setOpenURLsAutomatically(true)
         let key = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
@@ -744,6 +748,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar) {
+        removeURLAutoDismissMonitor()
         restoreVMViewFocus()
     }
 
@@ -872,7 +877,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     private func restoreVMViewFocus() {
+        (NSApp as? HelperApplication)?.popoverKeyHandler = nil
         if let vmView = vmView {
+            vmView.suspendKeyboardCapture = false
             window?.makeFirstResponder(vmView)
         }
     }
@@ -925,24 +932,26 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Skip if the clipboard was updated by our own guest-to-host pull
         if currentChangeCount == service.lastHostChangeCount { return }
 
+        vmView?.suspendKeyboardCapture = true
         helperToolbar?.showClipboardPermissionPopover()
         installClipboardAutoDismissMonitor()
+        installPopoverKeyHandler()
     }
 
     private func installClipboardAutoDismissMonitor() {
         removeClipboardAutoDismissMonitor()
 
-        clipboardAutoDismissMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown]) { [weak self] event in
+        // Mouse click on VM → implicit deny
+        clipboardAutoDismissMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
             guard let self = self else { return event }
             guard self.helperToolbar?.isClipboardPermissionPopoverShown == true else {
                 self.removeClipboardAutoDismissMonitor()
                 return event
             }
-            // Don't dismiss if the click/key is inside the popover's own window
+            // Don't dismiss if the click is inside the popover's own window
             if let eventWindow = event.window, eventWindow != self.window {
                 return event
             }
-            // Auto-dismiss (implicit deny) when user interacts with the VM
             self.lastPromptedClipboardChangeCount = NSPasteboard.general.changeCount
             self.helperToolbar?.closeClipboardPermissionPopover()
             self.removeClipboardAutoDismissMonitor()
@@ -957,7 +966,71 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
     }
 
+    /// Routes keyDown events to the active permission popover via
+    /// HelperApplication.sendEvent, which runs before VZVirtualMachineView
+    /// can capture the keystroke.
+    private func installPopoverKeyHandler() {
+        (NSApp as? HelperApplication)?.popoverKeyHandler = { [weak self] event in
+            guard let self = self else { return false }
+
+            if self.helperToolbar?.isClipboardPermissionPopoverShown == true {
+                switch event.keyCode {
+                case 36, 76:  // Return, Numpad Enter → allow once
+                    self.helperToolbar?.clipboardPermissionAllowOnce()
+                case 53:      // ESC → deny
+                    self.helperToolbar?.clipboardPermissionDeny()
+                default:      // Any other key → deny (dismiss)
+                    self.helperToolbar?.clipboardPermissionDeny()
+                }
+                return true
+            }
+
+            if self.helperToolbar?.isURLPermissionPopoverShown == true {
+                switch event.keyCode {
+                case 36, 76:  // Return, Numpad Enter → allow once (open)
+                    self.helperToolbar?.urlPermissionAllowOnce()
+                case 53:      // ESC → deny
+                    self.helperToolbar?.urlPermissionDeny()
+                default:      // Any other key → deny (dismiss)
+                    self.helperToolbar?.urlPermissionDeny()
+                }
+                return true
+            }
+
+            return false
+        }
+    }
+
     // MARK: - URL Permission Flow
+
+    private func installURLAutoDismissMonitor() {
+        removeURLAutoDismissMonitor()
+
+        // Mouse click on VM → implicit deny
+        urlAutoDismissMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            guard let self = self else { return event }
+            guard self.helperToolbar?.isURLPermissionPopoverShown == true else {
+                self.removeURLAutoDismissMonitor()
+                return event
+            }
+            // Don't dismiss if the click is inside the popover's own window
+            if let eventWindow = event.window, eventWindow != self.window {
+                return event
+            }
+            self.helperToolbar?.closeURLPermissionPopover()
+            self.pendingURLsToOpen = []
+            self.eventStreamService?.clearPendingURLs()
+            self.removeURLAutoDismissMonitor()
+            return event
+        }
+    }
+
+    private func removeURLAutoDismissMonitor() {
+        if let monitor = urlAutoDismissMonitor {
+            NSEvent.removeMonitor(monitor)
+            urlAutoDismissMonitor = nil
+        }
+    }
 
     private func handlePendingURLs(_ urls: [String]) {
         guard !urls.isEmpty else { return }
@@ -974,10 +1047,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         pendingURLsToOpen = urls
 
+        vmView?.suspendKeyboardCapture = true
+
         Task {
             try? await Task.sleep(for: .milliseconds(200))
             helperToolbar?.showURLPermissionPopover()
             helperToolbar?.setURLPermissionURLs(urls)
+            installURLAutoDismissMonitor()
+            installPopoverKeyHandler()
         }
     }
 
@@ -2041,8 +2118,18 @@ final class HelperApplication: NSApplication {
     var captureQuitEnabled = false
     var captureHideEnabled = false
 
+    /// Called before dispatching a keyDown event. Return true to consume
+    /// the event (prevent it from reaching VZVirtualMachineView).
+    var popoverKeyHandler: ((NSEvent) -> Bool)?
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown {
+            // Popover keyboard handling — must run before super.sendEvent
+            // so VZVirtualMachineView never sees the keystroke.
+            if let handler = popoverKeyHandler, handler(event) {
+                return
+            }
+
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             if flags == .command, let chars = event.charactersIgnoringModifiers {
                 if chars == "q" {
