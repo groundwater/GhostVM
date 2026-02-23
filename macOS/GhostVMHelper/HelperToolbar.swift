@@ -1202,8 +1202,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func showURLPermissionPopover() {
-        guard let view = guestToolsItem?.view else { return }
-
         urlPermissionPanel?.close()
 
         let panel = URLPermissionPanel()
@@ -1213,7 +1211,14 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             self.urlPermissionPanel = nil
             self.delegate?.toolbarURLPermissionPanelDidClose(self)
         }
-        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY)
+
+        if let button = clipboardSyncItem?.view, button.window != nil {
+            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else if let button = captureKeysItem?.view, button.window != nil {
+            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else {
+            return
+        }
         urlPermissionPanel = panel
     }
 

@@ -933,7 +933,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         if currentChangeCount == service.lastHostChangeCount { return }
 
         vmView?.suspendKeyboardCapture = true
-        window?.makeFirstResponder(nil)
         helperToolbar?.showClipboardPermissionPopover()
         installClipboardAutoDismissMonitor()
         installPopoverKeyHandler()
@@ -1049,7 +1048,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         pendingURLsToOpen = urls
 
         vmView?.suspendKeyboardCapture = true
-        window?.makeFirstResponder(nil)
 
         Task {
             try? await Task.sleep(for: .milliseconds(200))
