@@ -7,8 +7,8 @@ export
 
 CODESIGN_ID ?= Apple Development
 GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
-APP_PROVISIONING_PROFILE ?=
-HELPER_PROVISIONING_PROFILE ?=
+APP_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_App_Distribution.provisionprofile
+HELPER_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_Helper_Distribution.provisionprofile
 
 # Inject build timestamp into patch version during development builds.
 # Set to 0 for production releases (make dist does this automatically).
