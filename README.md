@@ -141,17 +141,3 @@ make app
 │   └── GhostVMTests/     # Unit tests
 └── Website/              # Documentation site (ghostvm.org)
 ```
-
-## Screenshots
-
-<p align="center">
-  <img src="Website/public/images/screenshots/vm-list-with-vms.png" width="250" alt="VM List">&nbsp;
-  <img src="Website/public/images/screenshots/create-vm-sheet.png" width="250" alt="Create VM">&nbsp;
-  <img src="Website/public/images/screenshots/context-menu.png" width="250" alt="Context Menu">
-</p>
-
-<p align="center">
-  <img src="Website/public/images/screenshots/clipboard-permission.png" width="250" alt="Clipboard Sync">&nbsp;
-  <img src="Website/public/images/screenshots/port-forward-notification.png" width="250" alt="Port Forwarding">&nbsp;
-  <img src="Website/public/images/screenshots/restore-images.png" width="250" alt="Restore Images">
-</p>
