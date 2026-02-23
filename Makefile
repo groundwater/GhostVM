@@ -348,7 +348,7 @@ DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Dev
 # Note: If you get "Operation not permitted", grant Terminal Full Disk Access in
 # System Preferences > Privacy & Security > Full Disk Access
 dist:
-	$(MAKE) app INJECT_TIMESTAMP=0 APP_SKIP_XCODE_SIGNING=1
+	$(MAKE) app cli INJECT_TIMESTAMP=0 APP_SKIP_XCODE_SIGNING=1
 	@# Verify we have a real signing identity for distribution
 	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
 		echo "Error: No 'Developer ID Application' identity found in keychain."; \
@@ -443,7 +443,6 @@ dist:
 	@# 5. Sign vmctl binary
 	@echo "  Signing vmctl"
 	codesign --force --options runtime --timestamp \
-		--entitlements macOS/GhostVM/entitlements.plist \
 		-s "$(DIST_CODESIGN_ID)" \
 		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/vmctl"
 	@# 5b. Re-create GhostTools.dmg with Developer ID signing for notarization

@@ -12,10 +12,17 @@ packages:
 
 settings:
   base:
+    ARCHS: arm64
     SWIFT_VERSION: "6.0"
     CLANG_ENABLE_OBJC_ARC: YES
     CLANG_WARN_DOCUMENTATION_COMMENTS: YES
     CLANG_WARN_UNGUARDED_AVAILABILITY: YES
+
+schemes:
+  GhostVM:
+    build:
+      targets:
+        GhostVM: all
 
 targets:
   GhostVMKit:
@@ -55,7 +62,6 @@ targets:
       base:
         PRODUCT_NAME: vmctl
         SWIFT_VERSION: "5.0"
-        CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
