@@ -33,10 +33,6 @@
 	<string>GhostVM</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.85.20260221010229</string>
-	<key>CFBundleVersion</key>
-	<string>1.85.20260221010229</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>15.0</string>
 	<key>LSMultipleInstancesProhibited</key>

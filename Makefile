@@ -22,16 +22,63 @@ XCODE_PROJECT = macOS/GhostVM.xcodeproj
 XCODE_CONFIG ?= Release
 BUILD_DIR ?= build/xcode
 APP_NAME = GhostVM
+VERSION_FILE = .version
+PLIST_GEN_DIR = build/generated-plists
 
-.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version
+# Tracked templates (no version keys) -> generated plists (gitignored)
+PLIST_GHOSTVM_TEMPLATE = macOS/GhostVM/VMApp-Info.template.plist
+PLIST_HELPER_TEMPLATE  = macOS/GhostVMHelper/Info.template.plist
+PLIST_TOOLS_TEMPLATE   = macOS/GhostTools/Sources/GhostTools/Resources/Info.template.plist
+
+PLIST_GHOSTVM = $(PLIST_GEN_DIR)/GhostVM-Info.plist
+PLIST_HELPER  = $(PLIST_GEN_DIR)/GhostVMHelper-Info.plist
+PLIST_TOOLS   = $(PLIST_GEN_DIR)/GhostTools-Info.plist
+
+BASE_VERSION := $(strip $(shell cat "$(VERSION_FILE)" 2>/dev/null))
+ifeq ($(BASE_VERSION),)
+$(error Missing $(VERSION_FILE). Create it with a version like 1.85.0)
+endif
+
+.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist
 
 all: help
 
 # Generate Xcode project from macOS/project.yml
-generate: $(XCODE_PROJECT)
+generate: render-plists $(XCODE_PROJECT)
 
 $(XCODE_PROJECT): macOS/project.yml
 	xcodegen generate --spec macOS/project.yml
+
+render-plists:
+	@mkdir -p "$(PLIST_GEN_DIR)"
+	@for ITEM in \
+		"$(PLIST_GHOSTVM_TEMPLATE):$(PLIST_GHOSTVM)" \
+		"$(PLIST_HELPER_TEMPLATE):$(PLIST_HELPER)" \
+		"$(PLIST_TOOLS_TEMPLATE):$(PLIST_TOOLS)"; do \
+		TEMPLATE="$${ITEM%%:*}"; \
+		OUT="$${ITEM#*:}"; \
+		cp "$$TEMPLATE" "$$OUT"; \
+		plutil -insert CFBundleShortVersionString -string "$(BASE_VERSION)" "$$OUT"; \
+		plutil -insert CFBundleVersion -string "$(BASE_VERSION)" "$$OUT"; \
+	done
+
+prepare-app-plists: render-plists
+ifeq ($(INJECT_TIMESTAMP),1)
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
+	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
+	done
+endif
+
+prepare-tools-plist: render-plists
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP)..."
+	@MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
+	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
+	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
+	fi
 
 # Build the GhostVMKit framework
 framework: $(XCODE_PROJECT)
@@ -54,14 +101,7 @@ cli: $(XCODE_PROJECT)
 
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
 app: $(XCODE_PROJECT) dmg ghostvm-icon
-ifeq ($(INJECT_TIMESTAMP),1)
-	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
-	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
-		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-	done
-endif
+	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 ifeq ($(APP_SKIP_XCODE_SIGNING),1)
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
@@ -97,14 +137,7 @@ endif
 
 # Build the SwiftUI app in Debug configuration (ad-hoc signing)
 debug: $(XCODE_PROJECT) dmg ghostvm-icon
-ifeq ($(INJECT_TIMESTAMP),1)
-	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
-	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
-		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-	done
-endif
+	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 	@NEEDS_RESTRICTED_ENT=$$( \
 		/usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 || \
 		/usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1; \
@@ -220,12 +253,7 @@ GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
 # Build GhostTools guest agent (.app bundle, signed)
 tools: ghosttools-icon
 	@echo "Building GhostTools..."
-	@echo "Injecting build timestamp $(BUILD_TIMESTAMP)..."
-	@MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
-	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
-	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
-	fi
+	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
 	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
@@ -235,7 +263,7 @@ tools: ghosttools-icon
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
-	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_APP)/Contents/"
+	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@# Generate release notes from git log since last tag
 	@LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null); \
 	if [ -n "$$LAST_TAG" ]; then \
@@ -503,40 +531,28 @@ website:
 website-build:
 	cd Website && npm run build
 
-# Plist paths for version management
-PLIST_GHOSTVM = macOS/GhostVM/VMApp-Info.plist
-PLIST_HELPER  = macOS/GhostVMHelper/Info.plist
-PLIST_TOOLS   = macOS/GhostTools/Sources/GhostTools/Resources/Info.plist
-
-# Bump CFBundleShortVersionString in all 3 targets, CFBundleVersion in GhostVM + Helper only
+# Bump canonical app version used to render generated plists
 # Usage: make bump VERSION=1.2.0
 bump:
 	@if [ -z "$(VERSION)" ] || [ "$(VERSION)" = "$$(git describe --tags --always 2>/dev/null || echo dev)" ]; then \
 		echo "Usage: make bump VERSION=x.y.z"; exit 1; \
 	fi
-	@echo "Bumping all targets to $(VERSION)..."
-	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_GHOSTVM)"
-	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_GHOSTVM)"
-	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_HELPER)"
-	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_HELPER)"
-	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_TOOLS)"
-	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_TOOLS)"
-	@echo "Done. All targets bumped to $(VERSION)."
+	@echo "Bumping canonical version to $(VERSION)..."
+	@printf '%s\n' "$(VERSION)" > "$(VERSION_FILE)"
+	@$(MAKE) --no-print-directory render-plists
+	@echo "Done. Canonical version is now $(VERSION)."
 	@$(MAKE) --no-print-directory check-version
 
-# Verify all 3 targets have the same CFBundleShortVersionString
+# Verify canonical version and (if generated) plist sync
 check-version:
-	@V1=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_GHOSTVM)"); \
-	V2=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_HELPER)"); \
-	V3=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)"); \
-	echo "GhostVM:       $$V1"; \
-	echo "GhostVMHelper: $$V2"; \
-	echo "GhostTools:    $$V3"; \
-	if [ "$$V1" = "$$V2" ] && [ "$$V2" = "$$V3" ]; then \
-		echo "All targets in sync ($$V1)"; \
-	else \
-		echo "ERROR: Version mismatch!" >&2; exit 1; \
-	fi
+	@BASE="$$(cat "$(VERSION_FILE)")"; \
+	echo "Canonical version: $$BASE"; \
+	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)" "$(PLIST_TOOLS)"; do \
+		if [ -f "$$PLIST" ]; then \
+			CUR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST"); \
+			echo "  $$(basename "$$PLIST"): $$CUR"; \
+		fi; \
+	done
 
 clean:
 	rm -rf build

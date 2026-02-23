@@ -78,6 +78,8 @@ targets:
     platform: macOS
     sources:
       - path: GhostVMHelper
+        excludes:
+          - "*.template.plist"
       - path: GhostVM/Services
       - path: GhostVM/Resources/VMIcons
         type: resource
@@ -92,7 +94,7 @@ targets:
       base:
         PRODUCT_NAME: GhostVMHelper
         PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper
-        INFOPLIST_FILE: GhostVMHelper/Info.plist
+        INFOPLIST_FILE: ../build/generated-plists/GhostVMHelper-Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
         CODE_SIGN_ENTITLEMENTS: GhostVMHelper/entitlements.plist
@@ -134,7 +136,7 @@ targets:
       base:
         PRODUCT_NAME: GhostVM
         PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm
-        INFOPLIST_FILE: GhostVM/VMApp-Info.plist
+        INFOPLIST_FILE: ../build/generated-plists/GhostVM-Info.plist
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"

@@ -18,10 +18,6 @@
 	<string>GhostVM</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>CFBundleShortVersionString</key>
-	<string>1.85.20260221010229</string>
-	<key>CFBundleVersion</key>
-	<string>1.85.20260221010229</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>

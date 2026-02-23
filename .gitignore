@@ -2,6 +2,7 @@
 *.dmg
 .env
 build/
+build/generated-plists/
 tools/
 *.local.json
 *.xcodeproj/
