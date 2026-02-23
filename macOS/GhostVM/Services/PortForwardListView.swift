@@ -52,6 +52,7 @@ struct PortForwardListView: View {
                     .font(.subheadline)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 10)
+                    .accessibilityIdentifier("portForward.noForwardsPlaceholder")
             }
 
             ForEach(forwards) { forward in
@@ -87,6 +88,7 @@ struct PortForwardListView: View {
                     .frame(width: 80)
                     .focused($focusedField, equals: .host)
                     .onSubmit { focusedField = .guest }
+                    .accessibilityIdentifier("portForward.hostPortField")
 
                 Image(systemName: "arrow.right")
                     .foregroundStyle(.secondary)
@@ -97,9 +99,11 @@ struct PortForwardListView: View {
                     .frame(width: 80)
                     .focused($focusedField, equals: .guest)
                     .onSubmit { addForward() }
+                    .accessibilityIdentifier("portForward.guestPortField")
 
                 Button("Add") { addForward() }
                     .disabled(hostPortText.isEmpty || guestPortText.isEmpty)
+                    .accessibilityIdentifier("portForward.addButton")
 
                 Button("Cancel") { clearFields() }
                     .disabled(hostPortText.isEmpty && guestPortText.isEmpty && errorMessage == nil)

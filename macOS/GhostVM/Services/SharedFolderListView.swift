@@ -89,6 +89,7 @@ struct SharedFolderListView: View {
                     .font(.subheadline)
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 10)
+                    .accessibilityIdentifier("sharedFolder.noFoldersPlaceholder")
             }
 
             ForEach(folders) { folder in
@@ -113,6 +114,7 @@ struct SharedFolderListView: View {
                 } label: {
                     Label("Add Folder\u{2026}", systemImage: "plus")
                 }
+                .accessibilityIdentifier("sharedFolder.addButton")
 
                 Toggle("Read Only", isOn: $readOnly)
                     .toggleStyle(.checkbox)

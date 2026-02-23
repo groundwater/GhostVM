@@ -43,6 +43,7 @@ final class App2VMStore: ObservableObject {
         App2VM(id: UUID(), name: "macOS Sequoia", bundlePath: "/tmp/mock/macOS-Sequoia.GhostVM", osVersion: "macOS 15.2", status: "Running", installed: true),
         App2VM(id: UUID(), name: "macOS Dev", bundlePath: "/tmp/mock/macOS-Dev.GhostVM", osVersion: "macOS 15.4 Beta", status: "Stopped", installed: true),
         App2VM(id: UUID(), name: "macOS Sonoma", bundlePath: "/tmp/mock/macOS-Sonoma.GhostVM", osVersion: "macOS 14.7", status: "Suspended", installed: true),
+        App2VM(id: UUID(), name: "macOS Ventura", bundlePath: "/tmp/mock/macOS-Ventura.GhostVM", osVersion: "Not Installed", status: "Idle", installed: false),
     ]
 
     func reloadDefaultDirectory() {
