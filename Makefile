@@ -7,27 +7,78 @@ export
 
 CODESIGN_ID ?= Apple Development
 GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
+APP_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_App_Distribution.provisionprofile
+HELPER_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_Helper_Distribution.provisionprofile
 
 # Inject build timestamp into patch version during development builds.
 # Set to 0 for production releases (make dist does this automatically).
 INJECT_TIMESTAMP ?= 1
 BUILD_TIMESTAMP := $(shell date +%Y%m%d%H%M%S)
+APP_SKIP_XCODE_SIGNING ?= 0
+XCODE_ALLOW_PROVISIONING_UPDATES ?= 1
 
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
 XCODE_CONFIG ?= Release
 BUILD_DIR ?= build/xcode
 APP_NAME = GhostVM
+VERSION_FILE = .version
+PLIST_GEN_DIR = build/generated-plists
 
-.PHONY: all cli app clean help run launch generate test uitest framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version
+# Tracked templates (no version keys) -> generated plists (gitignored)
+PLIST_GHOSTVM_TEMPLATE = macOS/GhostVM/VMApp-Info.template.plist
+PLIST_HELPER_TEMPLATE  = macOS/GhostVMHelper/Info.template.plist
+PLIST_TOOLS_TEMPLATE   = macOS/GhostTools/Sources/GhostTools/Resources/Info.template.plist
+
+PLIST_GHOSTVM = $(PLIST_GEN_DIR)/GhostVM-Info.plist
+PLIST_HELPER  = $(PLIST_GEN_DIR)/GhostVMHelper-Info.plist
+PLIST_TOOLS   = $(PLIST_GEN_DIR)/GhostTools-Info.plist
+
+BASE_VERSION := $(strip $(shell cat "$(VERSION_FILE)" 2>/dev/null))
+ifeq ($(BASE_VERSION),)
+$(error Missing $(VERSION_FILE). Create it with a version like 1.85.0)
+endif
+
+.PHONY: all cli app clean help run launch generate test uitest framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist
 
 all: help
 
 # Generate Xcode project from macOS/project.yml
-generate: $(XCODE_PROJECT)
+generate: render-plists $(XCODE_PROJECT)
 
 $(XCODE_PROJECT): macOS/project.yml
 	xcodegen generate --spec macOS/project.yml
+
+render-plists:
+	@mkdir -p "$(PLIST_GEN_DIR)"
+	@for ITEM in \
+		"$(PLIST_GHOSTVM_TEMPLATE):$(PLIST_GHOSTVM)" \
+		"$(PLIST_HELPER_TEMPLATE):$(PLIST_HELPER)" \
+		"$(PLIST_TOOLS_TEMPLATE):$(PLIST_TOOLS)"; do \
+		TEMPLATE="$${ITEM%%:*}"; \
+		OUT="$${ITEM#*:}"; \
+		cp "$$TEMPLATE" "$$OUT"; \
+		plutil -insert CFBundleShortVersionString -string "$(BASE_VERSION)" "$$OUT"; \
+		plutil -insert CFBundleVersion -string "$(BASE_VERSION)" "$$OUT"; \
+	done
+
+prepare-app-plists: render-plists
+ifeq ($(INJECT_TIMESTAMP),1)
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
+	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
+	done
+endif
+
+prepare-tools-plist: render-plists
+	@echo "Injecting build timestamp $(BUILD_TIMESTAMP)..."
+	@MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
+	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
+	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
+		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
+	fi
 
 # Build the GhostVMKit framework
 framework: $(XCODE_PROJECT)
@@ -50,44 +101,11 @@ cli: $(XCODE_PROJECT)
 
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
 app: $(XCODE_PROJECT) dmg ghostvm-icon
-ifeq ($(INJECT_TIMESTAMP),1)
-	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
-	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
-		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-	done
-endif
+	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
+ifeq ($(APP_SKIP_XCODE_SIGNING),1)
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
-		-derivedDataPath $(BUILD_DIR) \
-		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
-		build
-	@# Copy icons into app bundle Resources
-	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
-	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
-	@cp macOS/GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
-	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
-	@# Copy GhostTools.dmg into app bundle Resources
-	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
-	@# Re-sign after adding resources
-	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
-	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
-
-# Build the SwiftUI app in Debug configuration (ad-hoc signing)
-debug: $(XCODE_PROJECT) dmg ghostvm-icon
-ifeq ($(INJECT_TIMESTAMP),1)
-	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
-	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
-		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
-	done
-endif
-	xcodebuild -project $(XCODE_PROJECT) \
-		-scheme $(APP_NAME) \
-		-configuration Debug \
 		-derivedDataPath $(BUILD_DIR) \
 		CODE_SIGN_STYLE=Manual \
 		CODE_SIGN_IDENTITY=- \
@@ -95,6 +113,57 @@ endif
 		CODE_SIGNING_ALLOWED=NO \
 		CODE_SIGNING_REQUIRED=NO \
 		build
+else
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme $(APP_NAME) \
+		-configuration $(XCODE_CONFIG) \
+		-derivedDataPath $(BUILD_DIR) \
+		$(if $(filter 1,$(XCODE_ALLOW_PROVISIONING_UPDATES)),-allowProvisioningUpdates,) \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
+		build
+endif
+	@# Copy icons into app bundle Resources
+	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
+	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+	@cp macOS/GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
+	@# Copy GhostTools.dmg into app bundle Resources
+	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+ifneq ($(APP_SKIP_XCODE_SIGNING),1)
+	@# Re-sign after adding resources
+	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+endif
+	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+
+# Build the SwiftUI app in Debug configuration (ad-hoc signing)
+debug: $(XCODE_PROJECT) dmg ghostvm-icon
+	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
+	@NEEDS_RESTRICTED_ENT=$$( \
+		/usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 || \
+		/usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1; \
+		echo $$? \
+	); \
+	if [ "$$NEEDS_RESTRICTED_ENT" = "0" ]; then \
+		echo "Debug build uses Development signing because restricted entitlement com.apple.vm.networking is present."; \
+		xcodebuild -project $(XCODE_PROJECT) \
+			-scheme $(APP_NAME) \
+			-configuration Debug \
+			-derivedDataPath $(BUILD_DIR) \
+			-allowProvisioningUpdates \
+			DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
+			build; \
+	else \
+		xcodebuild -project $(XCODE_PROJECT) \
+			-scheme $(APP_NAME) \
+			-configuration Debug \
+			-derivedDataPath $(BUILD_DIR) \
+			CODE_SIGN_STYLE=Manual \
+			CODE_SIGN_IDENTITY=- \
+			DEVELOPMENT_TEAM= \
+			CODE_SIGNING_ALLOWED=NO \
+			CODE_SIGNING_REQUIRED=NO \
+			build; \
+	fi
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources"
 	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
@@ -102,9 +171,16 @@ endif
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Copy GhostTools.dmg into app bundle Resources
 	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
-	@# Sign helper and app ad-hoc with entitlements
-	codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"
-	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
+	@# Re-sign after adding resources; always required because the app bundle was modified.
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 || \
+	    /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1; then \
+		echo "Re-signing Debug app with Development identity after resource copy."; \
+		codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"; \
+		codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"; \
+	else \
+		codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"; \
+		codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"; \
+	fi
 	@echo "Debug app built at: $(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 
 # Build debug and run attached to terminal (stdout/stderr visible)
@@ -182,12 +258,7 @@ GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
 # Build GhostTools guest agent (.app bundle, signed)
 tools: ghosttools-icon
 	@echo "Building GhostTools..."
-	@echo "Injecting build timestamp $(BUILD_TIMESTAMP)..."
-	@MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)" | sed 's/\.[^.]*$$//'); \
-	plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
-	if [ "$(INJECT_TIMESTAMP)" = "1" ]; then \
-		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$(PLIST_TOOLS)"; \
-	fi
+	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
 	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
@@ -197,7 +268,7 @@ tools: ghosttools-icon
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
-	@cp "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/Info.plist" "$(GHOSTTOOLS_APP)/Contents/"
+	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@# Generate release notes from git log since last tag
 	@LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null); \
 	if [ -n "$$LAST_TAG" ]; then \
@@ -312,7 +383,7 @@ DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Dev
 # Note: If you get "Operation not permitted", grant Terminal Full Disk Access in
 # System Preferences > Privacy & Security > Full Disk Access
 dist:
-	$(MAKE) app cli INJECT_TIMESTAMP=0
+	$(MAKE) app cli INJECT_TIMESTAMP=0 APP_SKIP_XCODE_SIGNING=1
 	@# Verify we have a real signing identity for distribution
 	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
 		echo "Error: No 'Developer ID Application' identity found in keychain."; \
@@ -334,6 +405,23 @@ dist:
 	cp -R "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app" "$(DIST_DIR)/dmg-stage/"
 	@# Embed vmctl CLI inside the app bundle
 	cp "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/"
+	@# Restricted entitlements (e.g. com.apple.vm.networking) require a matching embedded provisioning profile.
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1 && [ -z "$(HELPER_PROVISIONING_PROFILE)" ]; then \
+		echo "ERROR: HELPER_PROVISIONING_PROFILE is required for macOS/GhostVMHelper/entitlements.plist (com.apple.vm.networking present)"; \
+		exit 1; \
+	fi
+	@if [ -n "$(HELPER_PROVISIONING_PROFILE)" ]; then \
+		test -f "$(HELPER_PROVISIONING_PROFILE)" || (echo "ERROR: HELPER_PROVISIONING_PROFILE not found: $(HELPER_PROVISIONING_PROFILE)" && exit 1); \
+		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/embedded.provisionprofile"; \
+	fi
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 && [ -z "$(APP_PROVISIONING_PROFILE)" ]; then \
+		echo "ERROR: APP_PROVISIONING_PROFILE is required for macOS/GhostVM/entitlements.plist (com.apple.vm.networking present)"; \
+		exit 1; \
+	fi
+	@if [ -n "$(APP_PROVISIONING_PROFILE)" ]; then \
+		test -f "$(APP_PROVISIONING_PROFILE)" || (echo "ERROR: APP_PROVISIONING_PROFILE not found: $(APP_PROVISIONING_PROFILE)" && exit 1); \
+		cp "$(APP_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/embedded.provisionprofile"; \
+	fi
 	@# --- Inside-out code signing for notarization ---
 	@echo "Signing nested components (inside-out)..."
 	@# 1. Sign all embedded frameworks (GhostVMKit, NIO, etc.) in GhostVMHelper.app
@@ -390,7 +478,6 @@ dist:
 	@# 5. Sign vmctl binary
 	@echo "  Signing vmctl"
 	codesign --force --options runtime --timestamp \
-		--entitlements macOS/GhostVM/entitlements.plist \
 		-s "$(DIST_CODESIGN_ID)" \
 		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/vmctl"
 	@# 5b. Re-create GhostTools.dmg with Developer ID signing for notarization
@@ -449,40 +536,28 @@ website:
 website-build:
 	cd Website && npm run build
 
-# Plist paths for version management
-PLIST_GHOSTVM = macOS/GhostVM/VMApp-Info.plist
-PLIST_HELPER  = macOS/GhostVMHelper/Info.plist
-PLIST_TOOLS   = macOS/GhostTools/Sources/GhostTools/Resources/Info.plist
-
-# Bump CFBundleShortVersionString in all 3 targets, CFBundleVersion in GhostVM + Helper only
+# Bump canonical app version used to render generated plists
 # Usage: make bump VERSION=1.2.0
 bump:
 	@if [ -z "$(VERSION)" ] || [ "$(VERSION)" = "$$(git describe --tags --always 2>/dev/null || echo dev)" ]; then \
 		echo "Usage: make bump VERSION=x.y.z"; exit 1; \
 	fi
-	@echo "Bumping all targets to $(VERSION)..."
-	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_GHOSTVM)"
-	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_GHOSTVM)"
-	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_HELPER)"
-	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_HELPER)"
-	plutil -replace CFBundleShortVersionString -string "$(VERSION)" "$(PLIST_TOOLS)"
-	plutil -replace CFBundleVersion            -string "$(VERSION)" "$(PLIST_TOOLS)"
-	@echo "Done. All targets bumped to $(VERSION)."
+	@echo "Bumping canonical version to $(VERSION)..."
+	@printf '%s\n' "$(VERSION)" > "$(VERSION_FILE)"
+	@$(MAKE) --no-print-directory render-plists
+	@echo "Done. Canonical version is now $(VERSION)."
 	@$(MAKE) --no-print-directory check-version
 
-# Verify all 3 targets have the same CFBundleShortVersionString
+# Verify canonical version and (if generated) plist sync
 check-version:
-	@V1=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_GHOSTVM)"); \
-	V2=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_HELPER)"); \
-	V3=$$(plutil -extract CFBundleShortVersionString raw "$(PLIST_TOOLS)"); \
-	echo "GhostVM:       $$V1"; \
-	echo "GhostVMHelper: $$V2"; \
-	echo "GhostTools:    $$V3"; \
-	if [ "$$V1" = "$$V2" ] && [ "$$V2" = "$$V3" ]; then \
-		echo "All targets in sync ($$V1)"; \
-	else \
-		echo "ERROR: Version mismatch!" >&2; exit 1; \
-	fi
+	@BASE="$$(cat "$(VERSION_FILE)")"; \
+	echo "Canonical version: $$BASE"; \
+	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)" "$(PLIST_TOOLS)"; do \
+		if [ -f "$$PLIST" ]; then \
+			CUR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST"); \
+			echo "  $$(basename "$$PLIST"): $$CUR"; \
+		fi; \
+	done
 
 clean:
 	rm -rf build

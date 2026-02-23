@@ -2,6 +2,7 @@
 *.dmg
 .env
 build/
+build/generated-plists/
 tools/
 *.local.json
 *.xcodeproj/
@@ -9,3 +10,4 @@ tools/
 .claude/
 .codex/
 .vscode/
+.var/

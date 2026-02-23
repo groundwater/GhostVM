@@ -44,7 +44,31 @@ public final class VMConfigurationBuilder {
         config.storageDevices = storageDevices
 
         let networkDevice = VZVirtioNetworkDeviceConfiguration()
-        networkDevice.attachment = VZNATNetworkDeviceAttachment()
+
+        // Configure network attachment based on stored network config
+        let networkConfig = storedConfig.networkConfig ?? NetworkConfig.defaultConfig
+        print("[VMConfigurationBuilder] Network mode: \(networkConfig.mode.rawValue)")
+
+        switch networkConfig.mode {
+        case .nat:
+            print("[VMConfigurationBuilder] Using NAT networking")
+            networkDevice.attachment = VZNATNetworkDeviceAttachment()
+
+        case .bridged:
+            print("[VMConfigurationBuilder] Attempting bridged networking with interface: \(networkConfig.bridgeInterfaceIdentifier ?? "nil")")
+            let availableInterfaces = VZBridgedNetworkInterface.networkInterfaces
+            print("[VMConfigurationBuilder] Available interfaces: \(availableInterfaces.map { $0.identifier }.joined(separator: ", "))")
+
+            guard let interfaceId = networkConfig.bridgeInterfaceIdentifier, !interfaceId.isEmpty else {
+                throw VMError.message("Bridged networking requires a selected host network interface.")
+            }
+            guard let interface = availableInterfaces.first(where: { $0.identifier == interfaceId }) else {
+                throw VMError.message("Bridged network interface '\(interfaceId)' is not available on this Mac.")
+            }
+            print("[VMConfigurationBuilder] Found interface \(interfaceId), creating bridged attachment")
+            networkDevice.attachment = VZBridgedNetworkDeviceAttachment(interface: interface)
+            print("[VMConfigurationBuilder] Successfully created bridged attachment")
+        }
 
         // Use persistent MAC address from config to ensure suspend/resume consistency.
         if let macAddressString = storedConfig.macAddress,

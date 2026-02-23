@@ -30,6 +30,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var vmBundleURL: URL!
     private var vmName: String = ""
     private var state: State = .stopped
+    private var lastErrorMessage: String?
     private var bootToRecovery: Bool = false
 
     private var window: NSWindow?
@@ -1299,14 +1300,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let bundlePathHash = vmBundleURL.path.stableHash
         NSLog("GhostVMHelper: Posting state '\(state.rawValue)' for hash \(bundlePathHash)")
         NSLog("GhostVMHelper: Bundle path: \(vmBundleURL.path)")
+        var userInfo: [String: Any] = [
+            "state": state.rawValue,
+            "bundlePath": vmBundleURL.path,
+            "pid": ProcessInfo.processInfo.processIdentifier
+        ]
+        if state == .failed, let lastErrorMessage {
+            userInfo["error"] = lastErrorMessage
+        }
         center.postNotificationName(
             NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
             object: nil,
-            userInfo: [
-                "state": state.rawValue,
-                "bundlePath": vmBundleURL.path,
-                "pid": ProcessInfo.processInfo.processIdentifier
-            ],
+            userInfo: userInfo,
             deliverImmediately: true
         )
     }
@@ -1651,12 +1656,22 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.helperToolbar?.setGuestToolsStatus(status)
             }
 
-        // 3. Port forwarding
+        // 3. Port forwarding (only in NAT mode)
         let pfService = PortForwardService(vm: vm, queue: queue)
         self.portForwardService = pfService
+
+        // Load port forwards from config
         let forwards = loadPortForwards()
-        if !forwards.isEmpty {
-            pfService.start(forwards: forwards)
+
+        // Check network mode - only start port forwarding in NAT mode
+        let networkConfig = (try? VMConfigStore(layout: layout!).load().networkConfig) ?? NetworkConfig.defaultConfig
+        if networkConfig.mode == .nat {
+            if !forwards.isEmpty {
+                pfService.start(forwards: forwards)
+            }
+            NSLog("GhostVMHelper: Port forwarding enabled (NAT mode)")
+        } else {
+            NSLog("GhostVMHelper: Port forwarding disabled (bridged mode)")
         }
         updateToolbarPortForwards()
 
@@ -2093,6 +2108,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     // MARK: - Error Handling
 
     private func showErrorAndQuit(_ message: String) {
+        lastErrorMessage = message
         state = .failed
         postStateChange()
 
