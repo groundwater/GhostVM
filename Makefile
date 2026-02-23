@@ -7,11 +7,15 @@ export
 
 CODESIGN_ID ?= Apple Development
 GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
+APP_PROVISIONING_PROFILE ?=
+HELPER_PROVISIONING_PROFILE ?=
 
 # Inject build timestamp into patch version during development builds.
 # Set to 0 for production releases (make dist does this automatically).
 INJECT_TIMESTAMP ?= 1
 BUILD_TIMESTAMP := $(shell date +%Y%m%d%H%M%S)
+APP_SKIP_XCODE_SIGNING ?= 0
+XCODE_ALLOW_PROVISIONING_UPDATES ?= 1
 
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
@@ -58,12 +62,26 @@ ifeq ($(INJECT_TIMESTAMP),1)
 		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
 	done
 endif
+ifeq ($(APP_SKIP_XCODE_SIGNING),1)
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme $(APP_NAME) \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
+		CODE_SIGN_STYLE=Manual \
+		CODE_SIGN_IDENTITY=- \
+		DEVELOPMENT_TEAM= \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGNING_REQUIRED=NO \
+		build
+else
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme $(APP_NAME) \
+		-configuration $(XCODE_CONFIG) \
+		-derivedDataPath $(BUILD_DIR) \
+		$(if $(filter 1,$(XCODE_ALLOW_PROVISIONING_UPDATES)),-allowProvisioningUpdates,) \
 		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
+endif
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources"
 	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
@@ -71,8 +89,10 @@ endif
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Copy GhostTools.dmg into app bundle Resources
 	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app/Contents/Resources/"
+ifneq ($(APP_SKIP_XCODE_SIGNING),1)
 	@# Re-sign after adding resources
 	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "$(CODESIGN_ID)" "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+endif
 	@echo "App built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
 
 # Build the SwiftUI app in Debug configuration (ad-hoc signing)
@@ -85,16 +105,32 @@ ifeq ($(INJECT_TIMESTAMP),1)
 		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
 	done
 endif
-	xcodebuild -project $(XCODE_PROJECT) \
-		-scheme $(APP_NAME) \
-		-configuration Debug \
-		-derivedDataPath $(BUILD_DIR) \
-		CODE_SIGN_STYLE=Manual \
-		CODE_SIGN_IDENTITY=- \
-		DEVELOPMENT_TEAM= \
-		CODE_SIGNING_ALLOWED=NO \
-		CODE_SIGNING_REQUIRED=NO \
-		build
+	@NEEDS_RESTRICTED_ENT=$$( \
+		/usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 || \
+		/usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1; \
+		echo $$? \
+	); \
+	if [ "$$NEEDS_RESTRICTED_ENT" = "0" ]; then \
+		echo "Debug build uses Development signing because restricted entitlement com.apple.vm.networking is present."; \
+		xcodebuild -project $(XCODE_PROJECT) \
+			-scheme $(APP_NAME) \
+			-configuration Debug \
+			-derivedDataPath $(BUILD_DIR) \
+			-allowProvisioningUpdates \
+			DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
+			build; \
+	else \
+		xcodebuild -project $(XCODE_PROJECT) \
+			-scheme $(APP_NAME) \
+			-configuration Debug \
+			-derivedDataPath $(BUILD_DIR) \
+			CODE_SIGN_STYLE=Manual \
+			CODE_SIGN_IDENTITY=- \
+			DEVELOPMENT_TEAM= \
+			CODE_SIGNING_ALLOWED=NO \
+			CODE_SIGNING_REQUIRED=NO \
+			build; \
+	fi
 	@# Copy icons into app bundle Resources
 	@mkdir -p "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources"
 	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
@@ -102,9 +138,14 @@ endif
 	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
 	@# Copy GhostTools.dmg into app bundle Resources
 	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
-	@# Sign helper and app ad-hoc with entitlements
-	codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"
-	codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
+	@# If restricted entitlements are present, Xcode already performed proper Development signing above.
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 || \
+	    /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1; then \
+		echo "Skipping ad-hoc re-sign for Debug (restricted entitlement requires Development signing)."; \
+	else \
+		codesign --entitlements macOS/GhostVMHelper/entitlements.plist --force --deep -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app"; \
+		codesign --entitlements macOS/GhostVM/entitlements.plist --force -s "-" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"; \
+	fi
 	@echo "Debug app built at: $(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app"
 
 # Build debug and run attached to terminal (stdout/stderr visible)
@@ -307,7 +348,7 @@ DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Dev
 # Note: If you get "Operation not permitted", grant Terminal Full Disk Access in
 # System Preferences > Privacy & Security > Full Disk Access
 dist:
-	$(MAKE) app cli INJECT_TIMESTAMP=0
+	$(MAKE) app INJECT_TIMESTAMP=0 APP_SKIP_XCODE_SIGNING=1
 	@# Verify we have a real signing identity for distribution
 	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
 		echo "Error: No 'Developer ID Application' identity found in keychain."; \
@@ -329,6 +370,23 @@ dist:
 	cp -R "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app" "$(DIST_DIR)/dmg-stage/"
 	@# Embed vmctl CLI inside the app bundle
 	cp "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/"
+	@# Restricted entitlements (e.g. com.apple.vm.networking) require a matching embedded provisioning profile.
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1 && [ -z "$(HELPER_PROVISIONING_PROFILE)" ]; then \
+		echo "ERROR: HELPER_PROVISIONING_PROFILE is required for macOS/GhostVMHelper/entitlements.plist (com.apple.vm.networking present)"; \
+		exit 1; \
+	fi
+	@if [ -n "$(HELPER_PROVISIONING_PROFILE)" ]; then \
+		test -f "$(HELPER_PROVISIONING_PROFILE)" || (echo "ERROR: HELPER_PROVISIONING_PROFILE not found: $(HELPER_PROVISIONING_PROFILE)" && exit 1); \
+		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/embedded.provisionprofile"; \
+	fi
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 && [ -z "$(APP_PROVISIONING_PROFILE)" ]; then \
+		echo "ERROR: APP_PROVISIONING_PROFILE is required for macOS/GhostVM/entitlements.plist (com.apple.vm.networking present)"; \
+		exit 1; \
+	fi
+	@if [ -n "$(APP_PROVISIONING_PROFILE)" ]; then \
+		test -f "$(APP_PROVISIONING_PROFILE)" || (echo "ERROR: APP_PROVISIONING_PROFILE not found: $(APP_PROVISIONING_PROFILE)" && exit 1); \
+		cp "$(APP_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/embedded.provisionprofile"; \
+	fi
 	@# --- Inside-out code signing for notarization ---
 	@echo "Signing nested components (inside-out)..."
 	@# 1. Sign all embedded frameworks (GhostVMKit, NIO, etc.) in GhostVMHelper.app

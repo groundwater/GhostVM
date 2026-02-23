@@ -85,7 +85,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
-        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.GhostVMHelper
         INFOPLIST_FILE: GhostVMHelper/Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
@@ -127,7 +127,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: GhostVM
-        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.GhostVM
         INFOPLIST_FILE: GhostVM/VMApp-Info.plist
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic
