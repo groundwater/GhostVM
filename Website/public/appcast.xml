@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 2.1.0</title>
+      <pubDate>Mon, 23 Feb 2026 22:56:00 -0800</pubDate>
+      <sparkle:version>2.1.0</sparkle:version>
+      <sparkle:shortVersionString>2.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Add bridged networking support</li><li>Binary clipboard sync: support images and rich content</li><li>Add keyboard input to permission popover panels</li><li>Check for updates in background on app launch</li><li>Fix clipboard text transport compatibility</li><li>Lock disk size field after VM creation</li><li>Add UI tests and accessibility identifiers</li><li>Fix app launch with restricted entitlements provisioning profile</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v2.1.0/GhostVM-2.1.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="2mwPKK3iPEt0iLaRX/XKpAkj9C1qFUeDwPV68d5vsD094gROYnuMKhFjnVPQZ0EFa3wdGoYaEwYEt9cCa6+cDw=="
+        length="31746519"
+      />
+    </item>
+    <item>
       <title>GhostVM 1.85.0</title>
       <pubDate>Sun, 22 Feb 2026 13:22:09 -0800</pubDate>
       <sparkle:version>1.85.0</sparkle:version>
