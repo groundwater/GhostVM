@@ -34,7 +34,7 @@ export default function Hero() {
         <div className="max-w-4xl mx-auto">
           <div className="rounded-xl overflow-hidden shadow-2xl ring-1 ring-black/10 dark:ring-white/10">
             <Image
-              src="/images/screenshots/hero-screenshot.jpg"
+              src="/images/screenshots/hero-screenshot.webp"
               alt="VS Code running inside a GhostVM virtual machine on macOS"
               width={2992}
               height={1934}

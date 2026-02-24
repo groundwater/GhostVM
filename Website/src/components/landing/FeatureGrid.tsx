@@ -4,7 +4,7 @@ import {
   Camera,
   Shield,
   Pause,
-  Bot,
+  Wifi,
 } from "lucide-react";
 
 const features = [
@@ -39,10 +39,10 @@ const features = [
       "Suspend a workspace to disk and resume exactly where you left off.",
   },
   {
-    icon: Bot,
-    title: "Host API",
+    icon: Wifi,
+    title: "Bridged & NAT Networking",
     description:
-      "Programmatic access via Unix socket. Scriptable lifecycle, file transfer, and remote execution.",
+      "NAT out of the box, or bridged mode for full network presence. Each workspace gets its own network stack.",
   },
 ];
 

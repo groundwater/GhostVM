@@ -16,7 +16,7 @@ export default function GhostTools() {
 
       <div className="not-prose my-6 flex items-center gap-4">
         <Image
-          src="/images/ghosttools-icon.png"
+          src="/images/ghosttools-icon.webp"
           alt="GhostTools icon"
           width={64}
           height={64}
