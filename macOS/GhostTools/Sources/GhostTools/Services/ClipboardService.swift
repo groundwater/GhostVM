@@ -43,6 +43,12 @@ final class ClipboardService {
     /// - Returns: Tuple of (data, uti) or nil if clipboard is empty
     func getClipboardData() -> (data: Data, type: String)? {
         for pbType in Self.typePriority {
+            if pbType == .string {
+                if let text = pasteboard.string(forType: .string) {
+                    return (Data(text.utf8), utiString(for: pbType))
+                }
+                continue
+            }
             if let data = pasteboard.data(forType: pbType) {
                 return (data, utiString(for: pbType))
             }
@@ -59,7 +65,12 @@ final class ClipboardService {
     func setClipboardData(_ data: Data, type: String) -> Bool {
         let pbType = pasteboardType(for: type)
         pasteboard.clearContents()
-        let success = pasteboard.setData(data, forType: pbType)
+        let success: Bool
+        if pbType == .string, let text = String(data: data, encoding: .utf8) {
+            success = pasteboard.setString(text, forType: .string)
+        } else {
+            success = pasteboard.setData(data, forType: pbType)
+        }
         if success {
             lastChangeCount = pasteboard.changeCount
         }

@@ -95,10 +95,25 @@ final class Router: @unchecked Sendable {
             return HTTPResponse.error(.badRequest, message: "Request body required")
         }
 
-        let type = request.header("X-Clipboard-Type") ?? "public.utf8-plain-text"
+        let (clipboardBody, type): (Data, String) = {
+            let explicitType = request.header("X-Clipboard-Type")
+            let contentType = request.header("Content-Type")?.lowercased()
 
-        log("[Router] Setting clipboard: type=\(type), \(body.count) bytes")
-        guard ClipboardService.shared.setClipboardData(body, type: type) else {
+            // Backward compatibility: older clients POSTed JSON like
+            // {"content":"...","type":"public.utf8-plain-text"}.
+            if explicitType == nil,
+               contentType?.contains("application/json") == true,
+               let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+               let content = object["content"] as? String {
+                let parsedType = (object["type"] as? String) ?? "public.utf8-plain-text"
+                return (Data(content.utf8), parsedType)
+            }
+
+            return (body, explicitType ?? "public.utf8-plain-text")
+        }()
+
+        log("[Router] Setting clipboard: type=\(type), \(clipboardBody.count) bytes")
+        guard ClipboardService.shared.setClipboardData(clipboardBody, type: type) else {
             log("[Router] Failed to set clipboard")
             return HTTPResponse.error(.internalServerError, message: "Failed to set clipboard")
         }

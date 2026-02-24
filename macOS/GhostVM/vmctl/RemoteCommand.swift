@@ -179,8 +179,26 @@ enum RemoteCommand {
 
         switch action {
         case "get":
-            let json = try client.getJSON("/api/v1/clipboard")
-            let content = json["content"] as? String ?? ""
+            let resp = try client.request(method: "GET", path: "/api/v1/clipboard")
+            guard resp.statusCode != 204 else {
+                if shouldOutputJSON {
+                    printJSON([
+                        "status": "ok",
+                        "action": "get",
+                        "content": ""
+                    ])
+                }
+                return
+            }
+            guard resp.isSuccess else {
+                throw VMError.message(resp.errorMessage)
+            }
+
+            let clipType = resp.headers["X-Clipboard-Type"] ?? "public.utf8-plain-text"
+            guard clipType == "public.utf8-plain-text" else {
+                throw VMError.message("Clipboard contains non-text data (\(clipType)). Use the app clipboard sync for rich/image content.")
+            }
+            let content = String(data: resp.body, encoding: .utf8) ?? ""
 
             if shouldOutputJSON {
                 printJSON([
@@ -199,10 +217,14 @@ enum RemoteCommand {
                 throw VMError.message("Usage: vmctl remote clipboard set <text>")
             }
             let text = args.joined(separator: " ")
-            let _ = try client.postJSON("/api/v1/clipboard", body: [
-                "content": text,
-                "type": "public.utf8-plain-text"
-            ])
+            let resp = try client.request(
+                method: "POST",
+                path: "/api/v1/clipboard",
+                body: Data(text.utf8)
+            )
+            guard resp.isSuccess else {
+                throw VMError.message(resp.errorMessage)
+            }
 
             if shouldOutputJSON {
                 printJSON([
