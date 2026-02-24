@@ -73,8 +73,9 @@ final class App2VMSessionRegistry {
                     store.updateStatus(for: vmID, status: "Stopping…")
                 case .stopped, .idle:
                     store.reloadVM(at: bundleURL)
-                case .failed:
+                case .failed(let message):
                     store.updateStatus(for: vmID, status: "Error")
+                    store.lastStartError = message
                 }
             }
         }
@@ -482,13 +483,13 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     func start() {
-        guard VZVirtualMachine.isSupported else {
-            transition(to: .failed("Virtualization is not supported on this Mac."))
+        if let forcedError = Self.uiTestingForcedStartErrorMessage() {
+            transition(to: .failed(forcedError))
             return
         }
 
-        if let forcedError = Self.uiTestingForcedStartErrorMessage() {
-            transition(to: .failed(forcedError))
+        guard VZVirtualMachine.isSupported else {
+            transition(to: .failed("Virtualization is not supported on this Mac."))
             return
         }
 

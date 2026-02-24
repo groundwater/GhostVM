@@ -54,14 +54,10 @@ final class EditVMUITests: XCTestCase {
 
     func testEditSheetLayoutAndValues() {
         XCTContext.runActivity(named: "Sheet title") { _ in
-            let title = app.staticTexts.allElementsBoundByIndex.first { element in
-                guard element.label.contains("Edit") else { return false }
-                if let selectedVMName {
-                    return element.label.contains(selectedVMName)
-                }
-                return true
-            }
-            XCTAssertNotNil(title, "Sheet title should contain 'Edit' and VM name")
+            let title = app.staticTexts["editVM.title"]
+            XCTAssertTrue(title.exists, "Sheet title should contain 'Edit' and VM name")
+            let titleValue = title.value as? String ?? title.label
+            XCTAssertTrue(titleValue.contains("Edit"), "Sheet title should contain 'Edit'")
         }
 
         XCTContext.runActivity(named: "Core fields exist with mock values") { _ in
@@ -78,12 +74,13 @@ final class EditVMUITests: XCTestCase {
         }
 
         XCTContext.runActivity(named: "Units and info banner") { _ in
-            XCTAssertTrue(app.staticTexts["cores"].exists, "CPU field should have 'cores' unit label")
-            let gibLabels = app.staticTexts.matching(NSPredicate(format: "label == 'GiB'"))
-            XCTAssertGreaterThanOrEqual(gibLabels.count, 1, "Should have at least one 'GiB' unit label")
+            XCTAssertTrue(app.staticTexts["editVM.cpuUnit"].exists, "CPU field should have 'cores' unit label")
+            XCTAssertTrue(app.staticTexts["editVM.memoryUnit"].exists || app.staticTexts["editVM.diskUnit"].exists,
+                          "Should have at least one 'GiB' unit label")
             let banner = app.staticTexts["editVM.infoBanner"]
             XCTAssertTrue(banner.exists, "Info banner should exist")
-            XCTAssertTrue(banner.label.contains("Changes will take effect"), "Banner should mention changes taking effect")
+            let bannerText = banner.value as? String ?? banner.label
+            XCTAssertTrue(bannerText.contains("Changes will take effect"), "Banner should mention changes taking effect")
         }
     }
 

@@ -22,8 +22,9 @@ final class VMListDisplayUITests: XCTestCase {
         let names = app.staticTexts.matching(identifier: "vmRow.name")
         XCTAssertGreaterThanOrEqual(names.count, 4, "Should have at least 4 mock VMs")
 
-        let firstVM = names.element(boundBy: 0).label
-        let secondVM = names.element(boundBy: 1).label
+        // Use .value — .label is merged by List row accessibility
+        let firstVM = names.element(boundBy: 0).value as? String ?? ""
+        let secondVM = names.element(boundBy: 1).value as? String ?? ""
         XCTAssertTrue(firstVM.localizedCaseInsensitiveCompare(secondVM) == .orderedAscending,
                        "VMs should be sorted alphabetically: '\(firstVM)' should come before '\(secondVM)'")
     }

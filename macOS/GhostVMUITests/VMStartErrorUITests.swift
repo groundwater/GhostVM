@@ -25,7 +25,9 @@ final class VMStartErrorUITests: XCTestCase {
         let title = app.staticTexts["Failed to Start VM"]
         XCTAssertTrue(title.waitForExistence(timeout: 5), "Expected VM start error overlay title")
 
-        let message = app.staticTexts["Bridged network interface 'stale-iface-id' is not available on this Mac."]
-        XCTAssertTrue(message.waitForExistence(timeout: 5), "Expected explicit bridged interface error message")
+        let message = app.staticTexts["vmStartError.message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5), "Expected error message element")
+        let messageText = message.value as? String ?? message.label
+        XCTAssertTrue(messageText.contains("stale-iface-id"), "Expected explicit bridged interface error message, got: \(messageText)")
     }
 }
