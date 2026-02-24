@@ -24,25 +24,25 @@ final class VMRowUITests: XCTestCase {
         let names = app.staticTexts.matching(identifier: "vmRow.name")
         XCTAssertGreaterThanOrEqual(names.count, 1, "At least one VM name should be visible")
 
-        // Verify one of the known mock VM names is present
-        let allLabels = (0..<names.count).map { names.element(boundBy: $0).label }
-        XCTAssertTrue(allLabels.contains("macOS Sequoia"), "Should contain 'macOS Sequoia' mock VM")
+        // Verify one of the known mock VM names is present (use .value — .label is merged by List row)
+        let allValues = (0..<names.count).map { names.element(boundBy: $0).value as? String ?? "" }
+        XCTAssertTrue(allValues.contains("macOS Sequoia"), "Should contain 'macOS Sequoia' mock VM")
     }
 
     func testRowShowsOSVersion() {
         let versions = app.staticTexts.matching(identifier: "vmRow.osVersion")
         XCTAssertGreaterThanOrEqual(versions.count, 1, "At least one OS version should be visible")
 
-        let allLabels = (0..<versions.count).map { versions.element(boundBy: $0).label }
-        XCTAssertTrue(allLabels.contains("macOS 15.2"), "Should contain 'macOS 15.2' version for Sequoia")
+        let allValues = (0..<versions.count).map { versions.element(boundBy: $0).value as? String ?? "" }
+        XCTAssertTrue(allValues.contains("macOS 15.2"), "Should contain 'macOS 15.2' version for Sequoia")
     }
 
     func testRowShowsStatusText() {
         let statuses = app.staticTexts.matching(identifier: "vmRow.status")
         XCTAssertGreaterThanOrEqual(statuses.count, 1, "At least one status label should be visible")
 
-        let allLabels = (0..<statuses.count).map { statuses.element(boundBy: $0).label }
-        XCTAssertTrue(allLabels.contains("Running") || allLabels.contains("Stopped") || allLabels.contains("Suspended"),
+        let allValues = (0..<statuses.count).map { statuses.element(boundBy: $0).value as? String ?? "" }
+        XCTAssertTrue(allValues.contains("Running") || allValues.contains("Stopped") || allValues.contains("Suspended"),
                        "Should contain a known status value")
     }
 
@@ -57,7 +57,8 @@ final class VMRowUITests: XCTestCase {
     }
 
     func testEllipsisMenuExists() {
-        let menus = app.buttons.matching(identifier: "vmRow.ellipsisMenu")
-        XCTAssertGreaterThanOrEqual(menus.count, 1, "Each VM row should have an ellipsis menu button")
+        // SwiftUI Menu with .borderlessButton style — search all element types
+        let query = app.descendants(matching: .any).matching(identifier: "vmRow.ellipsisMenu")
+        XCTAssertGreaterThanOrEqual(query.count, 1, "Each VM row should have an ellipsis menu")
     }
 }

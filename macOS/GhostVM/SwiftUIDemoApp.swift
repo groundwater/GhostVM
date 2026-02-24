@@ -347,7 +347,7 @@ struct VMListDemoView: View {
                     .foregroundStyle(Color.accentColor)
                 }
 
-                ForEach(store.vms) { vm in
+                ForEach(store.vms.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) { vm in
                     VMRowView(
                         vm: vm,
                         isSelected: selectedVMID == vm.id,
@@ -466,6 +466,34 @@ struct VMListDemoView: View {
             .listStyle(.inset)
             .scrollContentBackground(.hidden)
             .onDrop(of: [UTType.fileURL], isTargeted: $isDropTarget, perform: handleDrop)
+
+                // VM start error overlay
+                if let error = store.lastStartError {
+                    Color.black.opacity(0.8)
+                    VStack(spacing: 16) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 48))
+                            .foregroundColor(.yellow)
+                        Text("Failed to Start VM")
+                            .font(.title2)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white)
+                            .accessibilityLabel("Failed to Start VM")
+                        Text(error)
+                            .font(.body)
+                            .foregroundColor(.white.opacity(0.8))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 40)
+                            .accessibilityIdentifier("vmStartError.message")
+                            .accessibilityValue(error)
+                        Button("Dismiss") {
+                            store.lastStartError = nil
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(.white)
+                    }
+                    .accessibilityElement(children: .contain)
+                }
             } // ZStack
         }
         .frame(minWidth: 520, minHeight: 360)
@@ -993,11 +1021,13 @@ struct VMRowView: View {
                     Text(vm.name)
                         .font(.headline)
                         .accessibilityIdentifier("vmRow.name")
+                        .accessibilityValue(vm.name)
                 }
                 Text(vm.osVersion)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("vmRow.osVersion")
+                    .accessibilityValue(vm.osVersion)
             }
 
             Spacer(minLength: 8)
@@ -1009,6 +1039,7 @@ struct VMRowView: View {
                     .foregroundStyle(statusColor(for: vm))
                     .frame(width: 80, alignment: .trailing)
                     .accessibilityIdentifier("vmRow.status")
+                    .accessibilityValue(vm.status)
                 Spacer(minLength: 0)
             }
 
@@ -1314,6 +1345,8 @@ struct EditVMView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Edit \"\(vm.name)\"")
                         .font(.headline)
+                        .accessibilityIdentifier("editVM.title")
+                        .accessibilityValue("Edit \"\(vm.name)\"")
 
                     if isLoading {
                         ProgressView("Loading settings…")
@@ -1331,6 +1364,7 @@ struct EditVMView: View {
                                     .accessibilityIdentifier("editVM.cpuField")
                                 Text("cores")
                                     .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("editVM.cpuUnit")
                             }
                         }
 
@@ -1342,6 +1376,7 @@ struct EditVMView: View {
                                     .accessibilityIdentifier("editVM.memoryField")
                                 Text("GiB")
                                     .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("editVM.memoryUnit")
                             }
                         }
 
@@ -1350,9 +1385,11 @@ struct EditVMView: View {
                                 TextField("GiB", text: $diskGiB)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(maxWidth: 120)
+                                    .disabled(true)
                                     .accessibilityIdentifier("editVM.diskField")
                                 Text("GiB")
                                     .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("editVM.diskUnit")
                             }
                         }
 

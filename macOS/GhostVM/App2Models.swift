@@ -21,6 +21,7 @@ struct App2VM: Identifiable, Hashable, Codable {
 
 final class App2VMStore: ObservableObject {
     @Published var vms: [App2VM] = []
+    @Published var lastStartError: String?
 
     private let defaults = UserDefaults.standard
     private let fileManager = FileManager.default

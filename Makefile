@@ -199,6 +199,7 @@ test: $(XCODE_PROJECT)
 # Run UI tests (excludes screenshot-capture tests; use 'make capture' for those)
 uitest: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMUITests -destination 'platform=macOS' \
+		-allowProvisioningUpdates -allowProvisioningDeviceRegistration \
 		-skip-testing:GhostVMUITests/ScreenshotTests
 
 # Generate website screenshots from UI tests
