@@ -1350,6 +1350,7 @@ struct EditVMView: View {
                                 TextField("GiB", text: $diskGiB)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(maxWidth: 120)
+                                    .disabled(true)
                                     .accessibilityIdentifier("editVM.diskField")
                                 Text("GiB")
                                     .foregroundStyle(.secondary)

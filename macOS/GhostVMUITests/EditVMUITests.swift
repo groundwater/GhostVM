@@ -74,6 +74,7 @@ final class EditVMUITests: XCTestCase {
             XCTAssertEqual(cpuField.value as? String, "6", "CPU field should have mock value of 6")
             XCTAssertEqual(memoryField.value as? String, "16", "Memory field should have mock value of 16")
             XCTAssertEqual(diskField.value as? String, "128", "Disk field should have mock value of 128")
+            XCTAssertFalse(diskField.isEnabled, "Disk field should be read-only after VM creation")
         }
 
         XCTContext.runActivity(named: "Units and info banner") { _ in
