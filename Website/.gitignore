@@ -5,6 +5,9 @@ node_modules/
 .next/
 out/
 
+# Optimized images (build artifacts)
+public/images/**/*.webp
+
 # Misc
 .DS_Store
 *.tsbuildinfo

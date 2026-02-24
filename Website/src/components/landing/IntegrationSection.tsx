@@ -7,7 +7,7 @@ const spotlights = [
     title: "Clipboard Sync",
     description:
       "Copy-paste flows between host and workspace. A permission prompt gives you control.",
-    image: "/images/screenshots/clipboard-permission.png",
+    image: "/images/screenshots/clipboard-permission.webp",
     alt: "Clipboard sync permission prompt",
   },
   {
@@ -15,7 +15,7 @@ const spotlights = [
     title: "Port Forwarding",
     description:
       "Listening ports are auto-detected with process names. Manage them from the toolbar.",
-    image: "/images/screenshots/port-forward-notification.png",
+    image: "/images/screenshots/port-forward-notification.webp",
     alt: "Auto port-forward notification showing detected ports",
   },
   {
@@ -23,14 +23,14 @@ const spotlights = [
     title: "File Transfer",
     description:
       "Drag files in, pull them out. Transferred files are quarantined by default.",
-    image: "/images/screenshots/file-transfer-prompt.png",
+    image: "/images/screenshots/file-transfer-prompt.webp",
     alt: "File transfer prompt for guest to host download",
   },
   {
     icon: FolderOpen,
     title: "Shared Folders",
     description: "Mount host directories inside the workspace.",
-    image: "/images/screenshots/shared-folders.png",
+    image: "/images/screenshots/shared-folders.webp",
     alt: "Shared folder configuration panel",
   },
 ];
@@ -51,7 +51,7 @@ export default function IntegrationSection() {
         <div className="max-w-4xl mx-auto mb-16">
           <div className="rounded-xl overflow-hidden shadow-2xl ring-1 ring-black/10">
             <Image
-              src="/images/screenshots/vm-integration.jpg"
+              src="/images/screenshots/vm-integration.webp"
               alt="VS Code running inside an agentic workspace — nearly indistinguishable from a native app"
               width={1200}
               height={800}

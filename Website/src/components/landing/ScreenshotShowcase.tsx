@@ -15,7 +15,7 @@ export default function ScreenshotShowcase() {
         <div className="max-w-3xl mx-auto">
           <div className="rounded-xl overflow-hidden border border-gray-200 dark:border-gray-700 shadow-xl">
             <Image
-              src="/images/screenshots/multiple-vms.jpg"
+              src="/images/screenshots/multiple-vms.webp"
               alt="Two workspace windows running side by side on the macOS desktop"
               width={2992}
               height={1934}

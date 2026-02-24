@@ -14,22 +14,22 @@ type DockItem = {
 };
 
 const dockItems: DockItem[] = [
-  { name: "Slack", src: "/images/dock-icons/slack.png", running: true, isVM: true, content: "slack" },
-  { name: "VS Code", src: "/images/dock-icons/vscode.png", running: true, isVM: true, content: "code" },
-  { name: "macOS Sequoia", src: "/images/vm-icons/icon-hipster.png", running: true, isVM: true, content: "chat" },
-  { name: "Dev Server", src: "/images/vm-icons/icon-terminal.png", running: true, isVM: true, content: "terminal" },
-  { name: "Default", src: "/images/dock-icons/glass-ghost.png", running: true, isVM: true },
-  { name: "CI Runner", src: "/images/dock-icons/glass.png", running: true, isVM: true, glassIcon: "/images/dock-icons/firefox.png", content: "browser" },
-  { name: "Staging", src: "/images/vm-icons/icon-nerd.png", running: true, isVM: true, stack: { back: "/images/dock-icons/finder.png", front: "/images/dock-icons/safari.png" }, content: "safari" },
-  { name: "Testing", src: "/images/vm-icons/icon-banana.png", running: true, isVM: true, stack: { back: "/images/dock-icons/slack.png", front: "/images/dock-icons/finder.png" }, content: "finder" },
+  { name: "Slack", src: "/images/dock-icons/slack.webp", running: true, isVM: true, content: "slack" },
+  { name: "VS Code", src: "/images/dock-icons/vscode.webp", running: true, isVM: true, content: "code" },
+  { name: "macOS Sequoia", src: "/images/vm-icons/icon-hipster.webp", running: true, isVM: true, content: "chat" },
+  { name: "Dev Server", src: "/images/vm-icons/icon-terminal.webp", running: true, isVM: true, content: "terminal" },
+  { name: "Default", src: "/images/dock-icons/glass-ghost.webp", running: true, isVM: true },
+  { name: "CI Runner", src: "/images/dock-icons/glass.webp", running: true, isVM: true, glassIcon: "/images/dock-icons/firefox.webp", content: "browser" },
+  { name: "Staging", src: "/images/vm-icons/icon-nerd.webp", running: true, isVM: true, stack: { back: "/images/dock-icons/finder.webp", front: "/images/dock-icons/safari.webp" }, content: "safari" },
+  { name: "Testing", src: "/images/vm-icons/icon-banana.webp", running: true, isVM: true, stack: { back: "/images/dock-icons/slack.webp", front: "/images/dock-icons/finder.webp" }, content: "finder" },
 ];
 
 const totalDockSlots = dockItems.length;
 
 const vmWallpapers = [
-  "/images/wallpapers/sonoma.png",
-  "/images/wallpapers/sky-blue.png",
-  "/images/wallpapers/catalina-sunset.png",
+  "/images/wallpapers/sonoma.webp",
+  "/images/wallpapers/sky-blue.webp",
+  "/images/wallpapers/catalina-sunset.webp",
 ];
 
 function MiniTerminal() {
@@ -541,7 +541,7 @@ export default function VMIconShowcase() {
           {/* Clone */}
           <div className="flex items-start gap-4 p-4 sm:p-5 rounded-xl bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 text-left">
             <div className="w-12 h-12 sm:w-14 sm:h-14 shrink-0 rounded-[22%] overflow-hidden">
-              <Image src="/images/dock-icons/slack.png" alt="Clone" width={56} height={56} className="w-full h-full object-cover" />
+              <Image src="/images/dock-icons/slack.webp" alt="Clone" width={56} height={56} className="w-full h-full object-cover" />
             </div>
             <div>
               <h3 className="font-semibold text-sm sm:text-base">Clone</h3>
@@ -552,7 +552,7 @@ export default function VMIconShowcase() {
           {/* Stack */}
           <div className="flex items-start gap-4 p-4 sm:p-5 rounded-xl bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 text-left">
             <div className="w-12 h-12 sm:w-14 sm:h-14 shrink-0 relative">
-              <StackIcon back="/images/dock-icons/finder.png" front="/images/dock-icons/safari.png" />
+              <StackIcon back="/images/dock-icons/finder.webp" front="/images/dock-icons/safari.webp" />
             </div>
             <div>
               <h3 className="font-semibold text-sm sm:text-base">Stack</h3>
@@ -563,7 +563,7 @@ export default function VMIconShowcase() {
           {/* Custom */}
           <div className="flex items-start gap-4 p-4 sm:p-5 rounded-xl bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 text-left">
             <div className="w-12 h-12 sm:w-14 sm:h-14 shrink-0 rounded-[22%] overflow-hidden">
-              <Image src="/images/vm-icons/icon-hipster.png" alt="Custom" width={56} height={56} className="w-full h-full object-cover" />
+              <Image src="/images/vm-icons/icon-hipster.webp" alt="Custom" width={56} height={56} className="w-full h-full object-cover" />
             </div>
             <div>
               <h3 className="font-semibold text-sm sm:text-base">Custom</h3>
@@ -574,7 +574,7 @@ export default function VMIconShowcase() {
           {/* Glass */}
           <div className="flex items-start gap-4 p-4 sm:p-5 rounded-xl bg-white dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 text-left">
             <div className="w-12 h-12 sm:w-14 sm:h-14 shrink-0 rounded-[22%] overflow-hidden relative">
-              <GlassIcon glass="/images/dock-icons/glass.png" inner="/images/dock-icons/firefox.png" />
+              <GlassIcon glass="/images/dock-icons/glass.webp" inner="/images/dock-icons/firefox.webp" />
             </div>
             <div>
               <h3 className="font-semibold text-sm sm:text-base">Glass</h3>
