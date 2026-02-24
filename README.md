@@ -141,3 +141,9 @@ make app
 │   └── GhostVMTests/     # Unit tests
 └── Website/              # Documentation site (ghostvm.org)
 ```
+
+## License
+
+**Source code:** License not yet determined.
+
+**Binary (DMG):** The signed DMG distributed via [GitHub Releases](https://github.com/groundwater/GhostVM/releases) is free to use for any purpose. It is provided "as is", without warranty of any kind, express or implied. The authors are not liable for any claim, damages, or other liability arising from the use of the software.
