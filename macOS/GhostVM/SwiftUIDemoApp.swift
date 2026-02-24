@@ -318,6 +318,7 @@ struct VMListDemoView: View {
                     Label("Images", systemImage: "arrow.down.circle")
                 }
                 .buttonStyle(.bordered)
+                .accessibilityIdentifier("vmList.imagesButton")
             }
             .padding(.top, 8)
             .padding(.horizontal, 12)
@@ -333,6 +334,7 @@ struct VMListDemoView: View {
                         .opacity(0.07)
                         .allowsHitTesting(false)
                         .padding(24)
+                        .accessibilityIdentifier("vmList.watermark")
                 }
 
             List(selection: $selectedVMID) {
@@ -959,6 +961,7 @@ struct VMRowView: View {
                 }
             }
             .frame(width: 64, height: 64)
+            .accessibilityIdentifier("vmRow.icon")
 
             VStack(alignment: .leading, spacing: 4) {
                 if isRenaming {
@@ -989,10 +992,12 @@ struct VMRowView: View {
                 } else {
                     Text(vm.name)
                         .font(.headline)
+                        .accessibilityIdentifier("vmRow.name")
                 }
                 Text(vm.osVersion)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("vmRow.osVersion")
             }
 
             Spacer(minLength: 8)
@@ -1003,6 +1008,7 @@ struct VMRowView: View {
                     .font(.subheadline)
                     .foregroundStyle(statusColor(for: vm))
                     .frame(width: 80, alignment: .trailing)
+                    .accessibilityIdentifier("vmRow.status")
                 Spacer(minLength: 0)
             }
 
@@ -1014,6 +1020,7 @@ struct VMRowView: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .fixedSize()
+                    .accessibilityIdentifier("vmRow.installButton")
                 } else {
                     Button {
                         play()
@@ -1048,6 +1055,7 @@ struct VMRowView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
+                .accessibilityIdentifier("vmRow.ellipsisMenu")
             }
             .fixedSize()
         }
@@ -1320,6 +1328,7 @@ struct EditVMView: View {
                                 TextField("Number of vCPUs", text: $cpuCount)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(maxWidth: 120)
+                                    .accessibilityIdentifier("editVM.cpuField")
                                 Text("cores")
                                     .foregroundStyle(.secondary)
                             }
@@ -1330,6 +1339,7 @@ struct EditVMView: View {
                                 TextField("GiB", text: $memoryGiB)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(maxWidth: 120)
+                                    .accessibilityIdentifier("editVM.memoryField")
                                 Text("GiB")
                                     .foregroundStyle(.secondary)
                             }
@@ -1340,6 +1350,7 @@ struct EditVMView: View {
                                 TextField("GiB", text: $diskGiB)
                                     .textFieldStyle(.roundedBorder)
                                     .frame(maxWidth: 120)
+                                    .accessibilityIdentifier("editVM.diskField")
                                 Text("GiB")
                                     .foregroundStyle(.secondary)
                             }
@@ -1375,6 +1386,7 @@ struct EditVMView: View {
                         Text("Changes will take effect the next time you start the VM.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                            .accessibilityIdentifier("editVM.infoBanner")
                     }
                 }
                 .padding(EdgeInsets(top: 18, leading: 24, bottom: 8, trailing: 24))
@@ -1392,12 +1404,14 @@ struct EditVMView: View {
                 }
                 .keyboardShortcut(.cancelAction)
                 .disabled(isSaving)
+                .accessibilityIdentifier("editVM.cancelButton")
 
                 Button("Save") {
                     save()
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(isSaving || isLoading)
+                .accessibilityIdentifier("editVM.saveButton")
             }
             .padding(EdgeInsets(top: 8, leading: 24, bottom: 18, trailing: 24))
         }
@@ -2441,6 +2455,7 @@ struct SettingsDemoView: View {
                     Button("Browse…") {
                         // Intentionally no-op in demo app.
                     }
+                    .accessibilityIdentifier("settings.browseVMsButton")
                 }
             }
 
@@ -2492,12 +2507,14 @@ struct SettingsDemoView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(maxWidth: 260, alignment: .leading)
+                .accessibilityIdentifier("settings.appIconPicker")
             }
 
             if updater != nil {
                 labeledRow("Updates") {
                     Toggle("Automatically check for updates", isOn: $autoCheckForUpdates)
                         .toggleStyle(.checkbox)
+                        .accessibilityIdentifier("settings.autoUpdateToggle")
                         .onChange(of: autoCheckForUpdates) { _, newValue in
                             updater?.automaticallyChecksForUpdates = newValue
                         }

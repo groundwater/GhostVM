@@ -39,7 +39,7 @@ ifeq ($(BASE_VERSION),)
 $(error Missing $(VERSION_FILE). Create it with a version like 1.85.0)
 endif
 
-.PHONY: all cli app clean help run launch generate test framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist
+.PHONY: all cli app clean help run launch generate test uitest framework dist tools debug-tools dmg ghosttools-icon ghostvm-icon debug website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist
 
 all: help
 
@@ -195,6 +195,11 @@ launch: app
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
 	swift test --package-path macOS/GhostTools --filter AsyncVSockIOTests
+
+# Run UI tests (excludes screenshot-capture tests; use 'make capture' for those)
+uitest: $(XCODE_PROJECT)
+	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMUITests -destination 'platform=macOS' \
+		-skip-testing:GhostVMUITests/ScreenshotTests
 
 # Generate website screenshots from UI tests
 # Step 1: capture — runs XCUITests, saves raw PNGs to build/screenshots/
@@ -569,6 +574,7 @@ help:
 	@echo "  make run      - Build and run attached to terminal"
 	@echo "  make launch   - Build and launch detached"
 	@echo "  make test     - Run unit tests"
+	@echo "  make uitest   - Run UI tests"
 	@echo "  make capture     - Capture raw screenshots from UI tests → build/screenshots/"
 	@echo "  make composite   - Composite raw captures into website images"
 	@echo "  make screenshots - Full pipeline: capture + composite"
