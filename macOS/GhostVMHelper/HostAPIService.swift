@@ -336,8 +336,23 @@ final class HostAPIService {
                     guard let body = body, !body.isEmpty else {
                         return .error(400, message: "Request body required")
                     }
-                    let clipType = headers?["X-Clipboard-Type"] ?? headers?["x-clipboard-type"] ?? "public.utf8-plain-text"
-                    try await client.setClipboard(data: body, type: clipType)
+                    let explicitType = headers?["X-Clipboard-Type"] ?? headers?["x-clipboard-type"]
+                    let contentType = (headers?["Content-Type"] ?? headers?["content-type"])?.lowercased()
+
+                    let (clipboardBody, clipType): (Data, String) = {
+                        // Backward compatibility for older UI clients posting JSON:
+                        // {"content":"...","type":"public.utf8-plain-text"}
+                        if explicitType == nil,
+                           contentType?.contains("application/json") == true,
+                           let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                           let content = object["content"] as? String {
+                            let parsedType = (object["type"] as? String) ?? "public.utf8-plain-text"
+                            return (Data(content.utf8), parsedType)
+                        }
+                        return (body, explicitType ?? "public.utf8-plain-text")
+                    }()
+
+                    try await client.setClipboard(data: clipboardBody, type: clipType)
                     return .ok()
                 }
             }

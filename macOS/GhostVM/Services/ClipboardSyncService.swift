@@ -151,7 +151,11 @@ public final class ClipboardSyncService: ObservableObject {
             let uti = response.type ?? "public.utf8-plain-text"
             let pbType = Self.pasteboardType(for: uti)
             hostPasteboard.clearContents()
-            hostPasteboard.setData(data, forType: pbType)
+            if pbType == .string, let text = String(data: data, encoding: .utf8) {
+                hostPasteboard.setString(text, forType: .string)
+            } else {
+                hostPasteboard.setData(data, forType: pbType)
+            }
             lastHostChangeCount = hostPasteboard.changeCount
 
         } catch GhostClientError.noContent {
@@ -166,6 +170,12 @@ public final class ClipboardSyncService: ObservableObject {
     /// Read the best available pasteboard item by type priority
     private func bestPasteboardItem() -> (data: Data, type: String)? {
         for pbType in Self.typePriority {
+            if pbType == .string {
+                if let text = hostPasteboard.string(forType: .string) {
+                    return (Data(text.utf8), Self.utiString(for: pbType))
+                }
+                continue
+            }
             if let data = hostPasteboard.data(forType: pbType) {
                 return (data, Self.utiString(for: pbType))
             }
