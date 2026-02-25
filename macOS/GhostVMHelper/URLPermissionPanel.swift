@@ -15,7 +15,9 @@ final class URLPermissionPanel: NSObject, NSPopoverDelegate {
     var onClose: (() -> Void)?
 
     private var popover: NSPopover?
+    private var alertWindow: NSWindow?
     private var contentViewController: URLPermissionContentViewController?
+    private var currentURLs: [String] = []
 
     func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
         let popover = NSPopover()
@@ -31,15 +33,53 @@ final class URLPermissionPanel: NSObject, NSPopoverDelegate {
         self.popover = popover
     }
 
+    func showAsAlert(in window: NSWindow) {
+        let urlDescription: String
+        if currentURLs.count == 1 {
+            urlDescription = URLUtilities.truncateMiddle(currentURLs[0], maxLength: 60)
+        } else if currentURLs.count > 1 {
+            urlDescription = "\(currentURLs.count) URLs from guest"
+        } else {
+            urlDescription = "URL from guest"
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Open URL?"
+        alert.informativeText = urlDescription
+        alert.addButton(withTitle: "Open")
+        alert.addButton(withTitle: "Always")
+        alert.addButton(withTitle: "Deny")
+        alertWindow = window
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self else { return }
+            switch response {
+            case .alertFirstButtonReturn:
+                self.delegate?.urlPermissionPanelDidAllowOnce(self)
+            case .alertSecondButtonReturn:
+                self.delegate?.urlPermissionPanelDidAlwaysAllow(self)
+            default:
+                self.delegate?.urlPermissionPanelDidDeny(self)
+            }
+            self.alertWindow = nil
+            self.onClose?()
+        }
+    }
+
     func close() {
         popover?.close()
+        if let window = alertWindow {
+            if let sheet = window.attachedSheet { window.endSheet(sheet) }
+            alertWindow = nil
+            onClose?()
+        }
     }
 
     var isShown: Bool {
-        popover?.isShown ?? false
+        (popover?.isShown ?? false) || alertWindow != nil
     }
 
     func setURLs(_ urls: [String]) {
+        currentURLs = urls
         contentViewController?.setURLs(urls)
     }
 

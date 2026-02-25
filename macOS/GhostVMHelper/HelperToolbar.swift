@@ -1212,10 +1212,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             self.delegate?.toolbarURLPermissionPanelDidClose(self)
         }
 
-        if let button = clipboardSyncItem?.view, button.window != nil {
+        if let button = captureCommandsItem?.view, button.window != nil {
             panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        } else if let button = captureKeysItem?.view, button.window != nil {
-            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        } else if let window = self.window {
+            panel.showAsAlert(in: window)
         } else {
             return
         }
@@ -1270,20 +1270,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func closePortForwardPermissionPopover() {
-        portForwardNotificationPanel?.close()
-        portForwardNotificationPanel = nil
+        portForwardPermissionPanel?.close()
+        portForwardPermissionPanel = nil
     }
 
     var isPortForwardPermissionPopoverShown: Bool {
-        portForwardNotificationPanel?.isShown ?? false
+        portForwardPermissionPanel?.isShown ?? false
     }
 
     func setPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
-        portForwardNotificationPanel?.setPortMappings(mappings)
+        portForwardPermissionPanel?.setPortMappings(mappings)
     }
 
     func addPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
-        portForwardNotificationPanel?.addPortMappings(mappings)
+        portForwardPermissionPanel?.addPortMappings(mappings)
     }
 
     func showPortForwardNotificationPopover() {
