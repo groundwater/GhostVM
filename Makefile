@@ -398,6 +398,9 @@ dist:
 		echo "Set these in a .env file or as environment variables."; \
 		exit 1; \
 	fi
+	@# Verify provisioning profile certificates match the signing identity (AMFI rejects
+	@# apps where the profile cert doesn't match the signing cert, even if entitlements match)
+	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE)
 	@echo "Creating distribution DMG (version $(VERSION))..."
 	@echo "Signing with: $(DIST_CODESIGN_ID)"
 	@rm -rf "$(DIST_DIR)"
@@ -499,15 +502,16 @@ dist:
 		--entitlements macOS/GhostVM/entitlements.plist \
 		-s "$(DIST_CODESIGN_ID)" \
 		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app"
+	@# Verify code signature passes strict validation (AMFI requires strict for restricted entitlements)
+	@echo "Verifying strict code signature..."
+	codesign --verify --deep --strict "$(DIST_DIR)/dmg-stage/$(APP_NAME).app"
 	@# Add Applications symlink for drag-to-install
 	ln -s /Applications "$(DIST_DIR)/dmg-stage/Applications"
-	@# Create disk image (two-step: makehybrid avoids mounting, then convert to UDZO for notarization)
-	hdiutil makehybrid -o "$(DIST_DIR)/$(DMG_NAME)-$(VERSION)-tmp.dmg" \
-		-hfs -hfs-volume-name "$(DMG_NAME)" \
-		"$(DIST_DIR)/dmg-stage"
-	hdiutil convert "$(DIST_DIR)/$(DMG_NAME)-$(VERSION)-tmp.dmg" \
-		-format UDZO -o "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
-	@rm -f "$(DIST_DIR)/$(DMG_NAME)-$(VERSION)-tmp.dmg"
+	@# Create compressed disk image (APFS via hdiutil create preserves framework symlinks
+	@# cleanly; makehybrid -hfs injects FinderInfo xattrs on symlinks which breaks AMFI
+	@# strict validation for restricted entitlements like com.apple.vm.networking)
+	hdiutil create -volname "$(DMG_NAME)" -srcfolder "$(DIST_DIR)/dmg-stage" \
+		-ov -format UDZO "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@rm -rf "$(DIST_DIR)/dmg-stage"
 	@# Sign the DMG itself
 	codesign --force --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
