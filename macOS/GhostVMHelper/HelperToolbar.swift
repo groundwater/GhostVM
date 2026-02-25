@@ -1279,11 +1279,15 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func setPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
-        portForwardPermissionPanel?.setPortMappings(mappings)
+        let entries = mappings.map { PortForwardEntry(hostPort: $0.hostPort, guestPort: $0.guestPort, enabled: true, isAutoMapped: true, processName: $0.processName) }
+        portForwardEntries = entries
+        portForwardPermissionPanel?.setEntries(entries)
     }
 
     func addPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
-        portForwardPermissionPanel?.addPortMappings(mappings)
+        let newEntries = mappings.map { PortForwardEntry(hostPort: $0.hostPort, guestPort: $0.guestPort, enabled: true, isAutoMapped: true, processName: $0.processName) }
+        portForwardEntries.append(contentsOf: newEntries)
+        portForwardPermissionPanel?.setEntries(portForwardEntries)
     }
 
     func showPortForwardNotificationPopover() {
