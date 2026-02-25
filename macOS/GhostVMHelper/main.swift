@@ -1241,9 +1241,13 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             // Check icon mode
             activeIconMode = config.iconMode
 
-            // Generate MAC address if needed
-            if config.macAddress == nil {
-                config.macAddress = VZMACAddress.randomLocallyAdministered().string
+            // Generate MAC addresses for any interfaces that lack one (migration for older VMs)
+            var needsMacSave = false
+            for i in config.networkInterfaces.indices where config.networkInterfaces[i].macAddress.isEmpty {
+                config.networkInterfaces[i].macAddress = VZMACAddress.randomLocallyAdministered().string
+                needsMacSave = true
+            }
+            if needsMacSave {
                 config.modifiedAt = Date()
                 try store.save(config)
             }
@@ -1558,9 +1562,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Load port forwards from config
         let forwards = loadPortForwards()
 
-        // Check network mode - only start port forwarding in NAT mode
-        let networkConfig = (try? VMConfigStore(layout: layout!).load().networkConfig) ?? NetworkConfig.defaultConfig
-        if networkConfig.mode == .nat {
+        // Check network mode - only start port forwarding if at least one NIC is NAT
+        let storedInterfaces = (try? VMConfigStore(layout: layout!).load().networkInterfaces) ?? []
+        let hasNAT = storedInterfaces.isEmpty || storedInterfaces.contains { $0.networkConfig.mode == .nat }
+        if hasNAT {
             if !forwards.isEmpty {
                 pfService.start(forwards: forwards)
             }

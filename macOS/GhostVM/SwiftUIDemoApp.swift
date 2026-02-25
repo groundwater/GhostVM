@@ -71,6 +71,14 @@ struct GhostVMSwiftUIApp: App {
                 .environment(\.sparkleUpdater, appDelegate.updaterController.updater)
         }
 
+        #if DEBUG
+        Window("Networks", id: "networks") {
+            CustomNetworkListView()
+                .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+                .frame(minWidth: 640, minHeight: 440)
+        }
+        #endif
+
         WindowGroup("Restore Images", id: "restoreImages") {
             RestoreImagesDemoView()
                 .environmentObject(restoreStore)
@@ -319,6 +327,16 @@ struct VMListDemoView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("vmList.imagesButton")
+
+                #if DEBUG
+                Button {
+                    openWindow(id: "networks")
+                } label: {
+                    Label("Networks", systemImage: "network")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("vmList.networksButton")
+                #endif
             }
             .padding(.top, 8)
             .padding(.horizontal, 12)
@@ -686,7 +704,7 @@ struct CreateVMDemoView: View {
     @State private var memoryGiB: String = "8"
     @State private var diskGiB: String = "256"
     @State private var sharedFolders: [SharedFolderConfig] = []
-    @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
+    @State private var networkInterfaces: [NetworkInterfaceConfig] = [NetworkInterfaceConfig()]
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
     @State private var isCreating: Bool = false
@@ -769,7 +787,13 @@ struct CreateVMDemoView: View {
             }
 
             labeledRow("Network") {
-                NetworkSettingsView(networkConfig: $networkConfig)
+                #if DEBUG
+                NetworkInterfaceListView(interfaces: $networkInterfaces) {
+                    openWindow(id: "networks")
+                }
+                #else
+                NetworkInterfaceListView(interfaces: $networkInterfaces)
+                #endif
             }
 
             Spacer(minLength: 8)
@@ -934,7 +958,7 @@ struct CreateVMDemoView: View {
         opts.diskGiB = UInt64(diskGiB) ?? 256
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
-        opts.networkConfig = networkConfig
+        opts.networkInterfaces = networkInterfaces
 
         isCreating = true
 
@@ -1311,12 +1335,13 @@ private struct SheetSizeConfigurator: NSViewRepresentable {
 struct EditVMView: View {
     let vm: App2VM
     @Binding var isPresented: Bool
+    @Environment(\.openWindow) private var openWindow
 
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
-    @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
+    @State private var networkInterfaces: [NetworkInterfaceConfig] = []
     @State private var diskGiB: String = ""
     @State private var customIcon: NSImage?
     @State private var customIconChanged: Bool = false
@@ -1413,10 +1438,16 @@ struct EditVMView: View {
                         }
 
                         labeledRow("Network") {
-                            NetworkSettingsView(networkConfig: $networkConfig)
+                            #if DEBUG
+                            NetworkInterfaceListView(interfaces: $networkInterfaces) {
+                                openWindow(id: "networks")
+                            }
+                            #else
+                            NetworkInterfaceListView(interfaces: $networkInterfaces)
+                            #endif
                         }
 
-                        if networkConfig.mode == .nat {
+                        if networkInterfaces.contains(where: { $0.networkConfig.mode == .nat }) {
                             labeledRow("Port Forwards") {
                                 PortForwardListView(forwards: $portForwards)
                             }
@@ -1708,8 +1739,8 @@ struct EditVMView: View {
                     // Load port forwards
                     self.portForwards = config.portForwards
 
-                    // Load network config
-                    self.networkConfig = config.networkConfig ?? NetworkConfig.defaultConfig
+                    // Load network interfaces
+                    self.networkInterfaces = config.networkInterfaces
 
                     // Load icon mode
                     self.isDynamicIconMode = config.iconMode == "stack"
@@ -1770,7 +1801,7 @@ struct EditVMView: View {
                 } else {
                     storedConfig.iconMode = nil
                 }
-                storedConfig.networkConfig = networkConfig
+                storedConfig.networkInterfaces = networkInterfaces
                 try store.save(storedConfig)
 
                 // Save or remove custom icon
@@ -2495,6 +2526,27 @@ struct SettingsDemoView: View {
     }
 
     var body: some View {
+        TabView {
+            generalTab
+                .tabItem { Label("General", systemImage: "gearshape") }
+                .accessibilityIdentifier("settings.generalTab")
+
+            #if DEBUG
+            CustomNetworkListView()
+                .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
+                .tabItem { Label("Networks", systemImage: "network") }
+                .accessibilityIdentifier("settings.networksTab")
+            #endif
+        }
+        .frame(minWidth: 640, minHeight: 440)
+        .onAppear {
+            if let updater = updater {
+                autoCheckForUpdates = updater.automaticallyChecksForUpdates
+            }
+        }
+    }
+
+    private var generalTab: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Choose where GhostVM stores virtual machines and IPSW downloads, and configure the IPSW feed. Changes in this demo view are not persisted.")
                 .fixedSize(horizontal: false, vertical: true)
@@ -2576,12 +2628,6 @@ struct SettingsDemoView: View {
             Spacer()
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
-        .frame(minWidth: 520, minHeight: 320)
-        .onAppear {
-            if let updater = updater {
-                autoCheckForUpdates = updater.automaticallyChecksForUpdates
-            }
-        }
     }
 
     @ViewBuilder

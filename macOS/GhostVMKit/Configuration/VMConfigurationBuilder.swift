@@ -43,39 +43,42 @@ public final class VMConfigurationBuilder {
 
         config.storageDevices = storageDevices
 
-        let networkDevice = VZVirtioNetworkDeviceConfiguration()
+        // Build network devices from the interfaces array
+        var networkDevices: [VZVirtioNetworkDeviceConfiguration] = []
+        let bridgeInterfaces = VZBridgedNetworkInterface.networkInterfaces
 
-        // Configure network attachment based on stored network config
-        let networkConfig = storedConfig.networkConfig ?? NetworkConfig.defaultConfig
-        print("[VMConfigurationBuilder] Network mode: \(networkConfig.mode.rawValue)")
+        for (index, iface) in storedConfig.networkInterfaces.enumerated() {
+            let device = VZVirtioNetworkDeviceConfiguration()
+            let nc = iface.networkConfig
+            print("[VMConfigurationBuilder] NIC \(index) (\(iface.label)): mode=\(nc.mode.rawValue)")
 
-        switch networkConfig.mode {
-        case .nat:
-            print("[VMConfigurationBuilder] Using NAT networking")
-            networkDevice.attachment = VZNATNetworkDeviceAttachment()
+            switch nc.mode {
+            case .nat:
+                device.attachment = VZNATNetworkDeviceAttachment()
 
-        case .bridged:
-            print("[VMConfigurationBuilder] Attempting bridged networking with interface: \(networkConfig.bridgeInterfaceIdentifier ?? "nil")")
-            let availableInterfaces = VZBridgedNetworkInterface.networkInterfaces
-            print("[VMConfigurationBuilder] Available interfaces: \(availableInterfaces.map { $0.identifier }.joined(separator: ", "))")
+            case .bridged:
+                guard let interfaceId = nc.bridgeInterfaceIdentifier, !interfaceId.isEmpty else {
+                    throw VMError.message("Bridged networking on NIC \(index) requires a selected host network interface.")
+                }
+                guard let hostIface = bridgeInterfaces.first(where: { $0.identifier == interfaceId }) else {
+                    throw VMError.message("Bridged network interface '\(interfaceId)' (NIC \(index)) is not available on this Mac.")
+                }
+                device.attachment = VZBridgedNetworkDeviceAttachment(interface: hostIface)
 
-            guard let interfaceId = networkConfig.bridgeInterfaceIdentifier, !interfaceId.isEmpty else {
-                throw VMError.message("Bridged networking requires a selected host network interface.")
+            case .custom:
+                // Custom network mode uses VZFileHandleNetworkDeviceAttachment,
+                // which requires a backend packet processor (not yet implemented).
+                // For now, fall back to NAT so the VM can still start.
+                print("[VMConfigurationBuilder] NIC \(index): custom mode not yet implemented, falling back to NAT")
+                device.attachment = VZNATNetworkDeviceAttachment()
             }
-            guard let interface = availableInterfaces.first(where: { $0.identifier == interfaceId }) else {
-                throw VMError.message("Bridged network interface '\(interfaceId)' is not available on this Mac.")
-            }
-            print("[VMConfigurationBuilder] Found interface \(interfaceId), creating bridged attachment")
-            networkDevice.attachment = VZBridgedNetworkDeviceAttachment(interface: interface)
-            print("[VMConfigurationBuilder] Successfully created bridged attachment")
-        }
 
-        // Use persistent MAC address from config to ensure suspend/resume consistency.
-        if let macAddressString = storedConfig.macAddress,
-           let macAddress = VZMACAddress(string: macAddressString) {
-            networkDevice.macAddress = macAddress
+            if let mac = VZMACAddress(string: iface.macAddress) {
+                device.macAddress = mac
+            }
+            networkDevices.append(device)
         }
-        config.networkDevices = [networkDevice]
+        config.networkDevices = networkDevices
 
         // Serial console is always present; in CLI/headless mode we bridge STDIN/STDOUT so the user
         // can interact with launchd logs or a shell during early boot.
