@@ -152,7 +152,7 @@ final class TunnelServer: @unchecked Sendable {
         let connectionID = UUID().uuidString
         Self.logger.debug("New incoming host connection id=\(connectionID, privacy: .public) fd=\(vsockFd)")
 
-        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: true)
+        let vsockIO = BlockingVSockChannel(fd: vsockFd, ownsFD: true)
         defer {
             vsockIO.close()
             Self.logger.debug("Connection closed id=\(connectionID, privacy: .public) fd=\(vsockFd)")
@@ -367,7 +367,7 @@ final class TunnelServer: @unchecked Sendable {
     }
 
     /// Send an error response
-    private func sendError(_ io: AsyncVSockIO, message: String) async {
+    private func sendError(_ io: some SocketChannel, message: String) async {
         let response = "ERROR \(message)\r\n"
         do {
             try await io.writeAll(Data(response.utf8))
@@ -383,7 +383,7 @@ final class TunnelServer: @unchecked Sendable {
         case transport(AsyncVSockIOError)
     }
 
-    private func readHandshakeCommand(_ io: AsyncVSockIO) async throws -> Data {
+    private func readHandshakeCommand(_ io: some SocketChannel) async throws -> Data {
         try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask {
                 do {

@@ -9,6 +9,182 @@ public enum AsyncVSockIOError: Error {
     case cancelled
 }
 
+// MARK: - SocketChannel protocol
+
+public protocol SocketChannel: Sendable {
+    func read(maxBytes: Int) async throws -> Data?
+    func writeAll(_ data: Data) async throws
+    func shutdownWrite() throws
+    func close()
+}
+
+extension SocketChannel {
+    public func readExactly(_ count: Int) async throws -> Data {
+        precondition(count >= 0, "readExactly(_:) requires non-negative count")
+        if count == 0 { return Data() }
+
+        var result = Data()
+        result.reserveCapacity(count)
+
+        while result.count < count {
+            let remaining = count - result.count
+            guard let chunk = try await read(maxBytes: remaining) else {
+                throw AsyncVSockIOError.eofBeforeExpected(expected: count, received: result.count)
+            }
+            result.append(chunk)
+        }
+
+        return result
+    }
+}
+
+// MARK: - BlockingVSockChannel
+
+/// Blocking I/O channel for vsock file descriptors.
+///
+/// Uses dedicated DispatchQueue threads for read and write, bridged to async/await
+/// via CheckedContinuation. This works around the macOS limitation where kqueue/poll/
+/// DispatchSource don't fire for AF_VSOCK sockets.
+public final class BlockingVSockChannel: SocketChannel, @unchecked Sendable {
+    private let readQueue = DispatchQueue(label: "org.ghostvm.blockingvsock.read", qos: .userInitiated)
+    private let writeQueue = DispatchQueue(label: "org.ghostvm.blockingvsock.write", qos: .userInitiated)
+    private let stateLock = NSLock()
+
+    private var fd: Int32
+    private let ownsFD: Bool
+    private var isClosed = false
+
+    public init(fd: Int32, ownsFD: Bool = false) {
+        self.fd = fd
+        self.ownsFD = ownsFD
+
+        // Ensure blocking mode (clear O_NONBLOCK)
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 && (flags & O_NONBLOCK) != 0 {
+            _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+        }
+    }
+
+    deinit {
+        if ownsFD {
+            close()
+        }
+    }
+
+    public func read(maxBytes: Int) async throws -> Data? {
+        precondition(maxBytes > 0, "read(maxBytes:) requires maxBytes > 0")
+
+        let currentFD = try validatedFD()
+
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data?, Error>) in
+                readQueue.async {
+                    var buffer = [UInt8](repeating: 0, count: maxBytes)
+                    while true {
+                        let n = Darwin.read(currentFD, &buffer, buffer.count)
+                        if n > 0 {
+                            continuation.resume(returning: Data(buffer[0..<n]))
+                            return
+                        }
+                        if n == 0 {
+                            continuation.resume(returning: nil)
+                            return
+                        }
+                        let err = errno
+                        if err == EINTR { continue }
+                        continuation.resume(throwing: AsyncVSockIOError.syscall(op: "read", errno: err))
+                        return
+                    }
+                }
+            }
+        } onCancel: {
+            self.shutdownForCancel()
+        }
+    }
+
+    public func writeAll(_ data: Data) async throws {
+        if data.isEmpty { return }
+
+        let currentFD = try validatedFD()
+
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                writeQueue.async {
+                    var offset = 0
+                    while offset < data.count {
+                        let written = data.withUnsafeBytes { ptr in
+                            Darwin.write(currentFD, ptr.baseAddress! + offset, data.count - offset)
+                        }
+                        if written > 0 {
+                            offset += written
+                            continue
+                        }
+                        if written == 0 {
+                            continuation.resume(throwing: AsyncVSockIOError.syscall(op: "write", errno: EPIPE))
+                            return
+                        }
+                        let err = errno
+                        if err == EINTR { continue }
+                        continuation.resume(throwing: AsyncVSockIOError.syscall(op: "write", errno: err))
+                        return
+                    }
+                    continuation.resume(returning: ())
+                }
+            }
+        } onCancel: {
+            self.shutdownForCancel()
+        }
+    }
+
+    public func shutdownWrite() throws {
+        let currentFD = try validatedFD()
+        if Darwin.shutdown(currentFD, SHUT_WR) < 0 {
+            let err = errno
+            if err != ENOTCONN {
+                throw AsyncVSockIOError.syscall(op: "shutdown", errno: err)
+            }
+        }
+    }
+
+    public func close() {
+        stateLock.lock()
+        if isClosed {
+            stateLock.unlock()
+            return
+        }
+        isClosed = true
+        let currentFD = fd
+        fd = -1
+        stateLock.unlock()
+
+        if currentFD >= 0 {
+            Darwin.close(currentFD)
+        }
+    }
+
+    private func validatedFD() throws -> Int32 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if isClosed || fd < 0 {
+            throw AsyncVSockIOError.closed
+        }
+        return fd
+    }
+
+    /// Unblock any threads blocked in read/write by shutting down the socket.
+    /// Safer than close() because it avoids fd-reuse races.
+    private func shutdownForCancel() {
+        stateLock.lock()
+        let currentFD = fd
+        stateLock.unlock()
+        if currentFD >= 0 {
+            Darwin.shutdown(currentFD, SHUT_RDWR)
+        }
+    }
+}
+
+// MARK: - AsyncVSockIO (non-blocking, DispatchSource-based — for TCP)
+
 private final class AsyncIOWaiter: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
@@ -76,7 +252,7 @@ private final class WaiterHolder: @unchecked Sendable {
     }
 }
 
-public final class AsyncVSockIO {
+public final class AsyncVSockIO: SocketChannel, @unchecked Sendable {
     private let ioQueue = DispatchQueue(label: "org.ghostvm.asyncvsockio", qos: .userInitiated)
     private let stateLock = NSLock()
 
@@ -255,7 +431,9 @@ public final class AsyncVSockIO {
     }
 }
 
-public func pipeBidirectional(_ a: AsyncVSockIO, _ b: AsyncVSockIO) async throws {
+// MARK: - Relay functions
+
+public func pipeBidirectional(_ a: some SocketChannel, _ b: some SocketChannel) async throws {
     try await withThrowingTaskGroup(of: Void.self) { group in
         group.addTask {
             try await pipeOneWay(from: a, to: b)
@@ -272,7 +450,7 @@ public func pipeBidirectional(_ a: AsyncVSockIO, _ b: AsyncVSockIO) async throws
     }
 }
 
-private func pipeOneWay(from source: AsyncVSockIO, to destination: AsyncVSockIO) async throws {
+private func pipeOneWay(from source: some SocketChannel, to destination: some SocketChannel) async throws {
     while let chunk = try await source.read(maxBytes: 65536) {
         if !chunk.isEmpty {
             try await destination.writeAll(chunk)
