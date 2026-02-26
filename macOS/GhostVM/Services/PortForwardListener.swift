@@ -241,7 +241,7 @@ final class PortForwardListener: @unchecked Sendable {
         Self.logger.info("Connected to guest vsock id=\(connectionID, privacy: .public) vsockFd=\(vsockFd)")
 
         let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: false)
-        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: false)
+        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: false, pollOnEAGAIN: true)
 
         // Send CONNECT command
         Self.logger.debug("Sending CONNECT command id=\(connectionID, privacy: .public) guestPort=\(self.guestPort)")
