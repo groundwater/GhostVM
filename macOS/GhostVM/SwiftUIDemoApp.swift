@@ -699,6 +699,7 @@ struct CreateVMDemoView: View {
         let path: String
         let title: String
         let version: String?
+        let compatibilityWarning: String?
         var id: String { path }
     }
 
@@ -753,6 +754,15 @@ struct CreateVMDemoView: View {
             labeledRow("Restore Image*") {
                 restorePicker
             }
+            if let warning = selectedRestoreItem?.compatibilityWarning {
+                HStack(alignment: .top, spacing: 12) {
+                    Color.clear.frame(width: labelWidth)
+                    Label(warning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
 
             labeledRow("Shared Folders") {
                 SharedFolderListView(folders: $sharedFolders)
@@ -790,6 +800,11 @@ struct CreateVMDemoView: View {
         } message: {
             Text(errorMessage ?? "An unknown error occurred while creating the virtual machine.")
         }
+    }
+
+    private var selectedRestoreItem: RestoreItem? {
+        guard let path = selectedRestorePath else { return nil }
+        return restoreItems.first { $0.path == path }
     }
 
     private var canCreate: Bool {
@@ -855,9 +870,9 @@ struct CreateVMDemoView: View {
                 } else {
                     normalizedVersion = trimmedVersion
                 }
-                items.append(RestoreItem(path: image.fileURL.path, title: restore.name, version: normalizedVersion))
+                items.append(RestoreItem(path: image.fileURL.path, title: restore.name, version: normalizedVersion, compatibilityWarning: restore.compatibilityWarning))
             } else {
-                items.append(RestoreItem(path: image.fileURL.path, title: image.filename, version: nil))
+                items.append(RestoreItem(path: image.fileURL.path, title: image.filename, version: nil, compatibilityWarning: nil))
             }
         }
 
@@ -2621,6 +2636,10 @@ enum DemoIconMode: String, CaseIterable, Identifiable {
 @available(macOS 13.0, *)
 struct RestoreImagesDemoView: View {
     @EnvironmentObject private var store: App2RestoreImageStore
+    @State private var isDropTarget = false
+    @State private var imagePendingDelete: App2RestoreImage?
+    @State private var pendingDropURLs: [URL] = []
+    @State private var isShowingImportDialog = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -2644,6 +2663,15 @@ struct RestoreImagesDemoView: View {
             }
 
             List {
+                if isDropTarget {
+                    HStack {
+                        Image(systemName: "square.and.arrow.down.on.square")
+                        Text("Drop .ipsw files to import")
+                        Spacer()
+                    }
+                    .foregroundStyle(Color.accentColor)
+                }
+
                 ForEach(store.images) { image in
                     HStack(spacing: 12) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -2652,6 +2680,11 @@ struct RestoreImagesDemoView: View {
                             Text(image.name)
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
+                            if let warning = image.compatibilityWarning {
+                                Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.orange)
+                            }
                         }
 
                         Spacer()
@@ -2680,29 +2713,58 @@ struct RestoreImagesDemoView: View {
                             }
                         }
 
-                        Button(
-                            image.isDownloaded
-                                ? "Delete"
-                                : image.isDownloading
+                        if image.isDownloaded {
+                            Menu {
+                                Button("Show in Finder") {
+                                    FinderAdapter.revealRestoreImage(
+                                        filename: image.filename,
+                                        cacheDirectory: App2IPSWService.shared.cacheDirectory
+                                    )
+                                }
+
+                                Divider()
+
+                                Button("Delete", role: .destructive) {
+                                    imagePendingDelete = image
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                                    .font(.title3)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .menuIndicator(.hidden)
+                            .frame(width: 30)
+                        } else {
+                            Button(
+                                image.isDownloading
                                     ? "Cancel"
                                     : image.hasPartialDownload ? "Resume" : "Download"
-                        ) {
-                            store.toggleDownload(for: image)
+                            ) {
+                                store.toggleDownload(for: image)
+                            }
+                            .buttonStyle(.bordered)
                         }
-                        .buttonStyle(.bordered)
                     }
                     .padding(.vertical, 4)
                     .contextMenu {
-                        Button("Show in Finder") {
-                            let service = App2IPSWService.shared
-                            FinderAdapter.revealRestoreImage(
-                                filename: image.filename,
-                                cacheDirectory: service.cacheDirectory
-                            )
+                        if image.isDownloaded {
+                            Button("Show in Finder") {
+                                FinderAdapter.revealRestoreImage(
+                                    filename: image.filename,
+                                    cacheDirectory: App2IPSWService.shared.cacheDirectory
+                                )
+                            }
+
+                            Divider()
+
+                            Button("Delete", role: .destructive) {
+                                imagePendingDelete = image
+                            }
                         }
                     }
                 }
             }
+            .onDrop(of: [UTType.fileURL], isTargeted: $isDropTarget, perform: handleDrop)
         }
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520, minHeight: 360)
@@ -2727,6 +2789,76 @@ struct RestoreImagesDemoView: View {
                 Text("The SHA-1 checksum for \"\(failure.filename)\" does not match the expected value from the feed.\n\nExpected: \(failure.expected)\nActual: \(failure.actual)")
             }
         }
+        .alert("Delete this restore image?", isPresented: Binding(
+            get: { imagePendingDelete != nil },
+            set: { if !$0 { imagePendingDelete = nil } }
+        ), presenting: imagePendingDelete) { image in
+            Button("Delete", role: .destructive) {
+                store.deleteImage(image)
+                imagePendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                imagePendingDelete = nil
+            }
+        } message: { image in
+            Text("\"\(image.filename)\" will be permanently deleted.")
+        }
+        .confirmationDialog(
+            "Import \(pendingDropURLs.count) IPSW \(pendingDropURLs.count == 1 ? "file" : "files")",
+            isPresented: $isShowingImportDialog,
+            titleVisibility: .visible
+        ) {
+            Button("Copy to IPSW Cache") {
+                store.importFiles(pendingDropURLs)
+                pendingDropURLs = []
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDropURLs = []
+            }
+        } message: {
+            Text("Creates an APFS clone in the IPSW cache — instant and uses zero extra disk space until one copy is modified.")
+        }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) -> Bool {
+        guard !providers.isEmpty else { return false }
+        let identifier = UTType.fileURL.identifier
+        var accepted = false
+        var collected: [URL] = []
+        let lock = NSLock()
+        let group = DispatchGroup()
+
+        for provider in providers where provider.hasItemConformingToTypeIdentifier(identifier) {
+            accepted = true
+            group.enter()
+            provider.loadItem(forTypeIdentifier: identifier, options: nil) { item, _ in
+                defer { group.leave() }
+                var resolvedURL: URL?
+                if let url = item as? URL {
+                    resolvedURL = url
+                } else if let nsurl = item as? NSURL {
+                    resolvedURL = nsurl as URL
+                } else if let data = item as? Data {
+                    resolvedURL = URL(dataRepresentation: data, relativeTo: nil, isAbsolute: true)
+                }
+                if let url = resolvedURL {
+                    lock.lock()
+                    collected.append(url)
+                    lock.unlock()
+                }
+            }
+        }
+
+        guard accepted else { return false }
+
+        group.notify(queue: .main) {
+            let ipsws = collected.filter { $0.pathExtension.lowercased() == "ipsw" }
+            guard !ipsws.isEmpty else { return }
+            self.pendingDropURLs = ipsws
+            self.isShowingImportDialog = true
+        }
+
+        return true
     }
 
     private static let byteFormatter: ByteCountFormatter = {
