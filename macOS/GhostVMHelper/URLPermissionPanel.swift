@@ -1,123 +1,30 @@
 import AppKit
 import GhostVMKit
 
-/// Delegate protocol for URL permission panel actions
-protocol URLPermissionPanelDelegate: AnyObject {
-    func urlPermissionPanelDidDeny(_ panel: URLPermissionPanel)
-    func urlPermissionPanelDidAllowOnce(_ panel: URLPermissionPanel)
-    func urlPermissionPanelDidAlwaysAllow(_ panel: URLPermissionPanel)
-}
-
-/// NSPopover-based panel prompting the user to allow opening a URL from the guest
-final class URLPermissionPanel: NSObject, NSPopoverDelegate {
-
-    weak var delegate: URLPermissionPanelDelegate?
-    var onClose: (() -> Void)?
-
-    private var popover: NSPopover?
-    private var alertWindow: NSWindow?
-    private var contentViewController: URLPermissionContentViewController?
-    private var currentURLs: [String] = []
-
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.delegate = self
-
-        let vc = URLPermissionContentViewController()
-        vc.delegate = self
-        contentViewController = vc
-
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
-    }
-
-    func showAsAlert(in window: NSWindow) {
-        let urlDescription: String
-        if currentURLs.count == 1 {
-            urlDescription = URLUtilities.truncateMiddle(currentURLs[0], maxLength: 60)
-        } else if currentURLs.count > 1 {
-            urlDescription = "\(currentURLs.count) URLs from guest"
-        } else {
-            urlDescription = "URL from guest"
-        }
-
-        let alert = NSAlert()
-        alert.messageText = "Open URL?"
-        alert.informativeText = urlDescription
-        alert.addButton(withTitle: "Open")
-        alert.addButton(withTitle: "Always")
-        alert.addButton(withTitle: "Deny")
-        alertWindow = window
-        alert.beginSheetModal(for: window) { [weak self] response in
-            guard let self = self else { return }
-            switch response {
-            case .alertFirstButtonReturn:
-                self.delegate?.urlPermissionPanelDidAllowOnce(self)
-            case .alertSecondButtonReturn:
-                self.delegate?.urlPermissionPanelDidAlwaysAllow(self)
-            default:
-                self.delegate?.urlPermissionPanelDidDeny(self)
-            }
-            self.alertWindow = nil
-            self.onClose?()
-        }
-    }
-
-    func close() {
-        popover?.close()
-        if let window = alertWindow {
-            if let sheet = window.attachedSheet { window.endSheet(sheet) }
-            alertWindow = nil
-            onClose?()
-        }
-    }
-
-    var isShown: Bool {
-        (popover?.isShown ?? false) || alertWindow != nil
-    }
-
-    func setURLs(_ urls: [String]) {
-        currentURLs = urls
-        contentViewController?.setURLs(urls)
-    }
-
-    // MARK: - NSPopoverDelegate
-
-    func popoverDidClose(_ notification: Notification) {
-        popover = nil
-        contentViewController = nil
-        onClose?()
-    }
-}
-
-extension URLPermissionPanel: URLPermissionContentViewControllerDelegate {
-    func contentViewControllerDidDeny(_ vc: URLPermissionContentViewController) {
-        delegate?.urlPermissionPanelDidDeny(self)
-    }
-
-    func contentViewControllerDidAllowOnce(_ vc: URLPermissionContentViewController) {
-        delegate?.urlPermissionPanelDidAllowOnce(self)
-    }
-
-    func contentViewControllerDidAlwaysAllow(_ vc: URLPermissionContentViewController) {
-        delegate?.urlPermissionPanelDidAlwaysAllow(self)
-    }
-}
-
-// MARK: - Content View Controller
-
+/// Delegate protocol for URL permission content view controller actions
 protocol URLPermissionContentViewControllerDelegate: AnyObject {
     func contentViewControllerDidDeny(_ vc: URLPermissionContentViewController)
     func contentViewControllerDidAllowOnce(_ vc: URLPermissionContentViewController)
     func contentViewControllerDidAlwaysAllow(_ vc: URLPermissionContentViewController)
 }
 
-final class URLPermissionContentViewController: NSViewController {
+final class URLPermissionContentViewController: NSViewController, PopoverContent {
 
     weak var delegate: URLPermissionContentViewControllerDelegate?
     private var urlLabel: NSTextField?
+
+    let dismissBehavior: PopoverDismissBehavior = .requiresExplicitAction
+    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("captureCommands")
+
+    func handleEnterKey() -> Bool {
+        delegate?.contentViewControllerDidAllowOnce(self)
+        return true
+    }
+
+    func handleEscapeKey() -> Bool {
+        delegate?.contentViewControllerDidDeny(self)
+        return true
+    }
 
     func setURLs(_ urls: [String]) {
         guard let label = urlLabel else { return }
@@ -206,5 +113,4 @@ final class URLPermissionContentViewController: NSViewController {
     @objc private func alwaysClicked() {
         delegate?.contentViewControllerDidAlwaysAllow(self)
     }
-
 }

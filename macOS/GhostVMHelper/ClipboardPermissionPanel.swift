@@ -1,77 +1,28 @@
 import AppKit
 
-/// Delegate protocol for clipboard permission panel actions
-protocol ClipboardPermissionPanelDelegate: AnyObject {
-    func clipboardPermissionPanelDidDeny(_ panel: ClipboardPermissionPanel)
-    func clipboardPermissionPanelDidAllowOnce(_ panel: ClipboardPermissionPanel)
-    func clipboardPermissionPanelDidAlwaysAllow(_ panel: ClipboardPermissionPanel)
-}
-
-/// NSPopover-based panel prompting the user to allow clipboard sync
-final class ClipboardPermissionPanel: NSObject, NSPopoverDelegate {
-
-    weak var delegate: ClipboardPermissionPanelDelegate?
-    var onClose: (() -> Void)?
-
-    private var popover: NSPopover?
-    private var contentViewController: ClipboardPermissionContentViewController?
-
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
-        let popover = NSPopover()
-        popover.behavior = .applicationDefined
-        popover.delegate = self
-
-        let vc = ClipboardPermissionContentViewController()
-        vc.delegate = self
-        contentViewController = vc
-
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
-    }
-
-    func close() {
-        popover?.close()
-    }
-
-    var isShown: Bool {
-        popover?.isShown ?? false
-    }
-
-    // MARK: - NSPopoverDelegate
-
-    func popoverDidClose(_ notification: Notification) {
-        popover = nil
-        contentViewController = nil
-        onClose?()
-    }
-}
-
-extension ClipboardPermissionPanel: ClipboardPermissionContentViewControllerDelegate {
-    func contentViewControllerDidDeny(_ vc: ClipboardPermissionContentViewController) {
-        delegate?.clipboardPermissionPanelDidDeny(self)
-    }
-
-    func contentViewControllerDidAllowOnce(_ vc: ClipboardPermissionContentViewController) {
-        delegate?.clipboardPermissionPanelDidAllowOnce(self)
-    }
-
-    func contentViewControllerDidAlwaysAllow(_ vc: ClipboardPermissionContentViewController) {
-        delegate?.clipboardPermissionPanelDidAlwaysAllow(self)
-    }
-}
-
-// MARK: - Content View Controller
-
+/// Delegate protocol for clipboard permission content view controller actions
 protocol ClipboardPermissionContentViewControllerDelegate: AnyObject {
     func contentViewControllerDidDeny(_ vc: ClipboardPermissionContentViewController)
     func contentViewControllerDidAllowOnce(_ vc: ClipboardPermissionContentViewController)
     func contentViewControllerDidAlwaysAllow(_ vc: ClipboardPermissionContentViewController)
 }
 
-final class ClipboardPermissionContentViewController: NSViewController {
+final class ClipboardPermissionContentViewController: NSViewController, PopoverContent {
 
     weak var delegate: ClipboardPermissionContentViewControllerDelegate?
+
+    let dismissBehavior: PopoverDismissBehavior = .requiresExplicitAction
+    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("clipboardSync")
+
+    func handleEnterKey() -> Bool {
+        delegate?.contentViewControllerDidAllowOnce(self)
+        return true
+    }
+
+    func handleEscapeKey() -> Bool {
+        delegate?.contentViewControllerDidDeny(self)
+        return true
+    }
 
     override func loadView() {
         let container = NSVisualEffectView()

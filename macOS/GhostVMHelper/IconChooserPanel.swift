@@ -2,79 +2,6 @@ import AppKit
 import GhostVMKit
 import UniformTypeIdentifiers
 
-protocol IconChooserPanelDelegate: AnyObject {
-    func iconChooserPanel(_ panel: IconChooserPanel, didSelectMode mode: String?, icon: NSImage?)
-}
-
-/// NSPopover-based panel for choosing a VM icon from the toolbar.
-final class IconChooserPanel: NSObject, NSPopoverDelegate {
-
-    weak var delegate: IconChooserPanelDelegate?
-    var onClose: (() -> Void)?
-
-    private var popover: NSPopover?
-    private var sheetWindow: NSPanel?
-    private var contentVC: IconChooserContentViewController?
-
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge, bundleURL: URL) {
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.delegate = self
-
-        let vc = IconChooserContentViewController(bundleURL: bundleURL)
-        vc.onSelect = { [weak self] mode, icon in
-            guard let self = self else { return }
-            self.delegate?.iconChooserPanel(self, didSelectMode: mode, icon: icon)
-        }
-
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
-        self.contentVC = vc
-    }
-
-    func showAsSheet(in window: NSWindow, bundleURL: URL) {
-        let vc = IconChooserContentViewController(bundleURL: bundleURL)
-        vc.onSelect = { [weak self] mode, icon in
-            guard let self = self else { return }
-            self.delegate?.iconChooserPanel(self, didSelectMode: mode, icon: icon)
-        }
-        vc.onDone = { [weak self] in self?.close() }
-        contentVC = vc
-
-        let panel = NSPanel(contentViewController: vc)
-        panel.styleMask = [.titled, .closable]
-        panel.title = "VM Icon"
-        sheetWindow = panel
-
-        window.beginSheet(panel) { [weak self] _ in
-            self?.sheetWindow = nil
-            self?.contentVC = nil
-            self?.onClose?()
-        }
-    }
-
-    func close() {
-        if let sheet = sheetWindow, let parent = sheet.sheetParent {
-            parent.endSheet(sheet)
-        } else {
-            popover?.close()
-        }
-    }
-
-    var isShown: Bool {
-        popover?.isShown ?? false || sheetWindow != nil
-    }
-
-    // MARK: - NSPopoverDelegate
-
-    func popoverDidClose(_ notification: Notification) {
-        popover = nil
-        contentVC = nil
-        onClose?()
-    }
-}
-
 // MARK: - Tile Button
 
 /// A square button with rounded-rect background that supports a selection border and drag-and-drop.
@@ -167,10 +94,12 @@ private final class TileButton: NSButton {
 
 // MARK: - Content View Controller
 
-private final class IconChooserContentViewController: NSViewController {
+final class IconChooserContentViewController: NSViewController, PopoverContent {
 
     var onSelect: ((_ mode: String?, _ icon: NSImage?) -> Void)?
-    var onDone: (() -> Void)?
+
+    let dismissBehavior: PopoverDismissBehavior = .transient
+    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("iconChooser")
 
     private let bundleURL: URL
     private var currentMode: String?
@@ -252,22 +181,6 @@ private final class IconChooserContentViewController: NSViewController {
 
         let padding: CGFloat = 16
 
-        // Done button (shown only in sheet/modal mode)
-        var bottomAnchorView: NSView = presetsView
-        if onDone != nil {
-            let doneButton = NSButton(title: "Done", target: self, action: #selector(doneClicked))
-            doneButton.bezelStyle = .rounded
-            doneButton.keyEquivalent = "\u{1b}"
-            doneButton.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(doneButton)
-
-            NSLayoutConstraint.activate([
-                doneButton.topAnchor.constraint(equalTo: presetsView.bottomAnchor, constant: 12),
-                doneButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            ])
-            bottomAnchorView = doneButton
-        }
-
         NSLayoutConstraint.activate([
             titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
             titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
@@ -278,7 +191,7 @@ private final class IconChooserContentViewController: NSViewController {
             presetsView.topAnchor.constraint(equalTo: modesStack.bottomAnchor, constant: 12),
             presetsView.centerXAnchor.constraint(equalTo: container.centerXAnchor),
 
-            bottomAnchorView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+            presetsView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
 
             container.widthAnchor.constraint(equalToConstant: 4 * tileSize + 3 * 8 + 2 * padding),
         ])
@@ -387,10 +300,6 @@ private final class IconChooserContentViewController: NSViewController {
         ])
 
         return button
-    }
-
-    @objc private func doneClicked() {
-        onDone?()
     }
 
     @objc private func modeButtonClicked(_ sender: NSButton) {
