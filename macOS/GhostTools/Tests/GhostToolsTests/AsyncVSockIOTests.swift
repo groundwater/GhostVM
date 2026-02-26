@@ -97,6 +97,78 @@ final class AsyncVSockIOTests: XCTestCase {
         ioB.close()
     }
 
+    // MARK: - pollOnEAGAIN tests
+
+    func testPollOnEAGAINWriteAndRead() async throws {
+        let (fdA, fdB) = try makeSocketPair()
+        let ioA = AsyncVSockIO(fd: fdA, ownsFD: true, pollOnEAGAIN: true)
+        let ioB = AsyncVSockIO(fd: fdB, ownsFD: true, pollOnEAGAIN: true)
+
+        try await ioA.writeAll(Data("hello-poll".utf8))
+        let data = try await ioB.read(maxBytes: 32)
+        XCTAssertEqual(String(data: data ?? Data(), encoding: .utf8), "hello-poll")
+
+        ioA.close()
+        ioB.close()
+    }
+
+    func testPollOnEAGAINLargeTransfer() async throws {
+        let (fdA, fdB) = try makeSocketPair()
+        let ioA = AsyncVSockIO(fd: fdA, ownsFD: true, pollOnEAGAIN: true)
+        let ioB = AsyncVSockIO(fd: fdB, ownsFD: true, pollOnEAGAIN: true)
+
+        // 256KB — large enough to trigger EAGAIN on Unix sockets
+        let size = 256 * 1024
+        let payload = Data((0..<size).map { UInt8($0 & 0xFF) })
+
+        let writeTask = Task {
+            try await ioA.writeAll(payload)
+            try ioA.shutdownWrite()
+        }
+
+        var received = Data()
+        received.reserveCapacity(size)
+        while let chunk = try await ioB.read(maxBytes: 65536) {
+            received.append(chunk)
+        }
+
+        try await writeTask.value
+        XCTAssertEqual(received.count, size)
+        XCTAssertEqual(received, payload)
+
+        ioA.close()
+        ioB.close()
+    }
+
+    func testPollOnEAGAINBidirectional() async throws {
+        let (fdL1, fdL2) = try makeSocketPair()
+        let (fdR1, fdR2) = try makeSocketPair()
+
+        let bridgeLeft = AsyncVSockIO(fd: fdL2, ownsFD: true, pollOnEAGAIN: true)
+        let bridgeRight = AsyncVSockIO(fd: fdR2, ownsFD: true, pollOnEAGAIN: true)
+        let clientLeft = AsyncVSockIO(fd: fdL1, ownsFD: true)
+        let clientRight = AsyncVSockIO(fd: fdR1, ownsFD: true)
+
+        let bridgeTask = Task {
+            try await pipeBidirectional(bridgeLeft, bridgeRight)
+        }
+
+        try await clientLeft.writeAll(Data("left->right".utf8))
+        let fromLeft = try await clientRight.readExactly("left->right".utf8.count)
+        XCTAssertEqual(String(data: fromLeft, encoding: .utf8), "left->right")
+
+        try await clientRight.writeAll(Data("right->left".utf8))
+        let fromRight = try await clientLeft.readExactly("right->left".utf8.count)
+        XCTAssertEqual(String(data: fromRight, encoding: .utf8), "right->left")
+
+        clientLeft.close()
+        clientRight.close()
+
+        _ = try? await bridgeTask.value
+        bridgeLeft.close()
+        bridgeRight.close()
+    }
+
     func testPipeBidirectionalCopiesBothDirections() async throws {
         let (fdL1, fdL2) = try makeSocketPair()
         let (fdR1, fdR2) = try makeSocketPair()

@@ -152,7 +152,7 @@ final class TunnelServer: @unchecked Sendable {
         let connectionID = UUID().uuidString
         Self.logger.debug("New incoming host connection id=\(connectionID, privacy: .public) fd=\(vsockFd)")
 
-        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: true)
+        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: true, pollOnEAGAIN: true)
         defer {
             vsockIO.close()
             Self.logger.debug("Connection closed id=\(connectionID, privacy: .public) fd=\(vsockFd)")

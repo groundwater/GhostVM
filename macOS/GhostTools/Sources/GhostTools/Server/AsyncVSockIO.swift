@@ -82,11 +82,13 @@ public final class AsyncVSockIO {
 
     private var fd: Int32
     private let ownsFD: Bool
+    private let pollOnEAGAIN: Bool
     private var isClosed = false
 
-    public init(fd: Int32, ownsFD: Bool = false) {
+    public init(fd: Int32, ownsFD: Bool = false, pollOnEAGAIN: Bool = false) {
         self.fd = fd
         self.ownsFD = ownsFD
+        self.pollOnEAGAIN = pollOnEAGAIN
 
         let flags = fcntl(fd, F_GETFL, 0)
         if flags < 0 {
@@ -220,15 +222,28 @@ public final class AsyncVSockIO {
     }
 
     private func waitForReadability() async throws {
+        if pollOnEAGAIN {
+            try await pollSleep()
+            return
+        }
         try await waitForEvent(makeSource: { fd in
             DispatchSource.makeReadSource(fileDescriptor: fd, queue: ioQueue)
         })
     }
 
     private func waitForWritability() async throws {
+        if pollOnEAGAIN {
+            try await pollSleep()
+            return
+        }
         try await waitForEvent(makeSource: { fd in
             DispatchSource.makeWriteSource(fileDescriptor: fd, queue: ioQueue)
         })
+    }
+
+    private func pollSleep() async throws {
+        if Task.isCancelled { throw AsyncVSockIOError.cancelled }
+        try await Task.sleep(nanoseconds: 1_000_000) // 1ms
     }
 
     private func waitForEvent(makeSource: (Int32) -> DispatchSourceProtocol) async throws {
