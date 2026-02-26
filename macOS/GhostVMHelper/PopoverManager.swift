@@ -15,159 +15,191 @@ enum PopoverDismissBehavior {
 
 protocol PopoverContent: NSViewController {
     var dismissBehavior: PopoverDismissBehavior { get }
-    var preferredToolbarAnchor: NSToolbarItem.Identifier? { get }
+    var preferredToolbarAnchor: NSToolbarItem.Identifier { get }
 
     /// Return `true` if the key was handled.
     func handleEnterKey() -> Bool
     /// Return `true` if the key was handled.
     func handleEscapeKey() -> Bool
-
-    /// Called when this content is pushed down by a newer popover.
-    func willSuspend()
-    /// Called when this content is restored as the topmost popover.
-    func willResume()
 }
 
 // Default implementations
 extension PopoverContent {
     func handleEnterKey() -> Bool { false }
     func handleEscapeKey() -> Bool { false }
-    func willSuspend() {}
-    func willResume() {}
 }
 
 // MARK: - PopoverManager
 
 final class PopoverManager: NSObject, NSPopoverDelegate {
 
-    /// Resolves a toolbar item identifier to its anchor view (if visible).
-    var anchorViewResolver: ((NSToolbarItem.Identifier) -> NSView?)?
+    /// Resolves a toolbar item identifier to its anchor view.
+    /// Must be set before calling show(). Crashes if the identifier cannot be resolved.
+    var anchorViewResolver: ((NSToolbarItem.Identifier) -> NSView)!
 
-    /// The window to use for fallback NSPanel presentation.
-    weak var window: NSWindow?
-
-    /// Fires when the stack goes empty→non-empty or non-empty→empty.
+    /// Fires when the manager goes idle→active or active→idle.
     var onActiveStateChanged: ((Bool) -> Void)?
 
     /// Fires when a specific content VC is dismissed.
     /// The content VC is passed so callers can identify which popover closed.
     var onContentDismissed: ((any PopoverContent) -> Void)?
 
-    // MARK: - Stack
+    // MARK: - State
 
     private struct StackEntry {
         let content: any PopoverContent
         var popover: NSPopover?
-        var panel: NSPanel?
         var onClose: (() -> Void)?
     }
 
-    private var stack: [StackEntry] = []
+    /// The ONE visible popover (if any).
+    private var presented: StackEntry?
 
-    /// The topmost (currently visible) content, if any.
+    /// Waiting items (FIFO). These have no popover — they wait until presented is dismissed.
+    private var queue: [StackEntry] = []
+
+    /// The currently visible content, if any.
     var topContent: (any PopoverContent)? {
-        stack.last?.content
+        presented?.content
     }
 
-    /// Whether any popover is currently managed.
-    var hasActive: Bool { !stack.isEmpty }
+    /// Whether any popover is currently managed (presented or queued).
+    var hasActive: Bool { presented != nil || !queue.isEmpty }
 
-    /// Check if a specific content VC is anywhere in the stack.
-    func contains(_ content: any PopoverContent) -> Bool {
-        stack.contains { $0.content === content }
-    }
-
-    /// Check if a content VC of a specific type is anywhere in the stack.
+    /// Check if a content VC of a specific type is presented or queued.
     func contains<T: PopoverContent>(ofType type: T.Type) -> Bool {
-        stack.contains { $0.content is T }
+        if presented?.content is T { return true }
+        return queue.contains { $0.content is T }
+    }
+
+    /// Check if a specific content VC instance is presented or queued.
+    func contains(_ content: any PopoverContent) -> Bool {
+        if presented?.content === content { return true }
+        return queue.contains { $0.content === content }
     }
 
     // MARK: - Show
 
+    /// Show a popover. All priority logic lives here — callers just call show().
+    ///
+    /// Rules (in order):
+    /// 1. Same instance already presented or queued → no-op.
+    /// 2. Same notification type already presented → silently close old, present new.
+    /// 3. Form presented → new content queues behind it (FIFO).
+    /// 4. Notification presented + anything → dismiss notification (with callbacks), present new.
+    /// 5. Nothing presented → present immediately.
     func show(_ content: any PopoverContent, onClose: (() -> Void)? = nil) {
-        // If this content is already showing, don't re-push
+        let wasActive = hasActive
+
+        // --- Rule 1: Same instance already managed → no-op ---
         if contains(content) { return }
 
-        let wasEmpty = stack.isEmpty
-
-        // Suspend current top
-        if let currentTop = stack.last {
-            currentTop.content.willSuspend()
-            // Close its presentation without triggering stack side-effects
-            closePresentation(at: stack.count - 1, notifyDelegate: false)
+        // --- Rule 2: Same notification type presented → silent close ---
+        if let p = presented,
+           p.content.dismissBehavior != .requiresExplicitAction,
+           type(of: p.content) == type(of: content) {
+            closePresentation(p)
+            presented = nil
         }
 
-        // Create new entry and push
+        // --- Rule 3: Queue dedup — same notification type silently replaced ---
+        if content.dismissBehavior != .requiresExplicitAction {
+            if let idx = queue.firstIndex(where: {
+                $0.content.dismissBehavior != .requiresExplicitAction &&
+                type(of: $0.content) == type(of: content)
+            }) {
+                // Silently remove old notification of same type (no callbacks)
+                queue.remove(at: idx)
+            }
+        }
+
+        // --- Rules 4/5/6: Priority logic ---
+        if let p = presented {
+            if p.content.dismissBehavior == .requiresExplicitAction {
+                // Rule 4: Form on top blocks — queue new content.
+                queue.append(StackEntry(content: content, onClose: onClose))
+                if !wasActive { onActiveStateChanged?(true) }
+                return
+            }
+
+            // Rule 4: Notification on top — dismiss it (fires callbacks).
+            dismissPresentedInternal()
+        }
+
+        // Rule 5: Present.
         var entry = StackEntry(content: content, onClose: onClose)
         present(&entry)
-        stack.append(entry)
+        presented = entry
 
-        if wasEmpty {
+        if !wasActive {
             onActiveStateChanged?(true)
         }
     }
 
     // MARK: - Dismiss
 
-    func dismissTop() {
-        guard !stack.isEmpty else { return }
-        let entry = stack.removeLast()
+    /// Dismiss the currently presented popover and present the next queued item.
+    func dismissPresented() {
+        guard let entry = presented else { return }
+        presented = nil
         closePresentation(entry)
         entry.onClose?()
         onContentDismissed?(entry.content)
 
-        // Restore previous
-        if var newTop = stack.last {
-            newTop.content.willResume()
-            present(&newTop)
-            stack[stack.count - 1] = newTop
-        }
+        presentNextFromQueue()
 
-        if stack.isEmpty {
+        if !hasActive {
             onActiveStateChanged?(false)
         }
     }
 
+    /// Dismiss a specific content VC (whether presented or queued).
     func dismiss(_ content: any PopoverContent) {
-        guard let index = stack.firstIndex(where: { $0.content === content }) else { return }
+        if presented?.content === content {
+            dismissPresented()
+            return
+        }
 
-        let isTop = (index == stack.count - 1)
-        let entry = stack.remove(at: index)
-        closePresentation(entry)
+        // Remove from queue
+        guard let index = queue.firstIndex(where: { $0.content === content }) else { return }
+        let entry = queue.remove(at: index)
         entry.onClose?()
         onContentDismissed?(entry.content)
 
-        // If we removed the top, restore previous
-        if isTop, var newTop = stack.last {
-            newTop.content.willResume()
-            present(&newTop)
-            stack[stack.count - 1] = newTop
-        }
-
-        if stack.isEmpty {
+        if !hasActive {
             onActiveStateChanged?(false)
         }
     }
 
+    /// Dismiss all — presented and queued.
     func dismissAll() {
-        let entries = stack
-        stack.removeAll()
-        for entry in entries {
+        let wasActive = hasActive
+
+        if let entry = presented {
+            presented = nil
             closePresentation(entry)
             entry.onClose?()
             onContentDismissed?(entry.content)
         }
-        if !entries.isEmpty {
+
+        let queueCopy = queue
+        queue.removeAll()
+        for entry in queueCopy {
+            entry.onClose?()
+            onContentDismissed?(entry.content)
+        }
+
+        if wasActive {
             onActiveStateChanged?(false)
         }
     }
 
     // MARK: - Keyboard Routing
 
-    /// Routes a keyDown event to the topmost content.
+    /// Routes a keyDown event to the presented content.
     /// Returns `true` if the event was consumed.
     func handleKeyEvent(_ event: NSEvent) -> Bool {
-        guard let top = stack.last?.content else { return false }
+        guard let top = presented?.content else { return false }
 
         switch event.keyCode {
         case 36, 76:  // Return, Numpad Enter
@@ -178,70 +210,78 @@ final class PopoverManager: NSObject, NSPopoverDelegate {
             break
         }
 
-        // For requiresExplicitAction, consume all keys
+        // Any unhandled input dismisses forms
         if top.dismissBehavior == .requiresExplicitAction {
+            dismissPresented()
             return true
         }
 
         return false
     }
 
+    /// Dismisses the presented popover when the user clicks outside it (e.g. into the VM view).
+    /// Clicks inside the popover's own window are ignored.
+    func handleMouseEvent(_ event: NSEvent) {
+        guard let entry = presented else { return }
+        guard entry.content.dismissBehavior == .requiresExplicitAction else { return }
+
+        // Don't dismiss if the click landed inside the popover's window.
+        if let popoverWindow = entry.popover?.contentViewController?.view.window,
+           event.window === popoverWindow {
+            return
+        }
+
+        dismissPresented()
+    }
+
+    // MARK: - Internal Helpers
+
+    /// Dismiss the presented entry without firing presentNextFromQueue or onActiveStateChanged.
+    /// Used by show() when replacing a notification.
+    private func dismissPresentedInternal() {
+        guard let entry = presented else { return }
+        presented = nil
+        closePresentation(entry)
+        entry.onClose?()
+        onContentDismissed?(entry.content)
+    }
+
+    /// Present the next item from the queue. Forms have priority over notifications.
+    private func presentNextFromQueue() {
+        guard !queue.isEmpty else { return }
+
+        // Prefer the first form in the queue
+        let index: Int
+        if let formIndex = queue.firstIndex(where: { $0.content.dismissBehavior == .requiresExplicitAction }) {
+            index = formIndex
+        } else {
+            index = 0
+        }
+
+        var entry = queue.remove(at: index)
+        present(&entry)
+        presented = entry
+    }
+
     // MARK: - Presentation
 
     private func present(_ entry: inout StackEntry) {
         let content = entry.content
+        let anchorView = anchorViewResolver(content.preferredToolbarAnchor)
 
-        // Try to resolve anchor view
-        if let anchorID = content.preferredToolbarAnchor,
-           let resolver = anchorViewResolver,
-           let anchorView = resolver(anchorID),
-           anchorView.window != nil {
-            // Show as NSPopover
-            let popover = NSPopover()
-            switch content.dismissBehavior {
-            case .requiresExplicitAction:
-                popover.behavior = .applicationDefined
-            case .transient:
-                popover.behavior = .transient
-            case .semiTransient:
-                popover.behavior = .semitransient
-            }
-            popover.delegate = self
-            popover.contentViewController = content
-            popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .minY)
-            entry.popover = popover
-        } else if let window = self.window {
-            // Fallback: show as floating NSPanel
-            let panel = NSPanel(contentViewController: content)
-            panel.styleMask = [.titled, .closable, .nonactivatingPanel]
-            panel.titlebarAppearsTransparent = true
-            panel.titleVisibility = .hidden
-            panel.isFloatingPanel = true
-            panel.level = .floating
-            panel.isMovableByWindowBackground = true
-
-            // Add vibrancy background
-            if let contentView = panel.contentView {
-                let effect = NSVisualEffectView(frame: contentView.bounds)
-                effect.material = .popover
-                effect.blendingMode = .behindWindow
-                effect.state = .active
-                effect.autoresizingMask = [.width, .height]
-                contentView.addSubview(effect, positioned: .below, relativeTo: nil)
-            }
-
-            // Center on window
-            panel.setContentSize(content.view.fittingSize)
-            let windowFrame = window.frame
-            let panelSize = panel.frame.size
-            let origin = NSPoint(
-                x: windowFrame.midX - panelSize.width / 2,
-                y: windowFrame.midY - panelSize.height / 2
-            )
-            panel.setFrameOrigin(origin)
-            panel.makeKeyAndOrderFront(nil)
-            entry.panel = panel
+        let popover = NSPopover()
+        switch content.dismissBehavior {
+        case .requiresExplicitAction:
+            popover.behavior = .applicationDefined
+        case .transient:
+            popover.behavior = .transient
+        case .semiTransient:
+            popover.behavior = .semitransient
         }
+        popover.delegate = self
+        popover.contentViewController = content
+        popover.show(relativeTo: anchorView.bounds, of: anchorView, preferredEdge: .maxY)
+        entry.popover = popover
     }
 
     private func closePresentation(_ entry: StackEntry) {
@@ -250,23 +290,6 @@ final class PopoverManager: NSObject, NSPopoverDelegate {
             popover.delegate = nil
             popover.close()
         }
-        if let panel = entry.panel {
-            panel.close()
-        }
-    }
-
-    private func closePresentation(at index: Int, notifyDelegate: Bool) {
-        guard index < stack.count else { return }
-        let entry = stack[index]
-        if let popover = entry.popover, popover.isShown {
-            if !notifyDelegate { popover.delegate = nil }
-            popover.close()
-        }
-        if let panel = entry.panel {
-            panel.close()
-        }
-        stack[index].popover = nil
-        stack[index].panel = nil
     }
 
     // MARK: - NSPopoverDelegate
@@ -274,22 +297,16 @@ final class PopoverManager: NSObject, NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         guard let closedPopover = notification.object as? NSPopover else { return }
 
-        // Find which stack entry this popover belongs to
-        guard let index = stack.firstIndex(where: { $0.popover === closedPopover }) else { return }
+        // Only the presented entry has a popover
+        guard let entry = presented, entry.popover === closedPopover else { return }
 
-        let isTop = (index == stack.count - 1)
-        let entry = stack.remove(at: index)
+        presented = nil
         entry.onClose?()
         onContentDismissed?(entry.content)
 
-        // If the top was dismissed (e.g. by clicking outside for transient), restore previous
-        if isTop, var newTop = stack.last {
-            newTop.content.willResume()
-            present(&newTop)
-            stack[stack.count - 1] = newTop
-        }
+        presentNextFromQueue()
 
-        if stack.isEmpty {
+        if !hasActive {
             onActiveStateChanged?(false)
         }
     }

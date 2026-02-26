@@ -75,7 +75,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     // URL permission state
     private var urlAlwaysAllowed = false  // true when persisted setting OR "Always Allow" clicked
-    private var pendingURLsToOpen: [String] = []
     private var urlPermissionCancellable: AnyCancellable?
 
     // Port forward notification state
@@ -715,21 +714,29 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar) {
     }
 
-    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar) {
-        pendingURLsToOpen = []
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar, url: String) {
+        // Deny just this URL — next queued prompt auto-promotes via PopoverManager.
         eventStreamService?.clearPendingURLs()
     }
 
-    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar) {
-        openPendingURLs()
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar, url: String) {
+        if let parsed = URL(string: url) {
+            NSWorkspace.shared.open(parsed)
+        }
+        eventStreamService?.clearPendingURLs()
     }
 
-    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar) {
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar, urls: [String]) {
         urlAlwaysAllowed = true
         helperToolbar?.setOpenURLsAutomatically(true)
         let key = "openURLsAutomatically_\(vmBundleURL.path.stableHash)"
         UserDefaults.standard.set(true, forKey: key)
-        openPendingURLs()
+        for urlString in urls {
+            if let parsed = URL(string: urlString) {
+                NSWorkspace.shared.open(parsed)
+            }
+        }
+        eventStreamService?.clearPendingURLs()
     }
 
     func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar) {
@@ -860,9 +867,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private func setupPopoverManager(toolbar: HelperToolbar, window: NSWindow) {
         let pm = PopoverManager()
-        pm.window = window
         pm.anchorViewResolver = { [weak toolbar] identifier in
-            toolbar?.anchorView(for: identifier)
+            guard let toolbar = toolbar else {
+                fatalError("PopoverManager: toolbar deallocated while resolving anchor for \(identifier.rawValue)")
+            }
+            return toolbar.anchorView(for: identifier)
         }
         pm.onActiveStateChanged = { [weak self] hasActive in
             self?.vmView?.suspendKeyboardCapture = hasActive
@@ -872,9 +881,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         }
         toolbar.popoverManager = pm
 
-        // Install permanent keyboard handler for all popovers
+        // Install permanent keyboard/mouse handlers for all popovers
         (NSApp as? HelperApplication)?.popoverKeyHandler = { [weak pm] event in
             pm?.handleKeyEvent(event) ?? false
+        }
+        (NSApp as? HelperApplication)?.popoverMouseHandler = { [weak pm] event in
+            pm?.handleMouseEvent(event)
         }
     }
 
@@ -944,22 +956,11 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             return
         }
 
-        pendingURLsToOpen = urls
-
-        Task {
-            try? await Task.sleep(for: .milliseconds(200))
-            helperToolbar?.showURLPermissionPopover()
-            helperToolbar?.setURLPermissionURLs(urls)
+        // Queue each URL as a separate prompt. PopoverManager presents the first
+        // immediately and queues the rest — each form blocks until the user acts.
+        for urlString in urls {
+            helperToolbar?.showURLPermissionPopover(for: urlString)
         }
-    }
-
-    private func openPendingURLs() {
-        for urlString in pendingURLsToOpen {
-            if let url = URL(string: urlString) {
-                NSWorkspace.shared.open(url)
-            }
-        }
-        pendingURLsToOpen = []
         eventStreamService?.clearPendingURLs()
     }
 
@@ -2035,7 +2036,14 @@ final class HelperApplication: NSApplication {
     /// the event (prevent it from reaching VZVirtualMachineView).
     var popoverKeyHandler: ((NSEvent) -> Bool)?
 
+    /// Called before dispatching a mouseDown event to dismiss active popovers.
+    var popoverMouseHandler: ((NSEvent) -> Void)?
+
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .rightMouseDown {
+            popoverMouseHandler?(event)
+        }
+
         if event.type == .keyDown {
             // Popover keyboard handling — must run before super.sendEvent
             // so VZVirtualMachineView never sees the keystroke.

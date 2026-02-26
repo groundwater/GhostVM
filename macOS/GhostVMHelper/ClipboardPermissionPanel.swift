@@ -12,7 +12,7 @@ final class ClipboardPermissionContentViewController: NSViewController, PopoverC
     weak var delegate: ClipboardPermissionContentViewControllerDelegate?
 
     let dismissBehavior: PopoverDismissBehavior = .requiresExplicitAction
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("clipboardSync")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("clipboardSync")
 
     func handleEnterKey() -> Bool {
         delegate?.contentViewControllerDidAllowOnce(self)

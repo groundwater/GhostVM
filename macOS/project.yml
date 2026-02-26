@@ -177,6 +177,18 @@ targets:
         SWIFT_VERSION: "5.0"
         ENABLE_APP_SANDBOX: NO
 
+  GhostVMHelperTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GhostVMHelperTests
+      - path: GhostVMHelper/PopoverManager.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+
   GhostVMHelperUITests:
     type: bundle.ui-testing
     platform: macOS

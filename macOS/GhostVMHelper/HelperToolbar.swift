@@ -119,7 +119,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     var popoverManager: PopoverManager?
     private var queuedFilesVC: QueuedFilesContentViewController?
     private var clipboardPermissionVC: ClipboardPermissionContentViewController?
-    private var urlPermissionVC: URLPermissionContentViewController?
+    private var urlPermissionVCs: [URLPermissionContentViewController] = []
     private var portForwardPermissionVC: PortForwardPermissionContentViewController?
     private var portForwardNotificationVC: PortForwardNotificationContentViewController?
     private var iconChooserVC: IconChooserContentViewController?
@@ -169,8 +169,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         window.toolbarStyle = .unifiedCompact
     }
 
-    /// Returns the anchor view for a given toolbar item identifier, or nil if the item isn't visible.
-    func anchorView(for identifier: NSToolbarItem.Identifier) -> NSView? {
+    /// Returns the anchor view for a toolbar item identifier.
+    /// Falls back to any visible toolbar button if the requested item was removed by toolbar customization.
+    /// Crashes in debug builds if no toolbar items are visible at all.
+    func anchorView(for identifier: NSToolbarItem.Identifier) -> NSView {
+        // Direct lookup for items with custom views
         let item: NSToolbarItem?
         switch identifier {
         case ItemID.guestToolsStatus: item = guestToolsItem
@@ -179,10 +182,42 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         case ItemID.captureCommands: item = captureCommandsItem
         case ItemID.queuedFiles: item = queuedFilesItem
         case ItemID.iconChooser: item = iconChooserItem
+        case ItemID.captureKeys: item = captureKeysItem
+        case ItemID.shutDown: item = shutDownItem
+        case ItemID.terminate: item = terminateItem
         default: item = nil
         }
-        guard let view = item?.view, view.window != nil else { return nil }
-        return view
+
+        // Items with a custom .view (NSButton-based items)
+        if let view = item?.view, view.window != nil {
+            return view
+        }
+
+        // NSMenuToolbarItem (captureCommands, sharedFolders) — AppKit owns the view.
+        // Find it via the toolbar's visible items array.
+        if let item = item, item is NSMenuToolbarItem {
+            if let visible = toolbar.visibleItems {
+                for visibleItem in visible where visibleItem.itemIdentifier == identifier {
+                    if let view = visibleItem.value(forKey: "view") as? NSView, view.window != nil {
+                        return view
+                    }
+                }
+            }
+        }
+
+        // Toolbar customization may have removed the requested item.
+        // Fall back to any visible button-based item.
+        let fallbacks: [NSToolbarItem?] = [
+            captureKeysItem, clipboardSyncItem, portForwardsItem,
+            iconChooserItem, shutDownItem, terminateItem
+        ]
+        for candidate in fallbacks {
+            if let view = candidate?.view, view.window != nil {
+                return view
+            }
+        }
+
+        fatalError("PopoverManager: no visible toolbar items to anchor popover for \(identifier.rawValue)")
     }
 
     // MARK: - State Updates
@@ -1009,13 +1044,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             showGhostToolsInstallInfo(from: portForwardsItem?.view, explainer: portForwardsExplainer)
             return
         }
-        // Close notification VC if shown
-        if let vc = portForwardNotificationVC {
-            popoverManager?.dismiss(vc)
-            portForwardNotificationVC = nil
-        }
 
-        // Toggle management panel
+        // Toggle management panel (PopoverManager dismisses any notification automatically)
         if let vc = portForwardPermissionVC, popoverManager?.contains(vc) == true {
             popoverManager?.dismiss(vc)
             portForwardPermissionVC = nil
@@ -1110,10 +1140,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func portForwardsFromMenu() {
         // Menu path intentionally bypasses toolbar GhostTools gating.
-        if let vc = portForwardNotificationVC {
-            popoverManager?.dismiss(vc)
-            portForwardNotificationVC = nil
-        }
+        // PopoverManager dismisses any notification automatically when the form shows.
         if let vc = portForwardPermissionVC {
             popoverManager?.dismiss(vc)
             portForwardPermissionVC = nil
@@ -1150,9 +1177,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func showQueuedFilesPopover() {
-        if let vc = queuedFilesVC {
-            popoverManager?.dismiss(vc)
-        }
+        // If already showing, don't recreate — PopoverManager blocks duplicate forms.
+        if let vc = queuedFilesVC, popoverManager?.contains(vc) == true { return }
 
         let vc = QueuedFilesContentViewController()
         vc.delegate = self
@@ -1167,10 +1193,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func showIconChooserPopover(bundleURL: URL) {
-        if let vc = iconChooserVC {
-            popoverManager?.dismiss(vc)
-        }
-
         let vc = IconChooserContentViewController(bundleURL: bundleURL)
         vc.onSelect = { [weak self] mode, icon in
             guard let self = self else { return }
@@ -1184,9 +1206,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func showClipboardPermissionPopover() {
-        if let vc = clipboardPermissionVC {
-            popoverManager?.dismiss(vc)
-        }
+        if let vc = clipboardPermissionVC, popoverManager?.contains(vc) == true { return }
 
         let vc = ClipboardPermissionContentViewController()
         vc.delegate = self
@@ -1220,51 +1240,26 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         contentViewControllerDidDeny(vc)
     }
 
-    func showURLPermissionPopover() {
-        if let vc = urlPermissionVC {
-            popoverManager?.dismiss(vc)
-        }
-
+    /// Show a URL permission prompt for a single URL.
+    /// Each call creates a separate VC; PopoverManager presents the first
+    /// and queues the rest behind it.
+    func showURLPermissionPopover(for url: String) {
         let vc = URLPermissionContentViewController()
         vc.delegate = self
-        urlPermissionVC = vc
+        vc.setURL(url)
+        urlPermissionVCs.append(vc)
 
         popoverManager?.show(vc) { [weak self] in
             guard let self = self else { return }
-            self.urlPermissionVC = nil
-            self.delegate?.toolbarURLPermissionPanelDidClose(self)
+            self.urlPermissionVCs.removeAll { $0 === vc }
+            if self.urlPermissionVCs.isEmpty {
+                self.delegate?.toolbarURLPermissionPanelDidClose(self)
+            }
         }
-    }
-
-    func closeURLPermissionPopover() {
-        if let vc = urlPermissionVC {
-            popoverManager?.dismiss(vc)
-            urlPermissionVC = nil
-        }
-    }
-
-    var isURLPermissionPopoverShown: Bool {
-        urlPermissionVC.map { popoverManager?.contains($0) ?? false } ?? false
-    }
-
-    func urlPermissionAllowOnce() {
-        guard let vc = urlPermissionVC else { return }
-        contentViewControllerDidAllowOnce(vc)
-    }
-
-    func urlPermissionDeny() {
-        guard let vc = urlPermissionVC else { return }
-        contentViewControllerDidDeny(vc)
-    }
-
-    func setURLPermissionURLs(_ urls: [String]) {
-        urlPermissionVC?.setURLs(urls)
     }
 
     func showPortForwardPermissionPopover() {
-        if let vc = portForwardPermissionVC {
-            popoverManager?.dismiss(vc)
-        }
+        if let vc = portForwardPermissionVC, popoverManager?.contains(vc) == true { return }
 
         let vc = PortForwardPermissionContentViewController()
         vc.delegate = self
@@ -1306,10 +1301,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     func showPortForwardNotificationPopover() {
-        if let vc = portForwardNotificationVC {
-            popoverManager?.dismiss(vc)
-        }
-
         let vc = PortForwardNotificationContentViewController()
         vc.delegate = self
         portForwardNotificationVC = vc
@@ -1400,20 +1391,29 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func contentViewControllerDidDeny(_ vc: URLPermissionContentViewController) {
         popoverManager?.dismiss(vc)
-        urlPermissionVC = nil
-        delegate?.toolbarURLPermissionDidDeny(self)
+        urlPermissionVCs.removeAll { $0 === vc }
+        delegate?.toolbarURLPermissionDidDeny(self, url: vc.urlString)
     }
 
     func contentViewControllerDidAllowOnce(_ vc: URLPermissionContentViewController) {
         popoverManager?.dismiss(vc)
-        urlPermissionVC = nil
-        delegate?.toolbarURLPermissionDidAllowOnce(self)
+        urlPermissionVCs.removeAll { $0 === vc }
+        delegate?.toolbarURLPermissionDidAllowOnce(self, url: vc.urlString)
     }
 
     func contentViewControllerDidAlwaysAllow(_ vc: URLPermissionContentViewController) {
+        // Collect this URL + all remaining queued URL VCs
+        var allURLs = [vc.urlString]
         popoverManager?.dismiss(vc)
-        urlPermissionVC = nil
-        delegate?.toolbarURLPermissionDidAlwaysAllow(self)
+        urlPermissionVCs.removeAll { $0 === vc }
+
+        for remainingVC in urlPermissionVCs {
+            allURLs.append(remainingVC.urlString)
+            popoverManager?.dismiss(remainingVC)
+        }
+        urlPermissionVCs.removeAll()
+
+        delegate?.toolbarURLPermissionDidAlwaysAllow(self, urls: allURLs)
     }
 
     // MARK: - PortForwardPermissionContentViewControllerDelegate
@@ -1479,9 +1479,9 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbarClipboardPermissionDidAllowOnce(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar)
-    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar)
-    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar)
-    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar, url: String)
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar, url: String)
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar, urls: [String])
     func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16)
     func toolbarPortForwardPermissionPanelDidClose(_ toolbar: HelperToolbar)

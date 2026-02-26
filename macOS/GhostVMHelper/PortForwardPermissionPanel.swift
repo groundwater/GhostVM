@@ -15,7 +15,7 @@ final class PortForwardPermissionContentViewController: NSViewController, Popove
     weak var delegate: PortForwardPermissionContentViewControllerDelegate?
 
     let dismissBehavior: PopoverDismissBehavior = .semiTransient
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("portForwards")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("portForwards")
 
     func handleEscapeKey() -> Bool {
         // Let PopoverManager dismiss

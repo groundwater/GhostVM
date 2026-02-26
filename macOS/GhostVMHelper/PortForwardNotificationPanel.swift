@@ -10,7 +10,7 @@ final class PortForwardNotificationContentViewController: NSViewController, Popo
     weak var delegate: PortForwardNotificationContentViewControllerDelegate?
 
     let dismissBehavior: PopoverDismissBehavior = .semiTransient
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("portForwards")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("portForwards")
 
     func handleEscapeKey() -> Bool {
         // Dismiss handled by PopoverManager
@@ -73,6 +73,12 @@ final class PortForwardNotificationContentViewController: NSViewController, Popo
         ])
 
         self.view = container
+
+        // Populate from data if setPortMappings was called before loadView (queued VC).
+        if !mappings.isEmpty {
+            rebuildPortList()
+            updateSubtitle()
+        }
     }
 
     // MARK: - Public

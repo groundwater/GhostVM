@@ -11,7 +11,7 @@ final class QueuedFilesContentViewController: NSViewController, PopoverContent {
     weak var delegate: QueuedFilesContentViewControllerDelegate?
 
     let dismissBehavior: PopoverDismissBehavior = .requiresExplicitAction
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("queuedFiles")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("queuedFiles")
 
     func handleEnterKey() -> Bool {
         delegate?.contentViewControllerDidAllow(self)

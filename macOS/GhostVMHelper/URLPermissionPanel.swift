@@ -11,10 +11,14 @@ protocol URLPermissionContentViewControllerDelegate: AnyObject {
 final class URLPermissionContentViewController: NSViewController, PopoverContent {
 
     weak var delegate: URLPermissionContentViewControllerDelegate?
+    private var titleLabel: NSTextField?
     private var urlLabel: NSTextField?
 
+    /// The single URL this prompt is for.
+    private(set) var urlString: String = ""
+
     let dismissBehavior: PopoverDismissBehavior = .requiresExplicitAction
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("captureCommands")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("captureCommands")
 
     func handleEnterKey() -> Bool {
         delegate?.contentViewControllerDidAllowOnce(self)
@@ -26,15 +30,13 @@ final class URLPermissionContentViewController: NSViewController, PopoverContent
         return true
     }
 
-    func setURLs(_ urls: [String]) {
+    func setURL(_ url: String) {
+        urlString = url
+        let domain = URL(string: url)?.host ?? url
+        titleLabel?.stringValue = "Open \(domain)?"
         guard let label = urlLabel else { return }
-        if urls.count == 1 {
-            label.stringValue = URLUtilities.truncateMiddle(urls[0], maxLength: 60)
-            label.toolTip = urls[0]
-        } else {
-            label.stringValue = "\(urls.count) URLs from guest"
-            label.toolTip = urls.joined(separator: "\n")
-        }
+        label.stringValue = URLUtilities.truncateMiddle(url, maxLength: 60)
+        label.toolTip = url
     }
 
     override func loadView() {
@@ -44,10 +46,11 @@ final class URLPermissionContentViewController: NSViewController, PopoverContent
         container.state = .active
 
         // Title
-        let titleLabel = NSTextField(labelWithString: "Open URL?")
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(titleLabel)
+        let titleField = NSTextField(labelWithString: "Open URL?")
+        titleField.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(titleField)
+        self.titleLabel = titleField
 
         // URL display
         let urlField = NSTextField(labelWithString: "")
@@ -57,6 +60,14 @@ final class URLPermissionContentViewController: NSViewController, PopoverContent
         urlField.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(urlField)
         self.urlLabel = urlField
+
+        // Populate from stored data if setURL was called before loadView (queued VC).
+        if !urlString.isEmpty {
+            let domain = URL(string: urlString)?.host ?? urlString
+            titleField.stringValue = "Open \(domain)?"
+            urlField.stringValue = URLUtilities.truncateMiddle(urlString, maxLength: 60)
+            urlField.toolTip = urlString
+        }
 
         // Buttons
         let denyButton = NSButton(title: "Deny", target: self, action: #selector(denyClicked))
@@ -79,10 +90,10 @@ final class URLPermissionContentViewController: NSViewController, PopoverContent
         let padding: CGFloat = 16
 
         NSLayoutConstraint.activate([
-            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
-            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
+            titleField.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
+            titleField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
 
-            urlField.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4),
+            urlField.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 4),
             urlField.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: padding),
             urlField.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -padding),
 

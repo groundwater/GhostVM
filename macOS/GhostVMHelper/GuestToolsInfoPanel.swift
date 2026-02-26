@@ -9,7 +9,7 @@ struct GhostToolsInstallExplainer {
 
 final class GuestToolsInfoContentViewController: NSViewController, PopoverContent {
     let dismissBehavior: PopoverDismissBehavior = .transient
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("guestToolsStatus")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("guestToolsStatus")
 
     private let explainer: GhostToolsInstallExplainer
 

@@ -99,7 +99,7 @@ final class IconChooserContentViewController: NSViewController, PopoverContent {
     var onSelect: ((_ mode: String?, _ icon: NSImage?) -> Void)?
 
     let dismissBehavior: PopoverDismissBehavior = .transient
-    let preferredToolbarAnchor: NSToolbarItem.Identifier? = NSToolbarItem.Identifier("iconChooser")
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("iconChooser")
 
     private let bundleURL: URL
     private var currentMode: String?
