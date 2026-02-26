@@ -1,121 +1,6 @@
 import AppKit
 
-/// Delegate protocol for port forward permission panel actions
-protocol PortForwardPermissionPanelDelegate: AnyObject {
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didBlockPort guestPort: UInt16)
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didRemoveForwardWithHostPort hostPort: UInt16)
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didToggleAutoPortMap enabled: Bool)
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didUnblockPort port: UInt16)
-    func portForwardPermissionPanelDidUnblockAll(_ panel: PortForwardPermissionPanel)
-    func portForwardPermissionPanelDidRequestAddPortForward(_ panel: PortForwardPermissionPanel)
-}
-
-/// Unified NSPopover-based panel for port forward management.
-/// Shown both on auto-detect notifications and toolbar button clicks.
-final class PortForwardPermissionPanel: NSObject, NSPopoverDelegate {
-
-    weak var delegate: PortForwardPermissionPanelDelegate?
-    var onClose: (() -> Void)?
-
-    private var popover: NSPopover?
-    private var sheetWindow: NSPanel?
-    private var contentViewController: PortForwardPermissionContentViewController?
-
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
-        let popover = NSPopover()
-        popover.behavior = .semitransient
-        popover.delegate = self
-
-        let vc = PortForwardPermissionContentViewController()
-        vc.delegate = self
-        contentViewController = vc
-
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
-    }
-
-    func showAsSheet(in window: NSWindow) {
-        let vc = PortForwardPermissionContentViewController()
-        vc.delegate = self
-        vc.onDone = { [weak self] in self?.close() }
-        contentViewController = vc
-
-        let panel = NSPanel(contentViewController: vc)
-        panel.styleMask = [.titled, .closable]
-        panel.title = "Port Forwards"
-        sheetWindow = panel
-
-        window.beginSheet(panel) { [weak self] _ in
-            self?.sheetWindow = nil
-            self?.contentViewController = nil
-            self?.onClose?()
-        }
-    }
-
-    func close() {
-        if let sheet = sheetWindow, let parent = sheet.sheetParent {
-            parent.endSheet(sheet)
-        } else {
-            popover?.close()
-        }
-    }
-
-    var isShown: Bool {
-        popover?.isShown ?? false || sheetWindow != nil
-    }
-
-    // MARK: - Data Forwarding
-
-    func setEntries(_ entries: [PortForwardEntry]) {
-        contentViewController?.setEntries(entries)
-    }
-
-    func setAutoPortMapEnabled(_ enabled: Bool) {
-        contentViewController?.setAutoPortMapEnabled(enabled)
-    }
-
-    func setBlockedPortDescriptions(_ descriptions: [String]) {
-        contentViewController?.setBlockedPortDescriptions(descriptions)
-    }
-
-    // MARK: - NSPopoverDelegate
-
-    func popoverDidClose(_ notification: Notification) {
-        popover = nil
-        contentViewController = nil
-        onClose?()
-    }
-}
-
-extension PortForwardPermissionPanel: PortForwardPermissionContentViewControllerDelegate {
-    func contentViewController(_ vc: PortForwardPermissionContentViewController, didBlockPort guestPort: UInt16) {
-        delegate?.portForwardPermissionPanel(self, didBlockPort: guestPort)
-    }
-
-    func contentViewController(_ vc: PortForwardPermissionContentViewController, didRemoveForwardWithHostPort hostPort: UInt16) {
-        delegate?.portForwardPermissionPanel(self, didRemoveForwardWithHostPort: hostPort)
-    }
-
-    func contentViewController(_ vc: PortForwardPermissionContentViewController, didToggleAutoPortMap enabled: Bool) {
-        delegate?.portForwardPermissionPanel(self, didToggleAutoPortMap: enabled)
-    }
-
-    func contentViewController(_ vc: PortForwardPermissionContentViewController, didUnblockPort port: UInt16) {
-        delegate?.portForwardPermissionPanel(self, didUnblockPort: port)
-    }
-
-    func contentViewControllerDidUnblockAll(_ vc: PortForwardPermissionContentViewController) {
-        delegate?.portForwardPermissionPanelDidUnblockAll(self)
-    }
-
-    func contentViewControllerDidRequestEditor(_ vc: PortForwardPermissionContentViewController) {
-        delegate?.portForwardPermissionPanelDidRequestAddPortForward(self)
-    }
-}
-
-// MARK: - Content View Controller
-
+/// Delegate protocol for port forward permission content view controller actions
 protocol PortForwardPermissionContentViewControllerDelegate: AnyObject {
     func contentViewController(_ vc: PortForwardPermissionContentViewController, didBlockPort guestPort: UInt16)
     func contentViewController(_ vc: PortForwardPermissionContentViewController, didRemoveForwardWithHostPort hostPort: UInt16)
@@ -125,10 +10,17 @@ protocol PortForwardPermissionContentViewControllerDelegate: AnyObject {
     func contentViewControllerDidRequestEditor(_ vc: PortForwardPermissionContentViewController)
 }
 
-final class PortForwardPermissionContentViewController: NSViewController {
+final class PortForwardPermissionContentViewController: NSViewController, PopoverContent {
 
     weak var delegate: PortForwardPermissionContentViewControllerDelegate?
-    var onDone: (() -> Void)?
+
+    let dismissBehavior: PopoverDismissBehavior = .semiTransient
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("portForwards")
+
+    func handleEscapeKey() -> Bool {
+        // Let PopoverManager dismiss
+        return false
+    }
 
     private var entries: [PortForwardEntry] = []
     private var blockedDescriptions: [String] = []
@@ -255,22 +147,6 @@ final class PortForwardPermissionContentViewController: NSViewController {
         editButton.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(editButton)
 
-        // Done button (shown only in sheet/modal mode)
-        var bottomView: NSView = editButton
-        if onDone != nil {
-            let doneButton = NSButton(title: "Done", target: self, action: #selector(doneClicked))
-            doneButton.bezelStyle = .rounded
-            doneButton.keyEquivalent = "\u{1b}"
-            doneButton.translatesAutoresizingMaskIntoConstraints = false
-            container.addSubview(doneButton)
-
-            NSLayoutConstraint.activate([
-                doneButton.topAnchor.constraint(equalTo: editButton.bottomAnchor, constant: 12),
-                doneButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            ])
-            bottomView = doneButton
-        }
-
         // Layout
         NSLayoutConstraint.activate([
             autoMapCheckbox.topAnchor.constraint(equalTo: container.topAnchor, constant: padding),
@@ -300,7 +176,7 @@ final class PortForwardPermissionContentViewController: NSViewController {
             editButton.topAnchor.constraint(equalTo: sep2.bottomAnchor, constant: 8),
             editButton.centerXAnchor.constraint(equalTo: container.centerXAnchor),
 
-            bottomView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
+            editButton.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -padding),
 
             container.widthAnchor.constraint(equalToConstant: 300),
         ])
@@ -526,9 +402,5 @@ final class PortForwardPermissionContentViewController: NSViewController {
 
     @objc private func editClicked() {
         delegate?.contentViewControllerDidRequestEditor(self)
-    }
-
-    @objc private func doneClicked() {
-        onDone?()
     }
 }

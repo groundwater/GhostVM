@@ -1,77 +1,21 @@
 import AppKit
 
-/// Delegate protocol for port forward notification panel actions
-protocol PortForwardNotificationPanelDelegate: AnyObject {
-    func portForwardNotificationPanel(_ panel: PortForwardNotificationPanel, didBlockPort guestPort: UInt16)
-}
-
-/// Lightweight notification popover for auto-detected port forwards.
-/// Shown automatically when new ports are detected. Only displays
-/// the newly forwarded ports with copy/block actions.
-final class PortForwardNotificationPanel: NSObject, NSPopoverDelegate {
-
-    weak var delegate: PortForwardNotificationPanelDelegate?
-    var onClose: (() -> Void)?
-
-    private var popover: NSPopover?
-    private var contentViewController: PortForwardNotificationContentViewController?
-
-    func show(relativeTo positioningRect: NSRect, of positioningView: NSView, preferredEdge: NSRectEdge) {
-        let popover = NSPopover()
-        popover.behavior = .semitransient
-        popover.delegate = self
-
-        let vc = PortForwardNotificationContentViewController()
-        vc.delegate = self
-        contentViewController = vc
-
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
-    }
-
-    func close() {
-        popover?.close()
-    }
-
-    var isShown: Bool {
-        popover?.isShown ?? false
-    }
-
-    // MARK: - Data Forwarding
-
-    func setPortMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
-        contentViewController?.setPortMappings(mappings)
-    }
-
-    func addPortMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
-        contentViewController?.addPortMappings(mappings)
-    }
-
-    // MARK: - NSPopoverDelegate
-
-    func popoverDidClose(_ notification: Notification) {
-        popover = nil
-        contentViewController = nil
-        onClose?()
-    }
-}
-
-extension PortForwardNotificationPanel: PortForwardNotificationContentViewControllerDelegate {
-    func notificationContentViewController(_ vc: PortForwardNotificationContentViewController, didBlockPort guestPort: UInt16) {
-        delegate?.portForwardNotificationPanel(self, didBlockPort: guestPort)
-    }
-}
-
-// MARK: - Content View Controller
-
+/// Delegate protocol for port forward notification content view controller actions
 protocol PortForwardNotificationContentViewControllerDelegate: AnyObject {
     func notificationContentViewController(_ vc: PortForwardNotificationContentViewController, didBlockPort guestPort: UInt16)
 }
 
-final class PortForwardNotificationContentViewController: NSViewController {
+final class PortForwardNotificationContentViewController: NSViewController, PopoverContent {
 
     weak var delegate: PortForwardNotificationContentViewControllerDelegate?
+
+    let dismissBehavior: PopoverDismissBehavior = .semiTransient
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("portForwards")
+
+    func handleEscapeKey() -> Bool {
+        // Dismiss handled by PopoverManager
+        return false
+    }
 
     private var mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)] = []
     private var isLocallyRemoving = false
@@ -129,6 +73,12 @@ final class PortForwardNotificationContentViewController: NSViewController {
         ])
 
         self.view = container
+
+        // Populate from data if setPortMappings was called before loadView (queued VC).
+        if !mappings.isEmpty {
+            rebuildPortList()
+            updateSubtitle()
+        }
     }
 
     // MARK: - Public

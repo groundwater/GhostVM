@@ -5,48 +5,12 @@ struct GhostToolsInstallExplainer {
     let body: String
 }
 
-/// NSPopover-based panel showing GhostTools installation help
-final class GuestToolsInfoPanel: NSObject, NSPopoverDelegate {
-
-    var onClose: (() -> Void)?
-
-    private var popover: NSPopover?
-
-    func show(
-        relativeTo positioningRect: NSRect,
-        of positioningView: NSView,
-        preferredEdge: NSRectEdge,
-        explainer: GhostToolsInstallExplainer
-    ) {
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.delegate = self
-
-        let vc = GuestToolsInfoContentViewController(explainer: explainer)
-        popover.contentViewController = vc
-        popover.show(relativeTo: positioningRect, of: positioningView, preferredEdge: preferredEdge)
-        self.popover = popover
-    }
-
-    func close() {
-        popover?.close()
-    }
-
-    var isShown: Bool {
-        popover?.isShown ?? false
-    }
-
-    // MARK: - NSPopoverDelegate
-
-    func popoverDidClose(_ notification: Notification) {
-        popover = nil
-        onClose?()
-    }
-}
-
 // MARK: - Content View Controller
 
-private final class GuestToolsInfoContentViewController: NSViewController {
+final class GuestToolsInfoContentViewController: NSViewController, PopoverContent {
+    let dismissBehavior: PopoverDismissBehavior = .transient
+    let preferredToolbarAnchor = NSToolbarItem.Identifier("guestToolsStatus")
+
     private let explainer: GhostToolsInstallExplainer
 
     init(explainer: GhostToolsInstallExplainer) {

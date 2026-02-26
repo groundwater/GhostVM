@@ -52,7 +52,7 @@ private final class HighlightingMenuItemView: NSView {
 
 /// NSToolbar implementation for the VM helper window.
 /// Provides quick access to VM status and controls.
-final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesPanelDelegate, ClipboardPermissionPanelDelegate, URLPermissionPanelDelegate, PortForwardPermissionPanelDelegate, PortForwardNotificationPanelDelegate, IconChooserPanelDelegate {
+final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForwardPanelDelegate, SharedFolderPanelDelegate, QueuedFilesContentViewControllerDelegate, ClipboardPermissionContentViewControllerDelegate, URLPermissionContentViewControllerDelegate, PortForwardPermissionContentViewControllerDelegate, PortForwardNotificationContentViewControllerDelegate {
 
     // MARK: - Toolbar Item Identifiers
 
@@ -114,13 +114,16 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var portForwardEntries: [PortForwardEntry] = []
     private var sharedFolderPanel: SharedFolderPanel?
     private var sharedFolderEntries: [SharedFolderEntry] = []
-    private var queuedFilesPanel: QueuedFilesPanel?
-    private var clipboardPermissionPanel: ClipboardPermissionPanel?
-    private var urlPermissionPanel: URLPermissionPanel?
-    private var portForwardPermissionPanel: PortForwardPermissionPanel?
-    private var portForwardNotificationPanel: PortForwardNotificationPanel?
-    private var iconChooserPanel: IconChooserPanel?
-    private var guestToolsInfoPanel: GuestToolsInfoPanel?
+
+    // PopoverManager-based content VCs (replacing old panel wrappers)
+    var popoverManager: PopoverManager?
+    private var queuedFilesVC: QueuedFilesContentViewController?
+    private var clipboardPermissionVC: ClipboardPermissionContentViewController?
+    private var urlPermissionVCs: [URLPermissionContentViewController] = []
+    private var portForwardPermissionVC: PortForwardPermissionContentViewController?
+    private var portForwardNotificationVC: PortForwardNotificationContentViewController?
+    private var iconChooserVC: IconChooserContentViewController?
+    private var guestToolsInfoVC: GuestToolsInfoContentViewController?
     private var previousQueuedFileCount = 0
     private var blockedPortDescriptions: [String] = []
 
@@ -166,6 +169,57 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         window.toolbarStyle = .unifiedCompact
     }
 
+    /// Returns the anchor view for a toolbar item identifier.
+    /// Falls back to any visible toolbar button if the requested item was removed by toolbar customization.
+    /// Crashes in debug builds if no toolbar items are visible at all.
+    func anchorView(for identifier: NSToolbarItem.Identifier) -> NSView {
+        // Direct lookup for items with custom views
+        let item: NSToolbarItem?
+        switch identifier {
+        case ItemID.guestToolsStatus: item = guestToolsItem
+        case ItemID.portForwards: item = portForwardsItem
+        case ItemID.clipboardSync: item = clipboardSyncItem
+        case ItemID.captureCommands: item = captureCommandsItem
+        case ItemID.queuedFiles: item = queuedFilesItem
+        case ItemID.iconChooser: item = iconChooserItem
+        case ItemID.captureKeys: item = captureKeysItem
+        case ItemID.shutDown: item = shutDownItem
+        case ItemID.terminate: item = terminateItem
+        default: item = nil
+        }
+
+        // Items with a custom .view (NSButton-based items)
+        if let view = item?.view, view.window != nil {
+            return view
+        }
+
+        // NSMenuToolbarItem (captureCommands, sharedFolders) — AppKit owns the view.
+        // Find it via the toolbar's visible items array.
+        if let item = item, item is NSMenuToolbarItem {
+            if let visible = toolbar.visibleItems {
+                for visibleItem in visible where visibleItem.itemIdentifier == identifier {
+                    if let view = visibleItem.value(forKey: "view") as? NSView, view.window != nil {
+                        return view
+                    }
+                }
+            }
+        }
+
+        // Toolbar customization may have removed the requested item.
+        // Fall back to any visible button-based item.
+        let fallbacks: [NSToolbarItem?] = [
+            captureKeysItem, clipboardSyncItem, portForwardsItem,
+            iconChooserItem, shutDownItem, terminateItem
+        ]
+        for candidate in fallbacks {
+            if let view = candidate?.view, view.window != nil {
+                return view
+            }
+        }
+
+        fatalError("PopoverManager: no visible toolbar items to anchor popover for \(identifier.rawValue)")
+    }
+
     // MARK: - State Updates
 
     func setGuestToolsStatus(_ status: GuestToolsStatus) {
@@ -177,8 +231,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         rebuildCaptureCommandsMenu()
 
         if status == .connected {
-            guestToolsInfoPanel?.close()
-            guestToolsInfoPanel = nil
+            if let vc = guestToolsInfoVC {
+                popoverManager?.dismiss(vc)
+                guestToolsInfoVC = nil
+            }
         }
     }
 
@@ -191,7 +247,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         portForwardEntries = entries
         portForwardCount = entries.count
         updatePortForwardsButton()
-        portForwardPermissionPanel?.setEntries(entries)
+        portForwardPermissionVC?.setEntries(entries)
         portForwardPanel?.setEntries(entries)
     }
 
@@ -233,12 +289,12 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     func setAutoPortMapEnabled(_ enabled: Bool) {
         autoPortMapEnabled = enabled
         updatePortForwardsButton()
-        portForwardPermissionPanel?.setAutoPortMapEnabled(enabled)
+        portForwardPermissionVC?.setAutoPortMapEnabled(enabled)
     }
 
     func setBlockedPortDescriptions(_ ports: [String]) {
         blockedPortDescriptions = ports
-        portForwardPermissionPanel?.setBlockedPortDescriptions(ports)
+        portForwardPermissionVC?.setBlockedPortDescriptions(ports)
     }
 
     func setQueuedFileCount(_ count: Int) {
@@ -943,20 +999,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     private func showGhostToolsInstallInfo(from view: NSView?, explainer: GhostToolsInstallExplainer) {
-        guard let view = view else { return }
+        guard view != nil else { return }
 
-        if guestToolsInfoPanel?.isShown == true {
-            guestToolsInfoPanel?.close()
-            guestToolsInfoPanel = nil
+        if let vc = guestToolsInfoVC {
+            popoverManager?.dismiss(vc)
+            guestToolsInfoVC = nil
             return
         }
 
-        let panel = GuestToolsInfoPanel()
-        panel.onClose = { [weak self] in
-            self?.guestToolsInfoPanel = nil
+        let vc = GuestToolsInfoContentViewController(explainer: explainer)
+        guestToolsInfoVC = vc
+
+        popoverManager?.show(vc) { [weak self] in
+            self?.guestToolsInfoVC = nil
         }
-        panel.show(relativeTo: view.bounds, of: view, preferredEdge: .minY, explainer: explainer)
-        guestToolsInfoPanel = panel
     }
 
     @objc private func iconChooserClicked() {
@@ -964,8 +1020,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             showGhostToolsInstallInfo(from: iconChooserItem?.view, explainer: iconExplainer)
             return
         }
-        if iconChooserPanel?.isShown == true {
-            iconChooserPanel?.close()
+        if let vc = iconChooserVC, popoverManager?.contains(vc) == true {
+            popoverManager?.dismiss(vc)
+            iconChooserVC = nil
         } else {
             delegate?.toolbarDidRequestIconChooser(self)
         }
@@ -987,15 +1044,11 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             showGhostToolsInstallInfo(from: portForwardsItem?.view, explainer: portForwardsExplainer)
             return
         }
-        // Close notification panel if shown
-        if portForwardNotificationPanel?.isShown == true {
-            portForwardNotificationPanel?.close()
-            portForwardNotificationPanel = nil
-        }
 
-        // Toggle management panel
-        if portForwardPermissionPanel?.isShown == true {
-            portForwardPermissionPanel?.close()
+        // Toggle management panel (PopoverManager dismisses any notification automatically)
+        if let vc = portForwardPermissionVC, popoverManager?.contains(vc) == true {
+            popoverManager?.dismiss(vc)
+            portForwardPermissionVC = nil
         } else {
             showPortForwardPermissionPopover()
         }
@@ -1087,12 +1140,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func portForwardsFromMenu() {
         // Menu path intentionally bypasses toolbar GhostTools gating.
-        if portForwardNotificationPanel?.isShown == true {
-            portForwardNotificationPanel?.close()
-            portForwardNotificationPanel = nil
-        }
-        if portForwardPermissionPanel?.isShown == true {
-            portForwardPermissionPanel?.close()
+        // PopoverManager dismisses any notification automatically when the form shows.
+        if let vc = portForwardPermissionVC {
+            popoverManager?.dismiss(vc)
+            portForwardPermissionVC = nil
         } else {
             showPortForwardPermissionPopover()
         }
@@ -1117,193 +1168,148 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func setQueuedFileNames(_ names: [String]) {
         queuedFileNames = names
-        queuedFilesPanel?.setFileNames(names)
+        queuedFilesVC?.setFileNames(names)
     }
 
     func showQueuedFilesPopoverIfNeeded() {
-        guard queuedFileCount > 0, queuedFilesPanel == nil else { return }
+        guard queuedFileCount > 0, queuedFilesVC == nil else { return }
         showQueuedFilesPopover()
     }
 
     func showQueuedFilesPopover() {
-        queuedFilesPanel?.close()
+        // If already showing, don't recreate — PopoverManager blocks duplicate forms.
+        if let vc = queuedFilesVC, popoverManager?.contains(vc) == true { return }
 
-        let panel = QueuedFilesPanel()
-        panel.delegate = self
-        panel.setFileNames(queuedFileNames)
-        panel.onClose = { [weak self] in
+        let vc = QueuedFilesContentViewController()
+        vc.delegate = self
+        vc.setFileNames(queuedFileNames)
+        queuedFilesVC = vc
+
+        popoverManager?.show(vc) { [weak self] in
             guard let self = self else { return }
-            self.queuedFilesPanel = nil
+            self.queuedFilesVC = nil
             self.delegate?.toolbarQueuedFilesPanelDidClose(self)
         }
-
-        if let button = queuedFilesItem?.view, button.window != nil {
-            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        } else if let window = self.window {
-            panel.showAsSheet(in: window)
-        } else {
-            return
-        }
-        queuedFilesPanel = panel
     }
 
     func showIconChooserPopover(bundleURL: URL) {
-        iconChooserPanel?.close()
-
-        let panel = IconChooserPanel()
-        panel.delegate = self
-        panel.onClose = { [weak self] in
-            self?.iconChooserPanel = nil
+        let vc = IconChooserContentViewController(bundleURL: bundleURL)
+        vc.onSelect = { [weak self] mode, icon in
+            guard let self = self else { return }
+            self.delegate?.toolbar(self, didSelectIconMode: mode, icon: icon)
         }
+        iconChooserVC = vc
 
-        if let button = iconChooserItem?.view, button.window != nil {
-            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY, bundleURL: bundleURL)
-        } else if let window = self.window {
-            panel.showAsSheet(in: window, bundleURL: bundleURL)
-        } else {
-            return
+        popoverManager?.show(vc) { [weak self] in
+            self?.iconChooserVC = nil
         }
-        iconChooserPanel = panel
     }
 
     func showClipboardPermissionPopover() {
-        guard let button = clipboardSyncItem?.view else { return }
+        if let vc = clipboardPermissionVC, popoverManager?.contains(vc) == true { return }
 
-        clipboardPermissionPanel?.close()
+        let vc = ClipboardPermissionContentViewController()
+        vc.delegate = self
+        clipboardPermissionVC = vc
 
-        let panel = ClipboardPermissionPanel()
-        panel.delegate = self
-        panel.onClose = { [weak self] in
+        popoverManager?.show(vc) { [weak self] in
             guard let self = self else { return }
-            self.clipboardPermissionPanel = nil
+            self.clipboardPermissionVC = nil
             self.delegate?.toolbarClipboardPermissionPanelDidClose(self)
         }
-        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        clipboardPermissionPanel = panel
     }
 
     func closeClipboardPermissionPopover() {
-        clipboardPermissionPanel?.close()
-        clipboardPermissionPanel = nil
+        if let vc = clipboardPermissionVC {
+            popoverManager?.dismiss(vc)
+            clipboardPermissionVC = nil
+        }
     }
 
     var isClipboardPermissionPopoverShown: Bool {
-        clipboardPermissionPanel?.isShown ?? false
+        clipboardPermissionVC.map { popoverManager?.contains($0) ?? false } ?? false
     }
 
     func clipboardPermissionAllowOnce() {
-        guard let panel = clipboardPermissionPanel else { return }
-        clipboardPermissionPanelDidAllowOnce(panel)
+        guard let vc = clipboardPermissionVC else { return }
+        contentViewControllerDidAllowOnce(vc)
     }
 
     func clipboardPermissionDeny() {
-        guard let panel = clipboardPermissionPanel else { return }
-        clipboardPermissionPanelDidDeny(panel)
+        guard let vc = clipboardPermissionVC else { return }
+        contentViewControllerDidDeny(vc)
     }
 
-    func showURLPermissionPopover() {
-        urlPermissionPanel?.close()
+    /// Show a URL permission prompt for a single URL.
+    /// Each call creates a separate VC; PopoverManager presents the first
+    /// and queues the rest behind it.
+    func showURLPermissionPopover(for url: String) {
+        let vc = URLPermissionContentViewController()
+        vc.delegate = self
+        vc.setURL(url)
+        urlPermissionVCs.append(vc)
 
-        let panel = URLPermissionPanel()
-        panel.delegate = self
-        panel.onClose = { [weak self] in
+        popoverManager?.show(vc) { [weak self] in
             guard let self = self else { return }
-            self.urlPermissionPanel = nil
-            self.delegate?.toolbarURLPermissionPanelDidClose(self)
+            self.urlPermissionVCs.removeAll { $0 === vc }
+            if self.urlPermissionVCs.isEmpty {
+                self.delegate?.toolbarURLPermissionPanelDidClose(self)
+            }
         }
-
-        if let button = captureCommandsItem?.view, button.window != nil {
-            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        } else if let window = self.window {
-            panel.showAsAlert(in: window)
-        } else {
-            return
-        }
-        urlPermissionPanel = panel
-    }
-
-    func closeURLPermissionPopover() {
-        urlPermissionPanel?.close()
-        urlPermissionPanel = nil
-    }
-
-    var isURLPermissionPopoverShown: Bool {
-        urlPermissionPanel?.isShown ?? false
-    }
-
-    func urlPermissionAllowOnce() {
-        guard let panel = urlPermissionPanel else { return }
-        urlPermissionPanelDidAllowOnce(panel)
-    }
-
-    func urlPermissionDeny() {
-        guard let panel = urlPermissionPanel else { return }
-        urlPermissionPanelDidDeny(panel)
-    }
-
-    func setURLPermissionURLs(_ urls: [String]) {
-        urlPermissionPanel?.setURLs(urls)
     }
 
     func showPortForwardPermissionPopover() {
-        portForwardPermissionPanel?.close()
+        if let vc = portForwardPermissionVC, popoverManager?.contains(vc) == true { return }
 
-        let panel = PortForwardPermissionPanel()
-        panel.delegate = self
-        panel.onClose = { [weak self] in
+        let vc = PortForwardPermissionContentViewController()
+        vc.delegate = self
+        portForwardPermissionVC = vc
+        vc.setEntries(portForwardEntries)
+        vc.setAutoPortMapEnabled(autoPortMapEnabled)
+        vc.setBlockedPortDescriptions(blockedPortDescriptions)
+
+        popoverManager?.show(vc) { [weak self] in
             guard let self = self else { return }
-            self.portForwardPermissionPanel = nil
+            self.portForwardPermissionVC = nil
             self.delegate?.toolbarPortForwardPermissionPanelDidClose(self)
         }
-
-        if let button = portForwardsItem?.view, button.window != nil {
-            panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        } else if let window = self.window {
-            panel.showAsSheet(in: window)
-        } else {
-            return
-        }
-        panel.setEntries(portForwardEntries)
-        panel.setAutoPortMapEnabled(autoPortMapEnabled)
-        panel.setBlockedPortDescriptions(blockedPortDescriptions)
-        portForwardPermissionPanel = panel
     }
 
     func closePortForwardPermissionPopover() {
-        portForwardPermissionPanel?.close()
-        portForwardPermissionPanel = nil
+        if let vc = portForwardPermissionVC {
+            popoverManager?.dismiss(vc)
+            portForwardPermissionVC = nil
+        }
     }
 
     var isPortForwardPermissionPopoverShown: Bool {
-        portForwardPermissionPanel?.isShown ?? false
+        portForwardPermissionVC.map { popoverManager?.contains($0) ?? false } ?? false
     }
 
     func setPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
         let entries = mappings.map { PortForwardEntry(hostPort: $0.hostPort, guestPort: $0.guestPort, enabled: true, isAutoMapped: true, processName: $0.processName) }
         portForwardEntries = entries
-        portForwardPermissionPanel?.setEntries(entries)
+        portForwardPermissionVC?.setEntries(entries)
+        portForwardNotificationVC?.setPortMappings(mappings)
     }
 
     func addPortForwardPermissionMappings(_ mappings: [(guestPort: UInt16, hostPort: UInt16, processName: String?)]) {
         let newEntries = mappings.map { PortForwardEntry(hostPort: $0.hostPort, guestPort: $0.guestPort, enabled: true, isAutoMapped: true, processName: $0.processName) }
         portForwardEntries.append(contentsOf: newEntries)
-        portForwardPermissionPanel?.setEntries(portForwardEntries)
+        portForwardPermissionVC?.setEntries(portForwardEntries)
+        portForwardNotificationVC?.addPortMappings(mappings)
     }
 
     func showPortForwardNotificationPopover() {
-        guard let button = portForwardsItem?.view else { return }
+        let vc = PortForwardNotificationContentViewController()
+        vc.delegate = self
+        portForwardNotificationVC = vc
 
-        portForwardNotificationPanel?.close()
-
-        let panel = PortForwardNotificationPanel()
-        panel.delegate = self
-        panel.onClose = { [weak self] in
+        popoverManager?.show(vc) { [weak self] in
             guard let self = self else { return }
-            self.portForwardNotificationPanel = nil
+            self.portForwardNotificationVC = nil
             self.delegate?.toolbarPortForwardPermissionPanelDidClose(self)
         }
-        panel.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        portForwardNotificationPanel = panel
     }
 
     @objc private func customizeToolbar() {
@@ -1344,103 +1350,106 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         delegate?.toolbar(self, didSetSharedFolderReadOnly: readOnly, forID: id)
     }
 
-    // MARK: - QueuedFilesPanelDelegate
+    // MARK: - QueuedFilesContentViewControllerDelegate
 
-    func queuedFilesPanelDidAllow(_ panel: QueuedFilesPanel) {
+    func contentViewControllerDidAllow(_ vc: QueuedFilesContentViewController) {
         NSLog("HelperToolbar: Save clicked, delegate=%@", delegate != nil ? "present" : "NIL")
-        panel.close()
-        queuedFilesPanel = nil
+        popoverManager?.dismiss(vc)
+        queuedFilesVC = nil
         queuedFileNames = []
         delegate?.toolbarDidRequestReceiveFiles(self)
     }
 
-    func queuedFilesPanelDidDeny(_ panel: QueuedFilesPanel) {
-        panel.close()
-        queuedFilesPanel = nil
+    func contentViewControllerDidDeny(_ vc: QueuedFilesContentViewController) {
+        popoverManager?.dismiss(vc)
+        queuedFilesVC = nil
         queuedFileNames = []
         delegate?.toolbarDidRequestDenyFiles(self)
     }
 
-    // MARK: - ClipboardPermissionPanelDelegate
+    // MARK: - ClipboardPermissionContentViewControllerDelegate
 
-    func clipboardPermissionPanelDidDeny(_ panel: ClipboardPermissionPanel) {
-        panel.close()
-        clipboardPermissionPanel = nil
+    func contentViewControllerDidDeny(_ vc: ClipboardPermissionContentViewController) {
+        popoverManager?.dismiss(vc)
+        clipboardPermissionVC = nil
         delegate?.toolbarClipboardPermissionDidDeny(self)
     }
 
-    func clipboardPermissionPanelDidAllowOnce(_ panel: ClipboardPermissionPanel) {
-        panel.close()
-        clipboardPermissionPanel = nil
+    func contentViewControllerDidAllowOnce(_ vc: ClipboardPermissionContentViewController) {
+        popoverManager?.dismiss(vc)
+        clipboardPermissionVC = nil
         delegate?.toolbarClipboardPermissionDidAllowOnce(self)
     }
 
-    func clipboardPermissionPanelDidAlwaysAllow(_ panel: ClipboardPermissionPanel) {
-        panel.close()
-        clipboardPermissionPanel = nil
+    func contentViewControllerDidAlwaysAllow(_ vc: ClipboardPermissionContentViewController) {
+        popoverManager?.dismiss(vc)
+        clipboardPermissionVC = nil
         delegate?.toolbarClipboardPermissionDidAlwaysAllow(self)
     }
 
-    // MARK: - URLPermissionPanelDelegate
+    // MARK: - URLPermissionContentViewControllerDelegate
 
-    func urlPermissionPanelDidDeny(_ panel: URLPermissionPanel) {
-        panel.close()
-        urlPermissionPanel = nil
-        delegate?.toolbarURLPermissionDidDeny(self)
+    func contentViewControllerDidDeny(_ vc: URLPermissionContentViewController) {
+        popoverManager?.dismiss(vc)
+        urlPermissionVCs.removeAll { $0 === vc }
+        delegate?.toolbarURLPermissionDidDeny(self, url: vc.urlString)
     }
 
-    func urlPermissionPanelDidAllowOnce(_ panel: URLPermissionPanel) {
-        panel.close()
-        urlPermissionPanel = nil
-        delegate?.toolbarURLPermissionDidAllowOnce(self)
+    func contentViewControllerDidAllowOnce(_ vc: URLPermissionContentViewController) {
+        popoverManager?.dismiss(vc)
+        urlPermissionVCs.removeAll { $0 === vc }
+        delegate?.toolbarURLPermissionDidAllowOnce(self, url: vc.urlString)
     }
 
-    func urlPermissionPanelDidAlwaysAllow(_ panel: URLPermissionPanel) {
-        panel.close()
-        urlPermissionPanel = nil
-        delegate?.toolbarURLPermissionDidAlwaysAllow(self)
+    func contentViewControllerDidAlwaysAllow(_ vc: URLPermissionContentViewController) {
+        // Collect this URL + all remaining queued URL VCs
+        var allURLs = [vc.urlString]
+        popoverManager?.dismiss(vc)
+        urlPermissionVCs.removeAll { $0 === vc }
+
+        for remainingVC in urlPermissionVCs {
+            allURLs.append(remainingVC.urlString)
+            popoverManager?.dismiss(remainingVC)
+        }
+        urlPermissionVCs.removeAll()
+
+        delegate?.toolbarURLPermissionDidAlwaysAllow(self, urls: allURLs)
     }
 
-    // MARK: - PortForwardPermissionPanelDelegate
+    // MARK: - PortForwardPermissionContentViewControllerDelegate
 
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didBlockPort guestPort: UInt16) {
+    func contentViewController(_ vc: PortForwardPermissionContentViewController, didBlockPort guestPort: UInt16) {
         delegate?.toolbar(self, didBlockAutoForwardedPort: guestPort)
     }
 
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didRemoveForwardWithHostPort hostPort: UInt16) {
+    func contentViewController(_ vc: PortForwardPermissionContentViewController, didRemoveForwardWithHostPort hostPort: UInt16) {
         delegate?.toolbar(self, didRemovePortForwardWithHostPort: hostPort)
     }
 
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didToggleAutoPortMap enabled: Bool) {
+    func contentViewController(_ vc: PortForwardPermissionContentViewController, didToggleAutoPortMap enabled: Bool) {
         autoPortMapEnabled = enabled
         updatePortForwardsButton()
         delegate?.toolbar(self, didToggleAutoPortMap: enabled)
     }
 
-    func portForwardPermissionPanel(_ panel: PortForwardPermissionPanel, didUnblockPort port: UInt16) {
+    func contentViewController(_ vc: PortForwardPermissionContentViewController, didUnblockPort port: UInt16) {
         delegate?.toolbar(self, didUnblockPort: port)
     }
 
-    func portForwardPermissionPanelDidUnblockAll(_ panel: PortForwardPermissionPanel) {
+    func contentViewControllerDidUnblockAll(_ vc: PortForwardPermissionContentViewController) {
         delegate?.toolbarDidUnblockAllPorts(self)
     }
 
-    func portForwardPermissionPanelDidRequestAddPortForward(_ panel: PortForwardPermissionPanel) {
-        panel.close()
-        portForwardPermissionPanel = nil
+    func contentViewControllerDidRequestEditor(_ vc: PortForwardPermissionContentViewController) {
+        popoverManager?.dismiss(vc)
+        portForwardPermissionVC = nil
         editPortForwards()
     }
 
-    // MARK: - PortForwardNotificationPanelDelegate
+    // MARK: - PortForwardNotificationContentViewControllerDelegate
 
-    func portForwardNotificationPanel(_ panel: PortForwardNotificationPanel, didBlockPort guestPort: UInt16) {
+    func notificationContentViewController(_ vc: PortForwardNotificationContentViewController, didBlockPort guestPort: UInt16) {
         delegate?.toolbar(self, didBlockAutoForwardedPort: guestPort)
-    }
-
-    // MARK: - IconChooserPanelDelegate
-
-    func iconChooserPanel(_ panel: IconChooserPanel, didSelectMode mode: String?, icon: NSImage?) {
-        delegate?.toolbar(self, didSelectIconMode: mode, icon: icon)
     }
 }
 
@@ -1470,9 +1479,9 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbarClipboardPermissionDidAllowOnce(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
     func toolbarClipboardPermissionPanelDidClose(_ toolbar: HelperToolbar)
-    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar)
-    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar)
-    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar)
+    func toolbarURLPermissionDidDeny(_ toolbar: HelperToolbar, url: String)
+    func toolbarURLPermissionDidAllowOnce(_ toolbar: HelperToolbar, url: String)
+    func toolbarURLPermissionDidAlwaysAllow(_ toolbar: HelperToolbar, urls: [String])
     func toolbarURLPermissionPanelDidClose(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didBlockAutoForwardedPort port: UInt16)
     func toolbarPortForwardPermissionPanelDidClose(_ toolbar: HelperToolbar)
