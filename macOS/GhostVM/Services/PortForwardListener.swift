@@ -241,7 +241,7 @@ final class PortForwardListener: @unchecked Sendable {
         Self.logger.info("Connected to guest vsock id=\(connectionID, privacy: .public) vsockFd=\(vsockFd)")
 
         let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: false)
-        let vsockIO = AsyncVSockIO(fd: vsockFd, ownsFD: false, pollOnEAGAIN: true)
+        let vsockIO = BlockingVSockChannel(fd: vsockFd, ownsFD: false)
 
         // Send CONNECT command
         Self.logger.debug("Sending CONNECT command id=\(connectionID, privacy: .public) guestPort=\(self.guestPort)")
@@ -327,8 +327,8 @@ final class PortForwardListener: @unchecked Sendable {
 
     /// Bridge TCP and vsock connections using async nonblocking I/O
     private func bridgeConnections(
-        tcpIO: AsyncVSockIO,
-        vsockIO: AsyncVSockIO,
+        tcpIO: some SocketChannel,
+        vsockIO: some SocketChannel,
         connection: VZVirtioSocketConnection,
         connectionID: String
     ) async {
@@ -388,7 +388,7 @@ final class PortForwardListener: @unchecked Sendable {
         case transport(AsyncVSockIOError)
     }
 
-    private func readConnectResponse(_ io: AsyncVSockIO) async throws -> Data {
+    private func readConnectResponse(_ io: some SocketChannel) async throws -> Data {
         try await withThrowingTaskGroup(of: Data.self) { group in
             group.addTask {
                 do {
