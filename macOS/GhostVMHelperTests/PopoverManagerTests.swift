@@ -166,14 +166,14 @@ final class PopoverManagerTests: XCTestCase {
         XCTAssertFalse(pm.contains(notif1))
     }
 
-    // MARK: - Same notification type: silent replacement (no callbacks)
+    // MARK: - Same notification type: replacement fires callbacks
 
-    func testSameNotificationType_silentlyReplaces() {
+    func testSameNotificationType_replacementFiresCallbacks() {
         let pm = makeManager()
         let notif1 = MockNotification()
         var notif1Closed = false
-        var contentDismissedCalled = false
-        pm.onContentDismissed = { _ in contentDismissedCalled = true }
+        var dismissedContent: (any PopoverContent)?
+        pm.onContentDismissed = { dismissedContent = $0 }
 
         pm.show(notif1) { notif1Closed = true }
 
@@ -181,17 +181,19 @@ final class PopoverManagerTests: XCTestCase {
         pm.show(notif2)
 
         XCTAssertTrue(notif2 === pm.topContent as AnyObject, "new notification is presented")
-        XCTAssertFalse(notif1Closed, "silent replacement must not fire onClose")
-        XCTAssertFalse(contentDismissedCalled, "silent replacement must not fire onContentDismissed")
+        XCTAssertTrue(notif1Closed, "replaced notification must fire onClose")
+        XCTAssertTrue(dismissedContent === notif1, "replaced notification must fire onContentDismissed")
     }
 
-    // MARK: - Queue dedup (silent)
+    // MARK: - Queue dedup fires callbacks
 
-    func testQueueDedup_sameType_silentlyRemoved() {
+    func testQueueDedup_sameType_firesCallbacks() {
         let pm = makeManager()
         let formA = MockForm()
         let notif1 = MockNotification()
         var notif1OnCloseCalled = false
+        var dismissedContent: (any PopoverContent)?
+        pm.onContentDismissed = { dismissedContent = $0 }
 
         pm.show(formA)
         pm.show(notif1) { notif1OnCloseCalled = true } // queued behind form
@@ -199,7 +201,8 @@ final class PopoverManagerTests: XCTestCase {
         let notif2 = MockNotification() // same type as notif1
         pm.show(notif2)
 
-        XCTAssertFalse(notif1OnCloseCalled, "queue dedup must be silent")
+        XCTAssertTrue(notif1OnCloseCalled, "queue dedup must fire onClose")
+        XCTAssertTrue(dismissedContent === notif1, "queue dedup must fire onContentDismissed")
         XCTAssertFalse(pm.contains(notif1), "old notif removed from queue")
         XCTAssertTrue(pm.contains(notif2), "new notif is in queue")
     }
@@ -434,7 +437,7 @@ final class PopoverManagerTests: XCTestCase {
     }
 
     /// Two rapid port forward notifications (same type).
-    /// Second silently replaces first — no callbacks, no blank popover.
+    /// Second replaces first — callbacks fire, no blank popover.
     func testSameNotificationType_noBlankPopover() {
         let pm = makeManager()
         let n1 = MockNotification()
@@ -445,7 +448,7 @@ final class PopoverManagerTests: XCTestCase {
         pm.show(n2)
 
         XCTAssertTrue(n2 === pm.topContent as AnyObject)
-        XCTAssertFalse(n1Closed, "no callbacks on silent notification replacement")
+        XCTAssertTrue(n1Closed, "callbacks fire when notification replaced by same type")
         XCTAssertFalse(pm.contains(n1))
     }
 

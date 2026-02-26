@@ -100,16 +100,19 @@ final class PopoverManager: NSObject, NSPopoverDelegate {
            type(of: p.content) == type(of: content) {
             closePresentation(p)
             presented = nil
+            p.onClose?()
+            onContentDismissed?(p.content)
         }
 
-        // --- Rule 3: Queue dedup — same notification type silently replaced ---
+        // --- Rule 3: Queue dedup — same notification type replaced ---
         if content.dismissBehavior != .requiresExplicitAction {
             if let idx = queue.firstIndex(where: {
                 $0.content.dismissBehavior != .requiresExplicitAction &&
                 type(of: $0.content) == type(of: content)
             }) {
-                // Silently remove old notification of same type (no callbacks)
-                queue.remove(at: idx)
+                let removed = queue.remove(at: idx)
+                removed.onClose?()
+                onContentDismissed?(removed.content)
             }
         }
 
