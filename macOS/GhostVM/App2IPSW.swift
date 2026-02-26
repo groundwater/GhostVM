@@ -58,6 +58,28 @@ struct App2IPSWFeedEntry: Hashable, Identifiable {
     var displayName: String {
         "macOS \(productVersion) (\(buildVersion))"
     }
+
+    /// Major version from the product version string (e.g. 15 from "15.1.1").
+    var majorVersion: Int? {
+        guard let first = productVersion.split(separator: ".").first else { return nil }
+        return Int(first)
+    }
+
+    /// Whether this IPSW can be installed on the current host OS.
+    /// Virtualization.framework requires guest macOS ≤ host macOS.
+    var isCompatibleWithHost: Bool {
+        guard let ipswMajor = majorVersion else { return true }
+        let hostMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        return ipswMajor <= hostMajor
+    }
+
+    /// Human-readable compatibility warning, or nil if compatible.
+    var compatibilityWarning: String? {
+        guard let ipswMajor = majorVersion else { return nil }
+        let hostMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        guard ipswMajor > hostMajor else { return nil }
+        return "Requires macOS \(ipswMajor) — your Mac runs macOS \(hostMajor)"
+    }
 }
 
 struct App2IPSWCachedImage: Hashable {
@@ -215,6 +237,21 @@ final class App2IPSWService: ObservableObject {
         if fileManager.fileExists(atPath: metadata.path) {
             try fileManager.removeItem(at: metadata)
         }
+    }
+
+    func importIPSWCopy(from sourceURL: URL) throws -> App2IPSWCachedImage {
+        guard sourceURL.pathExtension.lowercased() == "ipsw" else {
+            throw NSError(domain: "App2IPSW", code: 10, userInfo: [NSLocalizedDescriptionKey: "Only .ipsw files can be imported."])
+        }
+        try ensureCacheDirectory()
+        let destination = cacheDirectory.appendingPathComponent(sourceURL.lastPathComponent, isDirectory: false)
+        if fileManager.fileExists(atPath: destination.path) {
+            let values = try destination.resourceValues(forKeys: [.fileSizeKey])
+            return App2IPSWCachedImage(fileURL: destination, sizeBytes: values.fileSize.map { Int64($0) })
+        }
+        try fileManager.copyItem(at: sourceURL, to: destination)
+        let values = try destination.resourceValues(forKeys: [.fileSizeKey])
+        return App2IPSWCachedImage(fileURL: destination, sizeBytes: values.fileSize.map { Int64($0) })
     }
 
     func partialDownloadSize(filename: String) -> Int64? {
@@ -495,6 +532,7 @@ struct App2RestoreImage: Identifiable, Hashable {
     var partialBytes: Int64 = 0
     let firmwareURL: URL
     let firmwareSHA1: String?
+    var compatibilityWarning: String? = nil
 }
 
 @MainActor
@@ -558,7 +596,8 @@ final class App2RestoreImageStore: ObservableObject {
                     hasPartialDownload: partialSize != nil,
                     partialBytes: partialSize ?? 0,
                     firmwareURL: entry.firmwareURL,
-                    firmwareSHA1: entry.firmwareSHA1
+                    firmwareSHA1: entry.firmwareSHA1,
+                    compatibilityWarning: entry.compatibilityWarning
                 )
             }
 
@@ -566,33 +605,7 @@ final class App2RestoreImageStore: ObservableObject {
             let knownFilenames = Set(all.map { $0.filename })
             let orphaned = cached.filter { !knownFilenames.contains($0.filename) }
             for cachedImage in orphaned {
-                let filename = cachedImage.filename
-                let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
-                let title = baseName.isEmpty ? filename : baseName
-
-                let guessed = guessVersionAndBuild(from: filename)
-                let version = guessed?.version ?? "Unknown"
-                let build = guessed?.build ?? "Unknown"
-                let displayName: String
-                if let guessed {
-                    displayName = "macOS \(guessed.version) (\(guessed.build))"
-                } else {
-                    displayName = title
-                }
-
-                let image = App2RestoreImage(
-                    id: "cached:\(filename)",
-                    name: displayName,
-                    version: version,
-                    build: build,
-                    filename: filename,
-                    sizeDescription: cachedImage.sizeDescription,
-                    isDownloaded: true,
-                    isDownloading: false,
-                    firmwareURL: cachedImage.fileURL,
-                    firmwareSHA1: nil
-                )
-                all.append(image)
+                all.append(makeOrphanImage(from: cachedImage))
             }
 
             // Keep feed order first, then orphaned cached entries sorted by filename.
@@ -602,13 +615,19 @@ final class App2RestoreImageStore: ObservableObject {
                 let tail = all.suffix(all.count - feedCount).sorted {
                     $0.filename.localizedCaseInsensitiveCompare($1.filename) == .orderedAscending
                 }
-                images = Array(head + tail)
+                withAnimation {
+                    images = Array(head + tail)
+                }
             } else {
-                images = all
+                withAnimation {
+                    images = all
+                }
             }
         } catch {
             errorMessage = error.localizedDescription
-            images = []
+            withAnimation {
+                images = []
+            }
         }
         isLoading = false
     }
@@ -726,6 +745,44 @@ final class App2RestoreImageStore: ObservableObject {
         }
     }
 
+    func deleteImage(_ image: App2RestoreImage) {
+        do {
+            try service.deleteCachedImage(filename: image.filename)
+            withAnimation {
+                images.removeAll { $0.id == image.id }
+            }
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func importFiles(_ urls: [URL]) {
+        let ipswURLs = urls.filter { $0.pathExtension.lowercased() == "ipsw" }
+        guard !ipswURLs.isEmpty else { return }
+        var errors: [String] = []
+        var imported: [App2IPSWCachedImage] = []
+        for url in ipswURLs {
+            do {
+                imported.append(try service.importIPSWCopy(from: url))
+            } catch {
+                errors.append(error.localizedDescription)
+            }
+        }
+        if !errors.isEmpty {
+            errorMessage = errors.joined(separator: "\n")
+        }
+        // Add newly imported images directly instead of a full reload.
+        let existingFilenames = Set(images.map { $0.filename })
+        let newImages = imported
+            .filter { !existingFilenames.contains($0.filename) }
+            .map { makeOrphanImage(from: $0) }
+        if !newImages.isEmpty {
+            withAnimation {
+                images.append(contentsOf: newImages)
+            }
+        }
+    }
+
     func trashFailedImage(filename: String) {
         let url = service.cacheDirectory.appendingPathComponent(filename, isDirectory: false)
         do {
@@ -737,6 +794,44 @@ final class App2RestoreImageStore: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    private func makeOrphanImage(from cachedImage: App2IPSWCachedImage) -> App2RestoreImage {
+        let filename = cachedImage.filename
+        let baseName = URL(fileURLWithPath: filename).deletingPathExtension().lastPathComponent
+        let title = baseName.isEmpty ? filename : baseName
+
+        let guessed = guessVersionAndBuild(from: filename)
+        let version = guessed?.version ?? "Unknown"
+        let build = guessed?.build ?? "Unknown"
+        let displayName: String
+        if let guessed {
+            displayName = "macOS \(guessed.version) (\(guessed.build))"
+        } else {
+            displayName = title
+        }
+
+        var warning: String? = nil
+        if let major = version.split(separator: ".").first.flatMap({ Int($0) }) {
+            let hostMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+            if major > hostMajor {
+                warning = "Requires macOS \(major) — your Mac runs macOS \(hostMajor)"
+            }
+        }
+
+        return App2RestoreImage(
+            id: "cached:\(filename)",
+            name: displayName,
+            version: version,
+            build: build,
+            filename: filename,
+            sizeDescription: cachedImage.sizeDescription,
+            isDownloaded: true,
+            isDownloading: false,
+            firmwareURL: cachedImage.fileURL,
+            firmwareSHA1: nil,
+            compatibilityWarning: warning
+        )
     }
 
     // Best-effort parser for filenames like:
