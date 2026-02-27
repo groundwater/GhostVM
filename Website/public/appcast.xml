@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 2.4.0</title>
+      <pubDate>Fri, 27 Feb 2026 14:10:02 -0800</pubDate>
+      <sparkle:version>2.4.0</sparkle:version>
+      <sparkle:shortVersionString>2.4.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Fix port forward deadlock with blocking vsock I/O</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v2.4.0/GhostVM-2.4.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="u2lT/z5+0tKs7d+pCDXbIXQiCBwAoB/roSXyVO4awvveaUqfKqU9Q04CpYO44+CGD0h3BJKxsmqRhUe1p5UKBA=="
+        length="32018936"
+      />
+    </item>
+    <item>
       <title>GhostVM 2.1.0</title>
       <pubDate>Mon, 23 Feb 2026 22:56:00 -0800</pubDate>
       <sparkle:version>2.1.0</sparkle:version>
