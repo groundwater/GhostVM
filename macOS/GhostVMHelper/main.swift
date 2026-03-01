@@ -57,6 +57,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var healthCheckService: HealthCheckService?
     private var autoPortMapService: AutoPortMapService?
     private var hostAPIService: HostAPIService?
+    private var customNetworkService: CustomNetworkService?
+    private var pendingCustomNetworkAttachments: [CustomNetworkAttachment] = []
     private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
     private var fileCountCancellable: AnyCancellable?
@@ -1254,11 +1256,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
             // Build VM configuration
             let builder = VMConfigurationBuilder(layout: layout!, storedConfig: config)
-            let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+            let buildResult = try builder.makeBuildResult(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+            self.pendingCustomNetworkAttachments = buildResult.customNetworkAttachments
 
             // Create VM
             vmQueue = DispatchQueue(label: "ghostvm.helper.\(vmName)")
-            virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue!)
+            virtualMachine = VZVirtualMachine(configuration: buildResult.configuration, queue: vmQueue!)
             virtualMachine!.delegate = self
 
             // Create window and view
@@ -1687,6 +1690,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.updateBlockedPortsDisplay(blocked)
             }
 
+        // 8. Custom network processors
+        if !pendingCustomNetworkAttachments.isEmpty {
+            let cnService = CustomNetworkService()
+            cnService.start(attachments: pendingCustomNetworkAttachments)
+            self.customNetworkService = cnService
+            pendingCustomNetworkAttachments = []
+            NSLog("GhostVMHelper: Custom network service started")
+        }
+
         NSLog("GhostVMHelper: Services started for '\(vmName)'")
     }
 
@@ -1742,6 +1754,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         hostAPIService?.stop()
         hostAPIService = nil
+
+        customNetworkService?.stop()
+        customNetworkService = nil
 
         ghostClient = nil
     }

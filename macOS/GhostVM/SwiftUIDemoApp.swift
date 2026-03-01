@@ -71,13 +71,11 @@ struct GhostVMSwiftUIApp: App {
                 .environment(\.sparkleUpdater, appDelegate.updaterController.updater)
         }
 
-        #if DEBUG
         Window("Networks", id: "networks") {
             CustomNetworkListView()
                 .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
                 .frame(minWidth: 640, minHeight: 440)
         }
-        #endif
 
         WindowGroup("Restore Images", id: "restoreImages") {
             RestoreImagesDemoView()
@@ -328,7 +326,6 @@ struct VMListDemoView: View {
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("vmList.imagesButton")
 
-                #if DEBUG
                 Button {
                     openWindow(id: "networks")
                 } label: {
@@ -336,7 +333,6 @@ struct VMListDemoView: View {
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("vmList.networksButton")
-                #endif
             }
             .padding(.top, 8)
             .padding(.horizontal, 12)
@@ -787,13 +783,9 @@ struct CreateVMDemoView: View {
             }
 
             labeledRow("Network") {
-                #if DEBUG
                 NetworkInterfaceListView(interfaces: $networkInterfaces) {
                     openWindow(id: "networks")
                 }
-                #else
-                NetworkInterfaceListView(interfaces: $networkInterfaces)
-                #endif
             }
 
             Spacer(minLength: 8)
@@ -1438,13 +1430,9 @@ struct EditVMView: View {
                         }
 
                         labeledRow("Network") {
-                            #if DEBUG
                             NetworkInterfaceListView(interfaces: $networkInterfaces) {
                                 openWindow(id: "networks")
                             }
-                            #else
-                            NetworkInterfaceListView(interfaces: $networkInterfaces)
-                            #endif
                         }
 
                         if networkInterfaces.contains(where: { $0.networkConfig.mode == .nat }) {
@@ -2531,12 +2519,10 @@ struct SettingsDemoView: View {
                 .tabItem { Label("General", systemImage: "gearshape") }
                 .accessibilityIdentifier("settings.generalTab")
 
-            #if DEBUG
             CustomNetworkListView()
                 .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
                 .tabItem { Label("Networks", systemImage: "network") }
                 .accessibilityIdentifier("settings.networksTab")
-            #endif
         }
         .frame(minWidth: 640, minHeight: 440)
         .onAppear {

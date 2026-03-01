@@ -28,6 +28,29 @@ struct DHCPSectionView: View {
                         .accessibilityIdentifier("dhcp.rangeEndField")
                 }
 
+                HStack(spacing: 8) {
+                    Text("Lease Time:")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 80, alignment: .leading)
+                    TextField("Seconds", value: $dhcp.leaseTime, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                        .accessibilityIdentifier("dhcp.leaseTimeField")
+                    Text("seconds")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+
+                HStack(spacing: 8) {
+                    Text("Domain:")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 80, alignment: .leading)
+                    TextField("e.g. vm.local", text: $dhcp.domainSuffix)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 200)
+                        .accessibilityIdentifier("dhcp.domainSuffixField")
+                }
+
                 StaticLeaseListView(leases: $dhcp.staticLeases)
             }
         }

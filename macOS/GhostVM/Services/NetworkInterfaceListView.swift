@@ -181,11 +181,7 @@ struct NetworkInterfaceListView: View {
 
             Divider().padding(.vertical, 2)
 
-            #if DEBUG
             NetworkSettingsView(networkConfig: iface.networkConfig, openNetworksWindow: openNetworksWindow)
-            #else
-            NetworkSettingsView(networkConfig: iface.networkConfig)
-            #endif
 
             HStack {
                 Spacer()

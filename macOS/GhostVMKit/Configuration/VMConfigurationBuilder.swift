@@ -2,6 +2,32 @@ import Foundation
 import AppKit
 import Virtualization
 
+/// Info about a custom network attachment created during VM configuration.
+public struct CustomNetworkAttachment {
+    public let nicIndex: Int
+    public let customNetworkID: UUID
+    public let hostHandle: FileHandle
+    public let vmMAC: String
+
+    public init(nicIndex: Int, customNetworkID: UUID, hostHandle: FileHandle, vmMAC: String) {
+        self.nicIndex = nicIndex
+        self.customNetworkID = customNetworkID
+        self.hostHandle = hostHandle
+        self.vmMAC = vmMAC
+    }
+}
+
+/// Result of building a VM configuration, including any custom network attachments.
+public struct VMBuildResult {
+    public let configuration: VZVirtualMachineConfiguration
+    public let customNetworkAttachments: [CustomNetworkAttachment]
+
+    public init(configuration: VZVirtualMachineConfiguration, customNetworkAttachments: [CustomNetworkAttachment]) {
+        self.configuration = configuration
+        self.customNetworkAttachments = customNetworkAttachments
+    }
+}
+
 /// Builds VZVirtualMachineConfiguration from stored config and layout.
 public final class VMConfigurationBuilder {
     public let layout: VMFileLayout
@@ -12,7 +38,23 @@ public final class VMConfigurationBuilder {
         self.storedConfig = storedConfig
     }
 
+    /// Build configuration. Returns a VMBuildResult with the config and any custom network info.
+    public func makeBuildResult(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VMBuildResult {
+        var customAttachments: [CustomNetworkAttachment] = []
+        let config = try makeConfiguration(headless: headless, connectSerialToStandardIO: connectSerialToStandardIO,
+                                            runtimeSharedFolder: runtimeSharedFolder,
+                                            customNetworkAttachments: &customAttachments)
+        return VMBuildResult(configuration: config, customNetworkAttachments: customAttachments)
+    }
+
     public func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VZVirtualMachineConfiguration {
+        var ignored: [CustomNetworkAttachment] = []
+        return try makeConfiguration(headless: headless, connectSerialToStandardIO: connectSerialToStandardIO,
+                                      runtimeSharedFolder: runtimeSharedFolder,
+                                      customNetworkAttachments: &ignored)
+    }
+
+    private func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?, customNetworkAttachments: inout [CustomNetworkAttachment]) throws -> VZVirtualMachineConfiguration {
         let config = VZVirtualMachineConfiguration()
 
         config.bootLoader = VZMacOSBootLoader()
@@ -66,11 +108,24 @@ public final class VMConfigurationBuilder {
                 device.attachment = VZBridgedNetworkDeviceAttachment(interface: hostIface)
 
             case .custom:
-                // Custom network mode uses VZFileHandleNetworkDeviceAttachment,
-                // which requires a backend packet processor (not yet implemented).
-                // For now, fall back to NAT so the VM can still start.
-                print("[VMConfigurationBuilder] NIC \(index): custom mode not yet implemented, falling back to NAT")
-                device.attachment = VZNATNetworkDeviceAttachment()
+                guard let customNetworkID = nc.customNetworkID else {
+                    throw VMError.message("Custom network mode on NIC \(index) requires a network selection.")
+                }
+                // Create socketpair for packet I/O between VM and host-side processor
+                var fds: [Int32] = [0, 0]
+                guard socketpair(AF_UNIX, SOCK_DGRAM, 0, &fds) == 0 else {
+                    throw VMError.message("Failed to create socketpair for custom network on NIC \(index).")
+                }
+                let vmHandle = FileHandle(fileDescriptor: fds[0], closeOnDealloc: true)
+                let hostHandle = FileHandle(fileDescriptor: fds[1], closeOnDealloc: true)
+                device.attachment = VZFileHandleNetworkDeviceAttachment(fileHandle: vmHandle)
+
+                let vmMAC = iface.macAddress
+                customNetworkAttachments.append(CustomNetworkAttachment(
+                    nicIndex: index, customNetworkID: customNetworkID,
+                    hostHandle: hostHandle, vmMAC: vmMAC
+                ))
+                print("[VMConfigurationBuilder] NIC \(index): custom network \(customNetworkID)")
             }
 
             if let mac = VZMACAddress(string: iface.macAddress) {

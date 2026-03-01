@@ -7,19 +7,15 @@ struct NetworkSettingsView: View {
     @Binding var networkConfig: NetworkConfig
     var openNetworksWindow: (() -> Void)? = nil
     @State private var availableInterfaces: [(id: String, name: String)] = []
-    #if DEBUG
     @State private var customNetworks: [RouterConfig] = []
     private let store = CustomNetworkStore.shared
-    #endif
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Picker("Network Mode:", selection: $networkConfig.mode) {
                 Text("NAT (Shared)").tag(NetworkMode.nat)
                 Text("Bridged").tag(NetworkMode.bridged)
-                #if DEBUG
                 Text("Custom").tag(NetworkMode.custom)
-                #endif
             }
             .pickerStyle(.radioGroup)
             .onChange(of: networkConfig.mode) { newMode in
@@ -30,9 +26,7 @@ struct NetworkSettingsView: View {
         }
         .onAppear {
             loadAvailableInterfaces()
-            #if DEBUG
             loadCustomNetworks()
-            #endif
         }
     }
 
@@ -41,10 +35,8 @@ struct NetworkSettingsView: View {
         switch networkConfig.mode {
         case .bridged:
             bridgedDetail
-        #if DEBUG
         case .custom:
             customDetail
-        #endif
         default:
             Text("VM shares the host's network connection")
                 .font(.caption)
@@ -74,7 +66,6 @@ struct NetworkSettingsView: View {
         }
     }
 
-    #if DEBUG
     @ViewBuilder
     private var customDetail: some View {
         if customNetworks.isEmpty {
@@ -107,7 +98,6 @@ struct NetworkSettingsView: View {
             .accessibilityIdentifier("networkSettings.manageNetworksButton")
         }
     }
-    #endif
 
     private func handleModeChange(_ newMode: NetworkMode) {
         if newMode == .nat {
@@ -119,14 +109,12 @@ struct NetworkSettingsView: View {
                 networkConfig.bridgeInterfaceIdentifier = availableInterfaces.first?.id
             }
         }
-        #if DEBUG
         if newMode == .custom {
             networkConfig.bridgeInterfaceIdentifier = nil
             if networkConfig.customNetworkID == nil {
                 networkConfig.customNetworkID = customNetworks.first?.id
             }
         }
-        #endif
     }
 
     private func loadAvailableInterfaces() {
@@ -138,9 +126,7 @@ struct NetworkSettingsView: View {
         .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    #if DEBUG
     private func loadCustomNetworks() {
         customNetworks = (try? store.list()) ?? []
     }
-    #endif
 }

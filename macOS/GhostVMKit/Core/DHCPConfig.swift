@@ -35,17 +35,34 @@ public struct DHCPConfig: Codable, Equatable {
     public var enabled: Bool
     public var rangeStart: String
     public var rangeEnd: String
+    public var leaseTime: Int
+    public var domainSuffix: String
     public var staticLeases: [DHCPStaticLease]
 
     public init(
         enabled: Bool = true,
         rangeStart: String = "10.100.0.10",
         rangeEnd: String = "10.100.0.254",
+        leaseTime: Int = 3600,
+        domainSuffix: String = "",
         staticLeases: [DHCPStaticLease] = []
     ) {
         self.enabled = enabled
         self.rangeStart = rangeStart
         self.rangeEnd = rangeEnd
+        self.leaseTime = leaseTime
+        self.domainSuffix = domainSuffix
         self.staticLeases = staticLeases
+    }
+
+    // Backward-compatible decoding
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decode(Bool.self, forKey: .enabled)
+        rangeStart = try container.decode(String.self, forKey: .rangeStart)
+        rangeEnd = try container.decode(String.self, forKey: .rangeEnd)
+        leaseTime = try container.decodeIfPresent(Int.self, forKey: .leaseTime) ?? 3600
+        domainSuffix = try container.decodeIfPresent(String.self, forKey: .domainSuffix) ?? ""
+        staticLeases = try container.decode([DHCPStaticLease].self, forKey: .staticLeases)
     }
 }
