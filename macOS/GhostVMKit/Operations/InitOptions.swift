@@ -9,7 +9,7 @@ public struct InitOptions {
     public var sharedFolderPath: String?
     public var sharedFolderWritable: Bool
     public var sharedFolders: [SharedFolderConfig]
-    public var networkConfig: NetworkConfig?
+    public var networkInterfaces: [NetworkInterfaceConfig]
 
     public init(
         cpus: Int = 4,
@@ -19,7 +19,7 @@ public struct InitOptions {
         sharedFolderPath: String? = nil,
         sharedFolderWritable: Bool = false,
         sharedFolders: [SharedFolderConfig] = [],
-        networkConfig: NetworkConfig? = nil
+        networkInterfaces: [NetworkInterfaceConfig] = [NetworkInterfaceConfig()]
     ) {
         self.cpus = cpus
         self.memoryGiB = memoryGiB
@@ -28,6 +28,6 @@ public struct InitOptions {
         self.sharedFolderPath = sharedFolderPath
         self.sharedFolderWritable = sharedFolderWritable
         self.sharedFolders = sharedFolders
-        self.networkConfig = networkConfig
+        self.networkInterfaces = networkInterfaces
     }
 }
