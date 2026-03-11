@@ -152,7 +152,7 @@ final class App2IPSWService: ObservableObject {
     private let feedURLKey = "SwiftUIIPSWFeedURL"
     private let cacheDirectoryKey = "SwiftUIIPSWCacheDirectoryPath"
 
-    static let defaultFeedURL = URL(string: "https://mesu.apple.com/assets/macos/com_apple_macOSIPSW/com_apple_macOSIPSW.xml")!
+    static let defaultFeedURL = URL(string: "https://ghostvm.org/ipsw.xml")!
 
     @Published private(set) var feedURL: URL
     @Published private(set) var cacheDirectory: URL
