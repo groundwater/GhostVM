@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>RestoreImages</key>
+	<array>
+		<dict>
+			<key>ProductVersion</key>
+			<string>15.6.1</string>
+			<key>BuildVersion</key>
+			<string>24G90</string>
+			<key>FirmwareURL</key>
+			<string>https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw</string>
+			<key>FirmwareSHA1</key>
+			<string>a19ba56bb931769580060647a466c5b2d09da761</string>
+		</dict>
+		<dict>
+			<key>ProductVersion</key>
+			<string>26.3.2</string>
+			<key>BuildVersion</key>
+			<string>25D2140</string>
+			<key>FirmwareURL</key>
+			<string>https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-94879/40A2B65E-4E49-4EAA-8BEC-62A305007488/UniversalMac_26.3.2_25D2140_Restore.ipsw</string>
+			<key>FirmwareSHA1</key>
+			<string>338037f50ea1d6b39e7e9f82a5276e8b1f693ee8</string>
+		</dict>
+	</array>
+</dict>
+</plist>

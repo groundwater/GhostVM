@@ -2524,7 +2524,7 @@ struct SettingsDemoView: View {
 
             labeledRow("IPSW Feed URL") {
                 HStack(spacing: 8) {
-                    TextField("https://mesu.apple.com/…", text: $feedURLString)
+                    TextField("https://ghostvm.org/ipsw.xml", text: $feedURLString)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("settings.feedURLField")
                     Button("Verify") {
