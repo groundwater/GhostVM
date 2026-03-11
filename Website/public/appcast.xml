@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 2.5.0</title>
+      <pubDate>Wed, 11 Mar 2026 12:05:14 -0700</pubDate>
+      <sparkle:version>2.5.0</sparkle:version>
+      <sparkle:shortVersionString>2.5.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Self-host IPSW restore image feed with macOS 15.6.1 and macOS 26.3.2 entries</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v2.5.0/GhostVM-2.5.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="cE6L5b4YEXykenumzyca//yW2jU5S8WriI9vdEePanKrApH4nV5gGL6lYovd4FgiactIQsNzK10dQlUM/0vsDQ=="
+        length="32019296"
+      />
+    </item>
+    <item>
       <title>GhostVM 2.4.0</title>
       <pubDate>Fri, 27 Feb 2026 14:10:02 -0800</pubDate>
       <sparkle:version>2.4.0</sparkle:version>
