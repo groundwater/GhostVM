@@ -5,7 +5,11 @@ import { siteConfig } from "@/config/site";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Getting Started - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Getting Started with GhostVM - Mac VM Setup Guide",
+  description:
+    "Get started with GhostVM in minutes. Install the app, create your first macOS virtual machine, and learn the basics of the GUI and CLI.",
+};
 
 export default function GettingStarted() {
   return (

@@ -2,7 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { docsNav } from "@/lib/docs-nav";
 
-export const metadata: Metadata = { title: "Documentation - GhostVM" };
+export const metadata: Metadata = {
+  title: "Documentation - GhostVM Mac Virtual Machine",
+  description:
+    "GhostVM documentation. Learn how to create macOS virtual machines, use the CLI, configure services, and build secure development environments.",
+};
 
 export default function DocsIndex() {
   return (

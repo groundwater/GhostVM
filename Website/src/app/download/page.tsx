@@ -4,7 +4,9 @@ import { Download, Monitor, Cpu, Terminal } from "lucide-react";
 import { siteConfig } from "@/config/site";
 
 export const metadata: Metadata = {
-  title: "Download - GhostVM",
+  title: "Download GhostVM - Mac Virtual Machine for Apple Silicon",
+  description:
+    "Download GhostVM for macOS. Free, open-source Mac virtual machine app for Apple Silicon (M1/M2/M3/M4). Includes GUI app and vmctl CLI.",
 };
 
 export default function DownloadPage() {

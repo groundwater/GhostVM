@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-export const metadata: Metadata = { title: "Blog - GhostVM" };
+export const metadata: Metadata = {
+  title: "Blog - GhostVM Mac Virtualization",
+  description:
+    "Technical deep dives into macOS virtualization, Apple's Virtualization.framework, and building secure development environments on Mac.",
+};
 
 const posts = [
   {
