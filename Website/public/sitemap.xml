@@ -11,6 +11,11 @@
     <priority>0.9</priority>
   </url>
   <url>
+    <loc>https://ghostvm.org/sandboxed-macos-environment</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
     <loc>https://ghostvm.org/docs</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
