@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Architecture - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Architecture - How GhostVM Works on Apple Silicon",
+  description:
+    "GhostVM architecture: main app, helper processes, vmctl CLI, GhostTools agent, and virtio-vsock services. Built on Apple's Virtualization.framework.",
+};
 
 export default function Architecture() {
   return (

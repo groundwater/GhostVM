@@ -3,7 +3,11 @@ import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 import Image from "next/image";
 
-export const metadata: Metadata = { title: "GhostTools - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "GhostTools - Guest Integration App for GhostVM",
+  description:
+    "GhostTools is the companion app that runs inside macOS VMs. Enables clipboard sync, file transfer, port detection, and host-guest communication.",
+};
 
 export default function GhostTools() {
   return (

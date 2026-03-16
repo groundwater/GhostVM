@@ -3,7 +3,11 @@ import Link from "next/link";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Clipboard Sync - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Clipboard Sync - GhostVM Host-Guest Copy Paste",
+  description:
+    "Bidirectional clipboard sync between Mac and VM. Copy on host, paste in guest. Permission controls for secure workflows. Works with GhostTools.",
+};
 
 export default function ClipboardSync() {
   return (

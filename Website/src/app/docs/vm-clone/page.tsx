@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "VM Clone - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Instant VM Cloning - GhostVM APFS Copy-on-Write",
+  description:
+    "Clone macOS VMs instantly with APFS copy-on-write. Near-zero disk overhead, fresh identity, perfect for throwaway test environments and templates.",
+};
 
 export default function VMClone() {
   return (

@@ -34,6 +34,29 @@ export const metadata: Metadata = {
   },
 }
 
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  name: "GhostVM",
+  applicationCategory: "DeveloperApplication",
+  operatingSystem: "macOS",
+  offers: {
+    "@type": "Offer",
+    price: "0",
+    priceCurrency: "USD",
+  },
+  description:
+    "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects.",
+  url: "https://ghostvm.org",
+  downloadUrl: "https://github.com/groundwater/GhostVM/releases/latest",
+  softwareVersion: "2.5.0",
+  author: {
+    "@type": "Organization",
+    name: "GhostVM",
+    url: "https://ghostvm.org",
+  },
+}
+
 export default function RootLayout({
   children,
 }: {
@@ -41,6 +64,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        />
+      </head>
       <body className="min-h-screen bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100 antialiased">
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <Navbar />

@@ -5,7 +5,9 @@ import PrevNextNav from "@/components/docs/PrevNextNav";
 import { siteConfig } from "@/config/site";
 
 export const metadata: Metadata = {
-  title: "Building from Source - GhostVM Docs",
+  title: "Build GhostVM from Source - Xcode Setup Guide",
+  description:
+    "Build GhostVM from source with Xcode 15+ and XcodeGen. Clone the repo, generate project, and compile the app. Contributor guide for Mac developers.",
 };
 
 export default function BuildingFromSource() {

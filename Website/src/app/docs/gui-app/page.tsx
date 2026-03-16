@@ -1,7 +1,11 @@
 import type { Metadata } from "next";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "GUI App - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "GhostVM GUI App - Native macOS VM Manager",
+  description:
+    "GhostVM.app is a native SwiftUI app for managing Mac virtual machines. Create VMs, manage snapshots, configure port forwards, and sync clipboards.",
+};
 
 export default function GUIApp() {
   return (

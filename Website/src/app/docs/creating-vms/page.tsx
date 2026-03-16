@@ -2,7 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Creating VMs - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Creating Virtual Machines - GhostVM Mac VM Guide",
+  description:
+    "Learn how to create macOS virtual machines with GhostVM. Step-by-step guide for GUI and CLI. Self-contained VM bundles on Apple Silicon.",
+};
 
 export default function CreatingVMs() {
   return (

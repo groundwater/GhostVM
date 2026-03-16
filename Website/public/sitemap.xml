@@ -11,6 +11,26 @@
     <priority>0.9</priority>
   </url>
   <url>
+    <loc>https://ghostvm.org/sandboxed-macos-environment</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://ghostvm.org/macos-virtual-machine-for-development</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://ghostvm.org/apple-silicon-mac-virtual-machines</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://ghostvm.org/mac-vm-vs-docker-parallels</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
     <loc>https://ghostvm.org/docs</loc>
     <changefreq>weekly</changefreq>
     <priority>0.8</priority>
@@ -109,5 +129,15 @@
     <loc>https://ghostvm.org/blog/why-you-cant-clone-your-mac</loc>
     <changefreq>yearly</changefreq>
     <priority>0.6</priority>
+  </url>
+  <url>
+    <loc>https://ghostvm.org/ghostvm-for-ai-agents</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://ghostvm.org/macos-vm-vs-containers-sandboxing</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.9</priority>
   </url>
 </urlset>
