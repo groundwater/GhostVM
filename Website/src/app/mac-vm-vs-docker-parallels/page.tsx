@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Mac VM vs Docker vs Parallels - Which Should You Use? (2025)",
+  title: "Mac VM vs Docker vs Parallels - Which Should You Use? (2026)",
   description:
     "Compare Mac virtual machines, Docker, and Parallels Desktop on Apple Silicon. Performance, isolation, use cases, and when to use each.",
   openGraph: {
