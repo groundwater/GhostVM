@@ -1,7 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { Download, Monitor, Cpu, Terminal } from "lucide-react";
+import { Monitor, Cpu, Terminal } from "lucide-react";
 import { siteConfig } from "@/config/site";
+import DownloadButton from "@/components/DownloadButton";
 
 export const metadata: Metadata = {
   title: "Download GhostVM - Mac Virtual Machine for Apple Silicon",
@@ -19,15 +20,7 @@ export default function DownloadPage() {
       </p>
 
       <div className="max-w-md mx-auto mb-12">
-        <a
-          href={`${siteConfig.repo}/releases/latest`}
-          className="flex items-center justify-center gap-3 px-8 py-4 rounded-xl bg-ghost-600 hover:bg-ghost-700 text-white font-semibold transition-colors shadow-lg w-full"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Download className="w-5 h-5" />
-          Download Latest Release
-        </a>
+        <DownloadButton />
         <p className="text-center text-sm text-gray-500 mt-3">
           or{" "}
           <a
