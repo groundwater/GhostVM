@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Snapshots - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "VM Snapshots - GhostVM State Management",
+  description:
+    "Create and manage VM snapshots in GhostVM. Save full disk state, revert to previous checkpoints, and maintain clean development environments.",
+};
 
 export default function Snapshots() {
   return (

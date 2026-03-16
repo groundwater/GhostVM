@@ -3,7 +3,11 @@ import Link from "next/link";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "File Transfer - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "File Transfer - GhostVM Drag and Drop",
+  description:
+    "Transfer files between Mac and VM with drag-and-drop. Automatic quarantine for Gatekeeper. Send files from guest to host securely.",
+};
 
 export default function FileTransfer() {
   return (

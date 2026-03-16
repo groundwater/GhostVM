@@ -2,7 +2,11 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Services - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Host-Guest Services - GhostVM Integration",
+  description:
+    "GhostVM host-guest services: clipboard sync, file transfer, port forwarding, and shared folders. High-performance virtio-vsock integration.",
+};
 
 export default function Services() {
   return (

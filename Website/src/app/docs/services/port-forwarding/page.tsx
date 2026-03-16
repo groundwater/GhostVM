@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Port Forwarding - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Port Forwarding - GhostVM VM Network Access",
+  description:
+    "Map VM ports to localhost for instant access. Auto-detect guest ports with process names. Access dev servers running inside Mac VMs.",
+};
 
 export default function PortForwarding() {
   return (

@@ -4,6 +4,8 @@ import Callout from "@/components/docs/Callout";
 
 export const metadata: Metadata = {
   title: "Why You Can't Clone Your Mac Into a VM - GhostVM",
+  description:
+    "Apple's Virtualization.framework doesn't let you snapshot a running Mac into a VM. Here's why that's a fundamental limitation, not a missing feature.",
 };
 
 export default function WhyYouCantCloneYourMac() {

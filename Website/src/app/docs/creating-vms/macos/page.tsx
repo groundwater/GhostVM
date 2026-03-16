@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "macOS VMs - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Create macOS Virtual Machines - GhostVM IPSW Guide",
+  description:
+    "Create macOS VMs from IPSW restore images. Configure CPU, memory, disk, and shared folders. Works with macOS 13+ on Apple Silicon M1/M2/M3/M4.",
+};
 
 export default function MacOSVMs() {
   return (

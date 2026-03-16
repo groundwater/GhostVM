@@ -2,7 +2,11 @@ import type { Metadata } from "next";
 import CodeBlock from "@/components/docs/CodeBlock";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "CLI Reference - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "vmctl CLI Reference - GhostVM Mac VM Commands",
+  description:
+    "Complete vmctl CLI reference. Create, start, stop, and manage macOS virtual machines from the terminal. Snapshots, remote commands, and automation.",
+};
 
 export default function CLIReference() {
   return (

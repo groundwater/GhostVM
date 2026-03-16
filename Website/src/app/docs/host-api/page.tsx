@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Host API - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Host API - GhostVM Automation & Scripting",
+  description:
+    "Programmatic access to GhostVM via Unix socket. HTTP/1.1 API for clipboard, exec, file transfer, and app control. Automate Mac VMs with curl or Python.",
+};
 
 export default function HostAPI() {
   return (

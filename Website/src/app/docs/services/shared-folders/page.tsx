@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "Shared Folders - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "Shared Folders - GhostVM VirtioFS Integration",
+  description:
+    "Share Mac directories with VMs using VirtioFS. Instant file access, no transfer needed. Read-only or writable modes for secure development.",
+};
 
 export default function SharedFolders() {
   return (

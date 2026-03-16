@@ -3,7 +3,11 @@ import CodeBlock from "@/components/docs/CodeBlock";
 import Callout from "@/components/docs/Callout";
 import PrevNextNav from "@/components/docs/PrevNextNav";
 
-export const metadata: Metadata = { title: "VM Bundles - GhostVM Docs" };
+export const metadata: Metadata = {
+  title: "VM Bundles - Self-Contained Mac Virtual Machines",
+  description:
+    "GhostVM stores VMs as portable .GhostVM bundles. Contains disk image, config, snapshots, and custom icons. Copy, move, or back up entire VMs easily.",
+};
 
 export default function VMBundles() {
   return (
