@@ -5,7 +5,7 @@ export default function Footer() {
   return (
     <footer className="border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
           <div>
             <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">
               Product
@@ -41,6 +41,61 @@ export default function Footer() {
                   className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
                 >
                   Host API
+                </Link>
+              </li>
+            </ul>
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">
+              Guides
+            </h3>
+            <ul className="space-y-2">
+              <li>
+                <Link
+                  href="/macos-vm-vs-containers-sandboxing"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  VMs vs Containers
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/ghostvm-for-ai-agents"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  GhostVM for AI Agents
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/sandboxed-macos-environment"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  Sandboxing Untrusted Code
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/macos-virtual-machine-for-development"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  Mac VMs for Development
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/apple-silicon-mac-virtual-machines"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  Apple Silicon VMs
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/mac-vm-vs-docker-parallels"
+                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
+                >
+                  VM vs Docker vs Parallels
                 </Link>
               </li>
             </ul>
