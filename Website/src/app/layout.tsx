@@ -6,13 +6,13 @@ import "./globals.css"
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://ghostvm.org"),
-  title: "GhostVM - Agent Workspaces on macOS",
+  title: "GhostVM - Mac Virtual Machine for Secure Development",
   description:
-    "GhostVM is a native macOS app for running isolated agent workspaces on macOS. Deep host integration, scriptable CLI, instant clones, and self-contained bundles.",
+    "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects. Apple Silicon native with instant clones.",
   openGraph: {
-    title: "GhostVM - Agent Workspaces on macOS",
+    title: "GhostVM - Mac Virtual Machine for Secure Development",
     description:
-      "GhostVM is a native macOS app for running isolated agent workspaces on macOS. Deep host integration, scriptable CLI, instant clones, and self-contained bundles.",
+      "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects. Apple Silicon native.",
     url: "https://ghostvm.org",
     siteName: "GhostVM",
     images: [
@@ -27,9 +27,9 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
-    title: "GhostVM - Agent Workspaces on macOS",
+    title: "GhostVM - Mac Virtual Machine for Secure Development",
     description:
-      "GhostVM is a native macOS app for running isolated agent workspaces on macOS. Deep host integration, scriptable CLI, instant clones, and self-contained bundles.",
+      "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects. Apple Silicon native.",
     images: ["https://ghostvm.org/images/screenshots/hero-screenshot.jpg"],
   },
 }
