@@ -7,7 +7,7 @@ description: GhostVM app architecture, file layout, and design patterns. Use whe
 
 ## Two Parallel Surfaces
 
-### 1. vmctl CLI (`GhostVM/vmctl.swift`)
+### 1. vmctl CLI (`GhostVM/macOS/vmctl/vmctl.swift`)
 
 Single-file CLI tool for VM operations. Contains:
 - `VMController` - VM lifecycle operations
@@ -19,7 +19,7 @@ Commands: `init`, `install`, `start`, `stop`, `status`, `snapshot`
 
 Builds as standalone binary AND embedded in app.
 
-### 2. SwiftUI App (`GhostVM/`)
+### 2. SwiftUI App (`GhostVM/macOS/GhostVM/`)
 
 | File | Purpose |
 |------|---------|

@@ -14,21 +14,22 @@ If no version is provided, ask the user what version to update the appcast for.
 
 1. **Clean working tree** — abort if `git status --porcelain` shows changes
 2. **On main branch** — abort if not on `main`
-3. **GitHub release exists** — verify `gh release view v<VERSION>` succeeds
-4. **DMG available** — check if `build/dist/GhostVM-<VERSION>.dmg` exists locally. If not, download it:
+3. **GitHub release exists** — verify `gh release view v<VERSION> -R groundwater/GhostVM` succeeds
+4. **DMG available** — check if `GhostVM/build/dist/GhostVM-<VERSION>.dmg` exists locally. If not, download it:
    ```
-   mkdir -p build/dist
-   gh release download v<VERSION> --pattern "GhostVM-<VERSION>.dmg" --dir build/dist
+   mkdir -p GhostVM/build/dist
+   gh release download v<VERSION> -R groundwater/GhostVM --pattern "GhostVM-<VERSION>.dmg" --dir GhostVM/build/dist
    ```
 
 ## 2. Sign DMG for Sparkle
 
-Run `make sparkle-sign VERSION=<VERSION>`. Capture the `edSignature` and `length` values from the output.
+Run `make -C GhostVM sparkle-sign VERSION=<VERSION>`. Capture the `edSignature` and `length` values from the output.
 
-## 3. Appcast PR
+## 3. Appcast PR (subtree)
 
-1. Create branch: `git checkout -b appcast/v<VERSION>`
-2. Update `Website/public/appcast.xml` — add a new `<item>` entry **above** existing items (newest first):
+Changes to `GhostVM/` must go through a PR on the upstream repo.
+
+1. Update `GhostVM/Website/public/appcast.xml` — add a new `<item>` entry **above** existing items (newest first):
    ```xml
    <item>
      <title>GhostVM <VERSION></title>
@@ -45,14 +46,15 @@ Run `make sparkle-sign VERSION=<VERSION>`. Capture the `edSignature` and `length
      />
    </item>
    ```
-   - Replace `FROM_SIGN_UPDATE` and `DMG_SIZE_BYTES` with the values from `make sparkle-sign`
+   - Replace `FROM_SIGN_UPDATE` and `DMG_SIZE_BYTES` with the values from `make -C GhostVM sparkle-sign`
    - Use `date -R` for `DATE_RFC2822`
-   - Get release notes from `gh release view v<VERSION> --json body -q .body` and summarize into `<li>` items
-3. Commit: `git add Website/public/appcast.xml && git commit -m "Update appcast for v<VERSION>"`
-4. Push: `git push -u origin appcast/v<VERSION>`
-5. Create PR: `gh pr create --title "Update appcast for v<VERSION>" --body "Add Sparkle update feed entry for v<VERSION>."`
-6. Merge (squash): `gh pr merge --squash --auto`
-7. Wait for merge, then: `git checkout main && git pull`
+   - Get release notes from `gh release view v<VERSION> -R groundwater/GhostVM --json body -q .body` and summarize into `<li>` items
+2. Commit locally: `git add GhostVM/Website/public/appcast.xml && git commit -m "Update appcast for v<VERSION>"`
+3. Push subtree to upstream branch: `git subtree push --prefix=GhostVM ghostvm appcast/v<VERSION>`
+4. Create PR on upstream: `gh pr create -R groundwater/GhostVM --head appcast/v<VERSION> --title "Update appcast for v<VERSION>" --body "Add Sparkle update feed entry for v<VERSION>."`
+5. Merge (squash): `gh pr merge -R groundwater/GhostVM --squash --auto`
+6. Wait for merge, then pull back: `git subtree pull --prefix=GhostVM ghostvm main --squash`
+7. Push dev repo: `git push`
 
 ## 4. Post-update
 

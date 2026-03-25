@@ -16,12 +16,12 @@ gh auth login  # HTTPS, device flow recommended
 
 Set default repo to avoid repeating `--repo`:
 ```bash
-gh repo set-default groundwater/book-editor
+gh repo set-default groundwater/GhostVM
 ```
 
 ## Core Principles
 
-- Always specify target repo explicitly: `--repo groundwater/book-editor` (or set default)
+- Always specify target repo explicitly: `--repo groundwater/GhostVM` (or set default)
 - Use `--json` with `jq` for scriptable outputs over text parsing
 - Use real newlines in `--body` (heredocs, not literal `\n`)
 - Prefer squash merges unless repo requires otherwise
@@ -32,35 +32,35 @@ gh repo set-default groundwater/book-editor
 ### View Issue
 Inspect status or fetch fields for scripts:
 ```bash
-gh issue view 180 --repo groundwater/book-editor --json number,title,state,labels,assignees,url
+gh issue view 180 --repo groundwater/GhostVM --json number,title,state,labels,assignees,url
 ```
 
 ### Edit Issue
 Add labels:
 ```bash
-gh issue edit 180 --repo groundwater/book-editor --add-label codex
+gh issue edit 180 --repo groundwater/GhostVM --add-label codex
 ```
 
 Replace body via heredoc:
 ```bash
-gh issue edit 180 --repo groundwater/book-editor --body "$(cat ./tmp/issue-180.md)"
+gh issue edit 180 --repo groundwater/GhostVM --body "$(cat ./tmp/issue-180.md)"
 ```
 
 ### Comment on Issue
 Minimal status updates or linking PRs:
 ```bash
-gh issue comment 180 --repo groundwater/book-editor --body "All acceptance criteria completed. Opened PR #196."
+gh issue comment 180 --repo groundwater/GhostVM --body "All acceptance criteria completed. Opened PR #196."
 ```
 
 ### List/Search Issues
 Filter by state/label/assignee:
 ```bash
-gh issue list --repo groundwater/book-editor --label fix/refactor --state open --limit 50
+gh issue list --repo groundwater/GhostVM --label fix/refactor --state open --limit 50
 ```
 
 ### Close Issue
 ```bash
-gh issue close 180 --repo groundwater/book-editor --comment "Fixed via #196"
+gh issue close 180 --repo groundwater/GhostVM --comment "Fixed via #196"
 ```
 
 ## Pull Request Operations
@@ -69,7 +69,7 @@ gh issue close 180 --repo groundwater/book-editor --comment "Fixed via #196"
 Use heredoc for multi-line body:
 ```bash
 gh pr create \
-  --repo groundwater/book-editor \
+  --repo groundwater/GhostVM \
   --head refactor/remove-remote-cursors-overlay-180 \
   --base main \
   --title "v2: Remove unused RemoteCursorsOverlay" \
@@ -91,62 +91,62 @@ BODY
 ### Check CI Status
 Quick status:
 ```bash
-gh pr checks 196 --repo groundwater/book-editor
+gh pr checks 196 --repo groundwater/GhostVM
 ```
 
 Watch until complete:
 ```bash
-gh pr checks 196 --repo groundwater/book-editor --watch
+gh pr checks 196 --repo groundwater/GhostVM --watch
 ```
 
 ### Review Operations
 Mark ready for review:
 ```bash
-gh pr ready 196 --repo groundwater/book-editor
+gh pr ready 196 --repo groundwater/GhostVM
 ```
 
 Request reviewers:
 ```bash
-gh pr edit 196 --repo groundwater/book-editor --add-reviewer groundwater
+gh pr edit 196 --repo groundwater/GhostVM --add-reviewer groundwater
 ```
 
 Approve PR:
 ```bash
-gh pr review 196 --repo groundwater/book-editor --approve --body "LGTM"
+gh pr review 196 --repo groundwater/GhostVM --approve --body "LGTM"
 ```
 
 ### Merge PR
 Squash merge with auto-delete branch (wait for checks):
 ```bash
-gh pr merge 196 --repo groundwater/book-editor --squash --delete-branch --auto --body "Closes #180."
+gh pr merge 196 --repo groundwater/GhostVM --squash --delete-branch --auto --body "Closes #180."
 ```
 
 Immediate merge (checks already green):
 ```bash
-gh pr merge 196 --repo groundwater/book-editor --squash --delete-branch --body "Closes #180."
+gh pr merge 196 --repo groundwater/GhostVM --squash --delete-branch --body "Closes #180."
 ```
 
 ### List PRs
 Your open PRs:
 ```bash
-gh pr list --repo groundwater/book-editor --author @me --state open
+gh pr list --repo groundwater/GhostVM --author @me --state open
 ```
 
 Draft PRs:
 ```bash
-gh pr list --repo groundwater/book-editor --search "is:draft"
+gh pr list --repo groundwater/GhostVM --search "is:draft"
 ```
 
 ## JSON Output & jq Queries
 
 Extract issue body only:
 ```bash
-gh issue view 180 --repo groundwater/book-editor --json body -q .body
+gh issue view 180 --repo groundwater/GhostVM --json body -q .body
 ```
 
 Extract PR check details:
 ```bash
-gh pr checks 196 --repo groundwater/book-editor --json url,name,summary -q '.[] | [.name, .summary, .url] | @tsv'
+gh pr checks 196 --repo groundwater/GhostVM --json url,name,summary -q '.[] | [.name, .summary, .url] | @tsv'
 ```
 
 ## Heredoc Pattern Template
@@ -177,17 +177,17 @@ gh pr create --head feat/my-change --base main --title "..." --body "..."
 
 List recent workflow runs:
 ```bash
-gh run list --repo groundwater/book-editor --limit 10
+gh run list --repo groundwater/GhostVM --limit 10
 ```
 
 View run logs:
 ```bash
-gh run view <run_id> --repo groundwater/book-editor --log
+gh run view <run_id> --repo groundwater/GhostVM --log
 ```
 
 Rerun failed jobs:
 ```bash
-gh run rerun <run_id> --repo groundwater/book-editor --failed
+gh run rerun <run_id> --repo groundwater/GhostVM --failed
 ```
 
 ## Common Recipes
@@ -195,24 +195,24 @@ gh run rerun <run_id> --repo groundwater/book-editor --failed
 ### Update Issue Checklist
 Fetch, transform, and update:
 ```bash
-BODY=$(gh issue view 180 --repo groundwater/book-editor --json body -q .body | \
+BODY=$(gh issue view 180 --repo groundwater/GhostVM --json body -q .body | \
   sed 's/- \[ \] /- [x] /g')
-gh issue edit 180 --repo groundwater/book-editor --body "$BODY"
+gh issue edit 180 --repo groundwater/GhostVM --body "$BODY"
 ```
 
 ### Complete Issue → PR → Merge Workflow
 ```bash
 # 1. Comment on issue
-gh issue comment 180 --repo groundwater/book-editor --body "Working on this"
+gh issue comment 180 --repo groundwater/GhostVM --body "Working on this"
 
 # 2. Create PR
-gh pr create --repo groundwater/book-editor --head feat/fix-180 --base main --title "..." --body "Closes #180"
+gh pr create --repo groundwater/GhostVM --head feat/fix-180 --base main --title "..." --body "Closes #180"
 
 # 3. Wait for checks
-gh pr checks 196 --repo groundwater/book-editor --watch
+gh pr checks 196 --repo groundwater/GhostVM --watch
 
 # 4. Merge
-gh pr merge 196 --repo groundwater/book-editor --squash --delete-branch --body "Closes #180"
+gh pr merge 196 --repo groundwater/GhostVM --squash --delete-branch --body "Closes #180"
 ```
 
 ## Troubleshooting
