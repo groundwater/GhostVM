@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__ide__executeCode",
+      "Bash",
+      "Read",
+      "Write",
+      "Edit",
+      "WebFetch",
+      "WebSearch"
+    ]
+  },
+  "spinnerTipsEnabled": false,
+  "prefersReducedMotion": false
+}
