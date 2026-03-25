@@ -1,6 +1,19 @@
-# GhostVM
-Native macOS VM manager for Apple Silicon using Virtualization.framework.
-Stack: Swift, SwiftUI, AppKit, Virtualization.framework, XcodeGen, SPM
+# GhostVM-dev
+
+Development wrapper repo. The `GhostVM/` subtree tracks [groundwater/GhostVM](https://github.com/groundwater/GhostVM).
+
+## Subtree
+
+```bash
+# Pull latest from upstream
+git subtree pull --prefix=GhostVM ghostvm main --squash
+
+# Push changes back upstream
+git subtree push --prefix=GhostVM ghostvm main
+```
+
+## Stack
+Swift, SwiftUI, AppKit, Virtualization.framework, XcodeGen, SPM
 
 ## Architecture
 - **GhostVM** — Main SwiftUI app (VM library, creation, snapshots)
@@ -14,14 +27,15 @@ Stack: Swift, SwiftUI, AppKit, Virtualization.framework, XcodeGen, SPM
 - `com.apple.security.virtualization` entitlement required
 
 ## Commands
-- Build (debug): `make debug`
-- Generate Xcode project: `make generate`
-- Run tests: `make test` and `make uitest`
-- Clean: `make clean`
+All build commands run from `GhostVM/`:
+- Build (debug): `make -C GhostVM debug`
+- Generate Xcode project: `make -C GhostVM generate`
+- Run tests: `make -C GhostVM test` and `make -C GhostVM uitest`
+- Clean: `make -C GhostVM clean`
 
 ## Critical Constraints
-- Version lives in `.version` file; `.plist.in` templates use `__VERSION__` placeholder
-- All services (`GhostVM/Services/`) are `@MainActor` isolated
+- Version lives in `GhostVM/.version`; `.plist.in` templates use `__VERSION__` placeholder
+- All services (`GhostVM/macOS/GhostVM/Services/`) are `@MainActor` isolated
 - VZVirtioSocketConnection must be held alive — dropping the object closes the fd
 - Guest vsock servers: only blocking accept() works (kqueue/poll/DispatchSource all fail)
 - VZVirtualMachineView rejects ALL synthetic events — pointer/keyboard must go through guest GhostTools
