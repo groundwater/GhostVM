@@ -2,15 +2,25 @@
 
 Development wrapper repo. The `GhostVM/` subtree tracks [groundwater/GhostVM](https://github.com/groundwater/GhostVM).
 
-## Subtree
+## Workflow
+
+- **Outer repo** — commit and push directly to `main` (no PR required)
+- **Subtree (`GhostVM/`)** — changes must go through a PR on the upstream repo
+
+### Subtree Changes
 
 ```bash
-# Pull latest from upstream
-git subtree pull --prefix=GhostVM ghostvm main --squash
+# 1. Push subtree changes to a feature branch on upstream
+git subtree push --prefix=GhostVM ghostvm my-feature-branch
 
-# Push changes back upstream
-git subtree push --prefix=GhostVM ghostvm main
+# 2. Open a PR on the upstream repo
+gh pr create -R groundwater/GhostVM --head my-feature-branch --title "..." --body "..."
+
+# 3. After the PR merges, pull it back
+git subtree pull --prefix=GhostVM ghostvm main --squash
 ```
+
+Never push the subtree directly to `main` — always use a branch and PR.
 
 ## Stack
 Swift, SwiftUI, AppKit, Virtualization.framework, XcodeGen, SPM
