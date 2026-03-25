@@ -1,0 +1,100 @@
+import type { Metadata } from "next";
+import Link from "next/link";
+import CodeBlock from "@/components/docs/CodeBlock";
+import { siteConfig } from "@/config/site";
+import Callout from "@/components/docs/Callout";
+import PrevNextNav from "@/components/docs/PrevNextNav";
+
+export const metadata: Metadata = {
+  title: "Getting Started with GhostVM - Mac VM Setup Guide",
+  description:
+    "Get started with GhostVM in minutes. Install the app, create your first macOS virtual machine, and learn the basics of the GUI and CLI.",
+};
+
+export default function GettingStarted() {
+  return (
+    <>
+      <h1>Getting Started</h1>
+      <p className="lead">
+        GhostVM is a native macOS app and CLI tool for provisioning and managing
+        macOS virtual machines on Apple Silicon using Apple&apos;s
+        Virtualization.framework.
+      </p>
+
+      <h2>Requirements</h2>
+      <ul>
+        <li>macOS 15+ (Sequoia) on Apple Silicon (M1 or later)</li>
+      </ul>
+
+      <h2>Installation</h2>
+      <p>
+        Download the latest DMG from the{" "}
+        <a href={`${siteConfig.repo}/releases/latest`}>
+          releases page
+        </a>
+        , open it, and drag GhostVM.app into your Applications folder.
+      </p>
+
+      <h2>Create your first VM</h2>
+
+      <h3>Using the GUI</h3>
+      <ol>
+        <li>
+          Open GhostVM.app and click <strong>Images</strong> to open the Restore
+          Images window.
+        </li>
+        <li>Download a macOS restore image (IPSW).</li>
+        <li>
+          Click <strong>Create</strong> in the main window, configure CPU,
+          memory, and disk, and select the restore image.
+        </li>
+        <li>
+          The VM bundle will be created. Click <strong>Install</strong> to
+          install macOS.
+        </li>
+        <li>
+          Once installed, click the play button to start your VM.
+        </li>
+      </ol>
+
+      <h3>Using the CLI</h3>
+      <CodeBlock language="bash">
+        {`# Create a macOS VM
+vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+
+# Install macOS from a restore image
+vmctl install ~/VMs/sandbox.GhostVM
+
+# Start the VM
+vmctl start ~/VMs/sandbox.GhostVM`}
+      </CodeBlock>
+
+      <Callout variant="info" title="Restore Images">
+        Restore images (IPSW files) are auto-discovered from{" "}
+        <code>~/Downloads/*.ipsw</code> and{" "}
+        <code>/Applications/Install macOS*.app</code>. You can also manage them
+        from the Restore Images window in the GUI.
+      </Callout>
+
+      <h2>Next steps</h2>
+      <ul>
+        <li>
+          Learn about the <Link href="/docs/gui-app">GUI App</Link> features
+        </li>
+        <li>
+          Explore the <Link href="/docs/cli">CLI Reference</Link>
+        </li>
+        <li>
+          Set up <Link href="/docs/services">host-guest services</Link> like clipboard
+          sync and file transfer
+        </li>
+        <li>
+          Automate VMs with the{" "}
+          <Link href="/docs/host-api">Host API</Link>
+        </li>
+      </ul>
+
+      <PrevNextNav currentHref="/docs/getting-started" />
+    </>
+  );
+}

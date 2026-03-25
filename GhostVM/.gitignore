@@ -1,0 +1,13 @@
+*.app
+*.dmg
+.env
+build/
+build/generated-plists/
+tools/
+*.local.json
+*.xcodeproj/
+*.profraw
+.claude/
+.codex/
+.vscode/
+.var/

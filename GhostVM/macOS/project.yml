@@ -1,0 +1,204 @@
+name: GhostVM
+options:
+  bundleIdPrefix: org.ghostvm
+  deploymentTarget:
+    macOS: "15.0"
+  xcodeVersion: "15.4"
+
+packages:
+  Sparkle:
+    url: https://github.com/sparkle-project/Sparkle.git
+    from: "2.6.0"
+
+settings:
+  base:
+    ARCHS: arm64
+    SWIFT_VERSION: "6.0"
+    CLANG_ENABLE_OBJC_ARC: YES
+    CLANG_WARN_DOCUMENTATION_COMMENTS: YES
+    CLANG_WARN_UNGUARDED_AVAILABILITY: YES
+
+schemes:
+  GhostVM:
+    build:
+      targets:
+        GhostVM: all
+
+targets:
+  GhostVMKit:
+    type: framework
+    platform: macOS
+    sources:
+      - path: GhostVMKit
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMKit
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvmkit
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SWIFT_VERSION: "5.0"
+        DYLIB_INSTALL_NAME_BASE: "@rpath"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+          - "@loader_path/../Frameworks"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_HARDENED_RUNTIME: YES
+
+  vmctl:
+    type: tool
+    platform: macOS
+    sources:
+      - path: GhostVM/vmctl
+        excludes:
+          - "CEditLine"
+    dependencies:
+      - target: GhostVMKit
+        link: true
+        embed: false
+    settings:
+      base:
+        PRODUCT_NAME: vmctl
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhostVM/vmctl/CEditLine"
+        OTHER_LDFLAGS:
+          - "-ledit"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+          - "@executable_path"
+
+  GhostVMHelper:
+    type: application
+    platform: macOS
+    sources:
+      - path: GhostVMHelper
+        excludes:
+          - "*.template.plist"
+      - path: GhostVM/Services
+      - path: GhostVM/Resources/VMIcons
+        type: resource
+        buildPhase: resources
+      - path: ../Resources
+        type: resource
+        buildPhase: resources
+    dependencies:
+      - target: GhostVMKit
+        embed: true
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMHelper
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper
+        INFOPLIST_FILE: ../build/generated-plists/GhostVMHelper-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_ENTITLEMENTS: GhostVMHelper/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+
+  GhostVM:
+    type: application
+    platform: macOS
+    sources:
+      - path: GhostVM
+        excludes:
+          - "vmctl"
+          - "vmctl.swift"
+          - "*.plist"
+    resources:
+      - path: build/xcode/GhostTools.dmg
+        optional: true
+    dependencies:
+      - target: GhostVMKit
+        embed: true
+      - target: vmctl
+        embed: true
+        codeSign: true
+        copy:
+          destination: executables
+      - target: GhostVMHelper
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+          subpath: Helpers
+      - package: Sparkle
+    settings:
+      base:
+        PRODUCT_NAME: GhostVM
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm
+        INFOPLIST_FILE: ../build/generated-plists/GhostVM-Info.plist
+        CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: NO
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        SWIFT_EMIT_LOC_STRINGS: NO
+        SWIFT_VERSION: "5.0"
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: YES
+
+  GhostVMTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GhostVMTests
+    dependencies:
+      - target: GhostVMKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+
+  GhostVMUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: GhostVMUITests
+    dependencies:
+      - target: GhostVM
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        ENABLE_APP_SANDBOX: NO
+
+  GhostVMHelperTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GhostVMHelperTests
+      - path: GhostVMHelper/PopoverManager.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+
+  GhostVMHelperUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: GhostVMHelperUITests
+    dependencies:
+      - target: GhostVMHelper
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        ENABLE_APP_SANDBOX: NO
