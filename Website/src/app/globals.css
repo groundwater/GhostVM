@@ -1,0 +1,36 @@
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-ghost-50: #eef2ff;
+  --color-ghost-100: #e0e7ff;
+  --color-ghost-200: #c7d2fe;
+  --color-ghost-300: #a5b4fc;
+  --color-ghost-400: #818cf8;
+  --color-ghost-500: #6366f1;
+  --color-ghost-600: #4f46e5;
+  --color-ghost-700: #4338ca;
+  --color-ghost-800: #3730a3;
+  --color-ghost-900: #312e81;
+  --color-ghost-950: #1e1b4b;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+/* Terminal styling */
+.terminal-text {
+  font-family: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+}
+
+/* Hide scrollbar for sidebars */
+.sidebar-scroll::-webkit-scrollbar {
+  display: none;
+}
+.sidebar-scroll {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

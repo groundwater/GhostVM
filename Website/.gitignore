@@ -1,0 +1,14 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Optimized images (build artifacts)
+public/images/**/*.webp
+
+# Misc
+.DS_Store
+*.tsbuildinfo
+next-env.d.ts
