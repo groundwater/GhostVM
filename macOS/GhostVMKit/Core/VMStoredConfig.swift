@@ -40,8 +40,10 @@ public struct VMStoredConfig: Codable {
     public var macAddress: String?
     // Port forwarding configuration
     public var portForwards: [PortForwardConfig]
-    // Network configuration (NAT vs bridged)
+    // Network configuration (NAT vs bridged) — legacy, kept for backward-compat decoding
     public var networkConfig: NetworkConfig?
+    // Multiple network interfaces (replaces single networkConfig + macAddress)
+    public var networkInterfaces: [NetworkInterfaceConfig]
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
 
@@ -69,6 +71,7 @@ public struct VMStoredConfig: Codable {
         case macAddress
         case portForwards
         case networkConfig
+        case networkInterfaces
         case iconMode
     }
 
@@ -96,6 +99,7 @@ public struct VMStoredConfig: Codable {
         macAddress: String? = nil,
         portForwards: [PortForwardConfig] = [],
         networkConfig: NetworkConfig? = nil,
+        networkInterfaces: [NetworkInterfaceConfig] = [],
         iconMode: String? = nil
     ) {
         self.version = version
@@ -121,6 +125,13 @@ public struct VMStoredConfig: Codable {
         self.macAddress = macAddress
         self.portForwards = portForwards
         self.networkConfig = networkConfig
+        // If caller provided explicit networkInterfaces, use them; otherwise build from legacy params
+        if !networkInterfaces.isEmpty {
+            self.networkInterfaces = networkInterfaces
+        } else {
+            let nc = networkConfig ?? NetworkConfig.defaultConfig
+            self.networkInterfaces = [NetworkInterfaceConfig(label: "Network", networkConfig: nc, macAddress: macAddress ?? "")]
+        }
         self.iconMode = iconMode
     }
 
@@ -150,6 +161,13 @@ public struct VMStoredConfig: Codable {
         // Port forwards - defaults to empty for backwards compatibility
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
         networkConfig = try container.decodeIfPresent(NetworkConfig.self, forKey: .networkConfig)
+        // Migration: if networkInterfaces key exists, use it; otherwise build from legacy networkConfig + macAddress
+        if let interfaces = try container.decodeIfPresent([NetworkInterfaceConfig].self, forKey: .networkInterfaces) {
+            networkInterfaces = interfaces
+        } else {
+            let legacy = networkConfig ?? NetworkConfig.defaultConfig
+            networkInterfaces = [NetworkInterfaceConfig(label: "Network", networkConfig: legacy, macAddress: macAddress ?? "")]
+        }
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
     }
 

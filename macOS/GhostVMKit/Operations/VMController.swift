@@ -429,8 +429,11 @@ public final class VMController {
             try fileManager.createDirectory(at: layout.snapshotsDirectoryURL, withIntermediateDirectories: true, attributes: nil)
         }
 
-        // Generate a persistent MAC address for this VM
-        let macAddress = VZMACAddress.randomLocallyAdministered()
+        // Generate persistent MAC addresses for each network interface
+        var interfaces = options.networkInterfaces
+        for i in interfaces.indices where interfaces[i].macAddress.isEmpty {
+            interfaces[i].macAddress = VZMACAddress.randomLocallyAdministered().string
+        }
 
         let config = VMStoredConfig(
             version: 1,
@@ -452,8 +455,7 @@ public final class VMController {
             lastInstallVersion: nil,
             lastInstallDate: nil,
             legacyName: nil,
-            macAddress: macAddress.string,
-            networkConfig: options.networkConfig
+            networkInterfaces: interfaces
         )
 
         let store = VMConfigStore(layout: layout)
@@ -580,7 +582,12 @@ public final class VMController {
             let machineIdentifier = VZMacMachineIdentifier()
             try writeData(machineIdentifier.dataRepresentation, to: newLayout.machineIdentifierURL)
 
-            let macAddress = VZMACAddress.randomLocallyAdministered()
+            // Generate fresh MAC addresses and UUIDs for cloned interfaces
+            var clonedInterfaces = sourceConfig.networkInterfaces
+            for i in clonedInterfaces.indices {
+                clonedInterfaces[i].id = UUID()
+                clonedInterfaces[i].macAddress = VZMACAddress.randomLocallyAdministered().string
+            }
 
             // Create empty Snapshots directory
             try fileManager.createDirectory(at: newLayout.snapshotsDirectoryURL, withIntermediateDirectories: true, attributes: nil)
@@ -607,9 +614,8 @@ public final class VMController {
                 lastInstallDate: sourceConfig.lastInstallDate,
                 legacyName: nil,
                 isSuspended: false,
-                macAddress: macAddress.string,
                 portForwards: [],
-                networkConfig: sourceConfig.networkConfig,
+                networkInterfaces: clonedInterfaces,
                 iconMode: nil
             )
 
@@ -1187,9 +1193,13 @@ public final class VMController {
         var config = try store.load()
         let name = displayName(for: bundleURL)
 
-        // Generate a persistent MAC address if one doesn't exist (migration for older VMs)
-        if config.macAddress == nil {
-            config.macAddress = VZMACAddress.randomLocallyAdministered().string
+        // Generate persistent MAC addresses for any interfaces that lack one (migration for older VMs)
+        var needsSave = false
+        for i in config.networkInterfaces.indices where config.networkInterfaces[i].macAddress.isEmpty {
+            config.networkInterfaces[i].macAddress = VZMACAddress.randomLocallyAdministered().string
+            needsSave = true
+        }
+        if needsSave {
             config.modifiedAt = Date()
             try store.save(config)
         }
@@ -1221,9 +1231,13 @@ public final class VMController {
         var config = try store.load()
         let name = displayName(for: bundleURL)
 
-        // Generate a persistent MAC address if one doesn't exist (migration for older VMs)
-        if config.macAddress == nil {
-            config.macAddress = VZMACAddress.randomLocallyAdministered().string
+        // Generate persistent MAC addresses for any interfaces that lack one (migration for older VMs)
+        var needsSave = false
+        for i in config.networkInterfaces.indices where config.networkInterfaces[i].macAddress.isEmpty {
+            config.networkInterfaces[i].macAddress = VZMACAddress.randomLocallyAdministered().string
+            needsSave = true
+        }
+        if needsSave {
             config.modifiedAt = Date()
             try store.save(config)
         }

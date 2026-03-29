@@ -57,6 +57,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var healthCheckService: HealthCheckService?
     private var autoPortMapService: AutoPortMapService?
     private var hostAPIService: HostAPIService?
+    private var customNetworkService: CustomNetworkService?
+    private var pendingCustomNetworkAttachments: [CustomNetworkAttachment] = []
     private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
     private var fileCountCancellable: AnyCancellable?
@@ -1241,20 +1243,25 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             // Check icon mode
             activeIconMode = config.iconMode
 
-            // Generate MAC address if needed
-            if config.macAddress == nil {
-                config.macAddress = VZMACAddress.randomLocallyAdministered().string
+            // Generate MAC addresses for any interfaces that lack one (migration for older VMs)
+            var needsMacSave = false
+            for i in config.networkInterfaces.indices where config.networkInterfaces[i].macAddress.isEmpty {
+                config.networkInterfaces[i].macAddress = VZMACAddress.randomLocallyAdministered().string
+                needsMacSave = true
+            }
+            if needsMacSave {
                 config.modifiedAt = Date()
                 try store.save(config)
             }
 
             // Build VM configuration
             let builder = VMConfigurationBuilder(layout: layout!, storedConfig: config)
-            let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+            let buildResult = try builder.makeBuildResult(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+            self.pendingCustomNetworkAttachments = buildResult.customNetworkAttachments
 
             // Create VM
             vmQueue = DispatchQueue(label: "ghostvm.helper.\(vmName)")
-            virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue!)
+            virtualMachine = VZVirtualMachine(configuration: buildResult.configuration, queue: vmQueue!)
             virtualMachine!.delegate = self
 
             // Create window and view
@@ -1558,9 +1565,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Load port forwards from config
         let forwards = loadPortForwards()
 
-        // Check network mode - only start port forwarding in NAT mode
-        let networkConfig = (try? VMConfigStore(layout: layout!).load().networkConfig) ?? NetworkConfig.defaultConfig
-        if networkConfig.mode == .nat {
+        // Check network mode - only start port forwarding if at least one NIC is NAT
+        let storedInterfaces = (try? VMConfigStore(layout: layout!).load().networkInterfaces) ?? []
+        let hasNAT = storedInterfaces.isEmpty || storedInterfaces.contains { $0.networkConfig.mode == .nat }
+        if hasNAT {
             if !forwards.isEmpty {
                 pfService.start(forwards: forwards)
             }
@@ -1682,6 +1690,15 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.updateBlockedPortsDisplay(blocked)
             }
 
+        // 8. Custom network processors
+        if !pendingCustomNetworkAttachments.isEmpty {
+            let cnService = CustomNetworkService()
+            cnService.start(attachments: pendingCustomNetworkAttachments)
+            self.customNetworkService = cnService
+            pendingCustomNetworkAttachments = []
+            NSLog("GhostVMHelper: Custom network service started")
+        }
+
         NSLog("GhostVMHelper: Services started for '\(vmName)'")
     }
 
@@ -1737,6 +1754,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         hostAPIService?.stop()
         hostAPIService = nil
+
+        customNetworkService?.stop()
+        customNetworkService = nil
 
         ghostClient = nil
     }
