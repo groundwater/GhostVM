@@ -63,6 +63,10 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var healthCheckCancellable: AnyCancellable?
     private var windowFocusObservers: [NSObjectProtocol] = []
 
+    // Audio state
+    private var speakerMuted = false
+    private var microphoneDisabled = true
+
     // Capture key state
     private var captureQuitEnabled = false
     private var captureHideEnabled = false
@@ -456,6 +460,21 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         terminateItem.target = self
         vmMenu.addItem(terminateItem)
 
+        // Audio menu
+        let audioMenuItem = NSMenuItem()
+        audioMenuItem.title = "Audio"
+        mainMenu.addItem(audioMenuItem)
+        let audioMenu = NSMenu(title: "Audio")
+        audioMenuItem.submenu = audioMenu
+
+        let muteSpeakerItem = NSMenuItem(title: "Mute Speaker", action: #selector(toggleSpeakerMuteMenu), keyEquivalent: "")
+        muteSpeakerItem.target = self
+        audioMenu.addItem(muteSpeakerItem)
+
+        let disableMicItem = NSMenuItem(title: "Disable Microphone", action: #selector(toggleMicrophoneDisableMenu), keyEquivalent: "")
+        disableMicItem.target = self
+        audioMenu.addItem(disableMicItem)
+
         // Window menu
         let windowMenuItem = NSMenuItem()
         windowMenuItem.title = "Window"
@@ -542,6 +561,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         toolbar(helperToolbar!, didSelectClipboardSyncMode: newMode)
     }
 
+    @objc private func toggleSpeakerMuteMenu() {
+        toolbar(helperToolbar!, didToggleSpeakerMute: !speakerMuted)
+    }
+
+    @objc private func toggleMicrophoneDisableMenu() {
+        toolbar(helperToolbar!, didToggleMicrophoneDisable: !microphoneDisabled)
+    }
+
     // Menu validation
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
@@ -558,12 +585,42 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 menuItem.state = (currentMode != .disabled) ? .on : .off
             }
             return state == .running
+        case #selector(toggleSpeakerMuteMenu):
+            menuItem.state = speakerMuted ? .on : .off
+            return true
+        case #selector(toggleMicrophoneDisableMenu):
+            menuItem.state = microphoneDisabled ? .on : .off
+            return true
         default:
             return true
         }
     }
 
     // MARK: - HelperToolbarDelegate
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleSpeakerMute muted: Bool) {
+        speakerMuted = muted
+        helperToolbar?.setSpeakerMuted(muted)
+        persistAudioSettings()
+        NSLog("GhostVMHelper: Speaker mute changed to \(muted)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleMicrophoneDisable disabled: Bool) {
+        microphoneDisabled = disabled
+        helperToolbar?.setMicrophoneDisabled(disabled)
+        persistAudioSettings()
+        NSLog("GhostVMHelper: Microphone disable changed to \(disabled)")
+    }
+
+    private func persistAudioSettings() {
+        guard let layout = layout else { return }
+        let store = VMConfigStore(layout: layout)
+        guard var config = try? store.load() else { return }
+        config.speakerEnabled = !speakerMuted
+        config.microphoneEnabled = !microphoneDisabled
+        config.modifiedAt = Date()
+        try? store.save(config)
+    }
 
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool) {
         vmView?.capturesSystemKeys = enabled
@@ -1928,6 +1985,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let openURLsAuto = UserDefaults.standard.bool(forKey: openURLsKey)
         urlAlwaysAllowed = openURLsAuto
         toolbar.setOpenURLsAutomatically(openURLsAuto)
+
+        // Load audio settings from VM config
+        if let layout = layout, let config = try? VMConfigStore(layout: layout).load() {
+            speakerMuted = !config.speakerEnabled
+            microphoneDisabled = !config.microphoneEnabled
+            toolbar.setSpeakerMuted(speakerMuted)
+            toolbar.setMicrophoneDisabled(microphoneDisabled)
+        }
 
         containerView.addSubview(vmView)
 

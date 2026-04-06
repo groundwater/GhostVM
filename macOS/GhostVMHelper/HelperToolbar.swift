@@ -62,6 +62,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         static let sharedFolders = NSToolbarItem.Identifier("sharedFolders")
         static let clipboardSync = NSToolbarItem.Identifier("clipboardSync")
         static let iconChooser = NSToolbarItem.Identifier("iconChooser")
+        static let audioControls = NSToolbarItem.Identifier("audioControls")
         static let captureKeys = NSToolbarItem.Identifier("captureKeys")
         static let captureCommands = NSToolbarItem.Identifier("captureCommands")
         static let queuedFiles = NSToolbarItem.Identifier("queuedFiles")
@@ -85,6 +86,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var captureHideEnabled = false
     private var openURLsAutomaticallyEnabled = false
     private var autoPortMapEnabled = false
+    private var speakerMuted = false
+    private var microphoneDisabled = true
     private var queuedFileCount = 0
     private var queuedFileNames: [String] = []
     private var vmRunning = true
@@ -98,6 +101,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var portForwardsItem: NSToolbarItem?
     private var sharedFoldersItem: NSMenuToolbarItem?
     private var clipboardSyncItem: NSToolbarItem?
+    private var audioControlsItem: NSMenuToolbarItem?
     private var captureKeysItem: NSToolbarItem?
     private var captureCommandsItem: NSMenuToolbarItem?
     private var queuedFilesItem: NSToolbarItem?
@@ -105,6 +109,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var terminateItem: NSToolbarItem?
 
     private var sharedFoldersMenu = NSMenu()
+    private var audioControlsMenu = NSMenu()
     private var captureCommandsMenu = NSMenu()
 
     private let iconConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
@@ -286,6 +291,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         rebuildCaptureCommandsMenu()
     }
 
+    func setSpeakerMuted(_ muted: Bool) {
+        speakerMuted = muted
+        updateAudioControlsButton()
+        rebuildAudioControlsMenu()
+        rebuildCaptureCommandsMenu()
+    }
+
+    func setMicrophoneDisabled(_ disabled: Bool) {
+        microphoneDisabled = disabled
+        updateAudioControlsButton()
+        rebuildAudioControlsMenu()
+        rebuildCaptureCommandsMenu()
+    }
+
     func setAutoPortMapEnabled(_ enabled: Bool) {
         autoPortMapEnabled = enabled
         updatePortForwardsButton()
@@ -324,6 +343,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             ItemID.portForwards,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
+            ItemID.audioControls,
             ItemID.captureKeys,
             ItemID.captureCommands,
             ItemID.queuedFiles,
@@ -339,6 +359,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             ItemID.portForwards,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
+            ItemID.audioControls,
             ItemID.captureKeys,
             ItemID.captureCommands,
             ItemID.queuedFiles,
@@ -359,6 +380,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             return makeSharedFoldersItem()
         case ItemID.clipboardSync:
             return makeClipboardSyncItem()
+        case ItemID.audioControls:
+            return makeAudioControlsItem()
         case ItemID.captureKeys:
             return makeCaptureKeysItem()
         case ItemID.captureCommands:
@@ -485,6 +508,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         clipboardSyncItem = item
         updateClipboardSyncButton()
 
+        return item
+    }
+
+    private func makeAudioControlsItem() -> NSToolbarItem {
+        let item = NSMenuToolbarItem(itemIdentifier: ItemID.audioControls)
+        item.label = "Audio"
+        item.paletteLabel = "Audio Controls"
+        item.toolTip = "Speaker and microphone controls"
+        item.image = audioControlsIcon()
+
+        rebuildAudioControlsMenu()
+        item.menu = audioControlsMenu
+
+        audioControlsItem = item
         return item
     }
 
@@ -680,6 +717,41 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         }
     }
 
+    private func audioControlsIcon() -> NSImage? {
+        let symbolName = speakerMuted ? "speaker.slash" : "speaker.wave.2"
+        return NSImage(systemSymbolName: symbolName, accessibilityDescription: "Audio")?.withSymbolConfiguration(iconConfig)
+    }
+
+    private func updateAudioControlsButton() {
+        guard let item = audioControlsItem else { return }
+        item.image = audioControlsIcon()
+        if speakerMuted && microphoneDisabled {
+            item.toolTip = "Speaker muted, microphone disabled"
+        } else if speakerMuted {
+            item.toolTip = "Speaker muted"
+        } else if microphoneDisabled {
+            item.toolTip = "Microphone disabled"
+        } else {
+            item.toolTip = "Audio enabled"
+        }
+    }
+
+    private func rebuildAudioControlsMenu() {
+        audioControlsMenu.removeAllItems()
+
+        let speakerItem = NSMenuItem(title: "Mute Speaker", action: #selector(toggleSpeakerMute), keyEquivalent: "")
+        speakerItem.target = self
+        speakerItem.state = speakerMuted ? .on : .off
+        audioControlsMenu.addItem(speakerItem)
+
+        let micItem = NSMenuItem(title: "Disable Microphone", action: #selector(toggleMicrophoneDisable), keyEquivalent: "")
+        micItem.target = self
+        micItem.state = microphoneDisabled ? .on : .off
+        audioControlsMenu.addItem(micItem)
+
+        audioControlsItem?.menu = audioControlsMenu
+    }
+
     private func updateCaptureKeysButton() {
         guard let item = captureKeysItem, let button = item.view as? NSButton else { return }
 
@@ -837,6 +909,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         let iconItem = NSMenuItem(title: "Change VM Icon\u{2026}", action: #selector(iconChooserFromMenu), keyEquivalent: "")
         iconItem.target = self
         captureCommandsMenu.addItem(iconItem)
+
+        // Audio submenu
+        let audioSubmenu = NSMenu()
+        let speakerMenuItem = NSMenuItem(title: "Mute Speaker", action: #selector(toggleSpeakerMute), keyEquivalent: "")
+        speakerMenuItem.target = self
+        speakerMenuItem.state = speakerMuted ? .on : .off
+        audioSubmenu.addItem(speakerMenuItem)
+        let micMenuItem = NSMenuItem(title: "Disable Microphone", action: #selector(toggleMicrophoneDisable), keyEquivalent: "")
+        micMenuItem.target = self
+        micMenuItem.state = microphoneDisabled ? .on : .off
+        audioSubmenu.addItem(micMenuItem)
+        let audioItem = NSMenuItem(title: "Audio", action: nil, keyEquivalent: "")
+        audioItem.submenu = audioSubmenu
+        captureCommandsMenu.addItem(audioItem)
 
         captureCommandsMenu.addItem(NSMenuItem.separator())
 
@@ -1115,6 +1201,22 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         captureHideEnabled.toggle()
         rebuildCaptureCommandsMenu()
         delegate?.toolbar(self, didToggleCaptureHide: captureHideEnabled)
+    }
+
+    @objc private func toggleSpeakerMute() {
+        speakerMuted.toggle()
+        updateAudioControlsButton()
+        rebuildAudioControlsMenu()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleSpeakerMute: speakerMuted)
+    }
+
+    @objc private func toggleMicrophoneDisable() {
+        microphoneDisabled.toggle()
+        updateAudioControlsButton()
+        rebuildAudioControlsMenu()
+        rebuildCaptureCommandsMenu()
+        delegate?.toolbar(self, didToggleMicrophoneDisable: microphoneDisabled)
     }
 
     @objc private func toggleOpenURLsAutomatically() {
@@ -1456,6 +1558,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 // MARK: - Delegate Protocol
 
 protocol HelperToolbarDelegate: AnyObject {
+    func toolbar(_ toolbar: HelperToolbar, didToggleSpeakerMute muted: Bool)
+    func toolbar(_ toolbar: HelperToolbar, didToggleMicrophoneDisable disabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureQuit enabled: Bool)

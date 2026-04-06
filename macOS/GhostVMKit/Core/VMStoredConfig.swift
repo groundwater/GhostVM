@@ -44,6 +44,9 @@ public struct VMStoredConfig: Codable {
     public var networkConfig: NetworkConfig?
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
+    // Audio controls: speaker enabled (output), microphone enabled (input)
+    public var speakerEnabled: Bool
+    public var microphoneEnabled: Bool
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -70,6 +73,8 @@ public struct VMStoredConfig: Codable {
         case portForwards
         case networkConfig
         case iconMode
+        case speakerEnabled
+        case microphoneEnabled
     }
 
     public init(
@@ -96,7 +101,9 @@ public struct VMStoredConfig: Codable {
         macAddress: String? = nil,
         portForwards: [PortForwardConfig] = [],
         networkConfig: NetworkConfig? = nil,
-        iconMode: String? = nil
+        iconMode: String? = nil,
+        speakerEnabled: Bool = true,
+        microphoneEnabled: Bool = false
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -122,6 +129,8 @@ public struct VMStoredConfig: Codable {
         self.portForwards = portForwards
         self.networkConfig = networkConfig
         self.iconMode = iconMode
+        self.speakerEnabled = speakerEnabled
+        self.microphoneEnabled = microphoneEnabled
     }
 
     public init(from decoder: Decoder) throws {
@@ -151,6 +160,9 @@ public struct VMStoredConfig: Codable {
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
         networkConfig = try container.decodeIfPresent(NetworkConfig.self, forKey: .networkConfig)
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
+        // Audio defaults: speaker on, microphone off (for backwards compatibility)
+        speakerEnabled = try container.decodeIfPresent(Bool.self, forKey: .speakerEnabled) ?? true
+        microphoneEnabled = try container.decodeIfPresent(Bool.self, forKey: .microphoneEnabled) ?? false
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
