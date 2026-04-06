@@ -65,7 +65,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     // Audio state
     private var speakerMuted = false
-    private var microphoneDisabled = true
+    private var speakerVolumeLevel: Float = 1.0
+    private var micMuted = true
 
     // Capture key state
     private var captureQuitEnabled = false
@@ -471,9 +472,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         muteSpeakerItem.target = self
         audioMenu.addItem(muteSpeakerItem)
 
-        let disableMicItem = NSMenuItem(title: "Disable Microphone", action: #selector(toggleMicrophoneDisableMenu), keyEquivalent: "")
-        disableMicItem.target = self
-        audioMenu.addItem(disableMicItem)
+        let muteMicItem = NSMenuItem(title: "Mute Microphone", action: #selector(toggleMicMuteMenu), keyEquivalent: "")
+        muteMicItem.target = self
+        audioMenu.addItem(muteMicItem)
 
         // Window menu
         let windowMenuItem = NSMenuItem()
@@ -565,8 +566,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         toolbar(helperToolbar!, didToggleSpeakerMute: !speakerMuted)
     }
 
-    @objc private func toggleMicrophoneDisableMenu() {
-        toolbar(helperToolbar!, didToggleMicrophoneDisable: !microphoneDisabled)
+    @objc private func toggleMicMuteMenu() {
+        toolbar(helperToolbar!, didToggleMicMute: !micMuted)
     }
 
     // Menu validation
@@ -588,8 +589,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         case #selector(toggleSpeakerMuteMenu):
             menuItem.state = speakerMuted ? .on : .off
             return true
-        case #selector(toggleMicrophoneDisableMenu):
-            menuItem.state = microphoneDisabled ? .on : .off
+        case #selector(toggleMicMuteMenu):
+            menuItem.state = micMuted ? .on : .off
             return true
         default:
             return true
@@ -605,19 +606,26 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         NSLog("GhostVMHelper: Speaker mute changed to \(muted)")
     }
 
-    func toolbar(_ toolbar: HelperToolbar, didToggleMicrophoneDisable disabled: Bool) {
-        microphoneDisabled = disabled
-        helperToolbar?.setMicrophoneDisabled(disabled)
+    func toolbar(_ toolbar: HelperToolbar, didChangeSpeakerVolume volume: Float) {
+        speakerVolumeLevel = volume
+        helperToolbar?.setSpeakerVolume(volume)
         persistAudioSettings()
-        NSLog("GhostVMHelper: Microphone disable changed to \(disabled)")
+    }
+
+    func toolbar(_ toolbar: HelperToolbar, didToggleMicMute muted: Bool) {
+        micMuted = muted
+        helperToolbar?.setMicMuted(muted)
+        persistAudioSettings()
+        NSLog("GhostVMHelper: Microphone mute changed to \(muted)")
     }
 
     private func persistAudioSettings() {
         guard let layout = layout else { return }
         let store = VMConfigStore(layout: layout)
         guard var config = try? store.load() else { return }
-        config.speakerEnabled = !speakerMuted
-        config.microphoneEnabled = !microphoneDisabled
+        config.speakerMuted = speakerMuted
+        config.speakerVolume = speakerVolumeLevel
+        config.microphoneMuted = micMuted
         config.modifiedAt = Date()
         try? store.save(config)
     }
@@ -1988,10 +1996,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         // Load audio settings from VM config
         if let layout = layout, let config = try? VMConfigStore(layout: layout).load() {
-            speakerMuted = !config.speakerEnabled
-            microphoneDisabled = !config.microphoneEnabled
+            speakerMuted = config.speakerMuted
+            speakerVolumeLevel = config.speakerVolume
+            micMuted = config.microphoneMuted
             toolbar.setSpeakerMuted(speakerMuted)
-            toolbar.setMicrophoneDisabled(microphoneDisabled)
+            toolbar.setSpeakerVolume(speakerVolumeLevel)
+            toolbar.setMicMuted(micMuted)
         }
 
         containerView.addSubview(vmView)
