@@ -88,7 +88,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var openURLsAutomaticallyEnabled = false
     private var autoPortMapEnabled = false
     private var speakerMuted = false
-    private var speakerVolumeLevel: Float = 1.0
     private var micMuted = true
     private var queuedFileCount = 0
     private var queuedFileNames: [String] = []
@@ -103,8 +102,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var portForwardsItem: NSToolbarItem?
     private var sharedFoldersItem: NSMenuToolbarItem?
     private var clipboardSyncItem: NSToolbarItem?
-    private var speakerVolumeItem: NSMenuToolbarItem?
-    private weak var speakerVolumeSlider: NSSlider?
+    private var speakerMuteItem: NSToolbarItem?
     private var micMuteItem: NSToolbarItem?
     private var captureKeysItem: NSToolbarItem?
     private var captureCommandsItem: NSMenuToolbarItem?
@@ -113,7 +111,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var terminateItem: NSToolbarItem?
 
     private var sharedFoldersMenu = NSMenu()
-    private var speakerVolumeMenu = NSMenu()
     private var captureCommandsMenu = NSMenu()
 
     private let iconConfig = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
@@ -297,14 +294,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     func setSpeakerMuted(_ muted: Bool) {
         speakerMuted = muted
-        updateSpeakerVolumeButton()
-        rebuildSpeakerVolumeMenu()
-        rebuildCaptureCommandsMenu()
-    }
-
-    func setSpeakerVolume(_ volume: Float) {
-        speakerVolumeLevel = volume
-        speakerVolumeSlider?.floatValue = volume
+        updateSpeakerMuteButton()
         rebuildCaptureCommandsMenu()
     }
 
@@ -392,7 +382,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         case ItemID.clipboardSync:
             return makeClipboardSyncItem()
         case ItemID.speakerVolume:
-            return makeSpeakerVolumeItem()
+            return makeSpeakerMuteItem()
         case ItemID.micMute:
             return makeMicMuteItem()
         case ItemID.captureKeys:
@@ -524,17 +514,20 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         return item
     }
 
-    private func makeSpeakerVolumeItem() -> NSToolbarItem {
-        let item = NSMenuToolbarItem(itemIdentifier: ItemID.speakerVolume)
+    private func makeSpeakerMuteItem() -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: ItemID.speakerVolume)
         item.label = "Speaker"
-        item.paletteLabel = "Speaker Volume"
-        item.image = speakerIcon()
+        item.paletteLabel = "Mute Speaker"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
 
-        rebuildSpeakerVolumeMenu()
-        item.menu = speakerVolumeMenu
+        let button = NSButton(image: speakerIcon()!, target: self, action: #selector(toggleSpeakerMute))
+        button.bezelStyle = .toolbar
+        button.isBordered = true
+        item.view = button
 
-        speakerVolumeItem = item
-        updateSpeakerVolumeButton()
+        speakerMuteItem = item
+        updateSpeakerMuteButton()
         return item
     }
 
@@ -757,41 +750,16 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         return NSImage(systemSymbolName: symbolName, accessibilityDescription: "Microphone")?.withSymbolConfiguration(iconConfig)
     }
 
-    private func updateSpeakerVolumeButton() {
-        guard let item = speakerVolumeItem else { return }
-        item.image = speakerIcon()
-        item.toolTip = speakerMuted ? "Speaker muted" : "Speaker volume: \(Int(speakerVolumeLevel * 100))%"
+    private func updateSpeakerMuteButton() {
+        guard let item = speakerMuteItem, let button = item.view as? NSButton else { return }
+        button.image = speakerIcon()
+        item.toolTip = speakerMuted ? "Speaker muted" : "Speaker active"
     }
 
     private func updateMicMuteButton() {
         guard let item = micMuteItem, let button = item.view as? NSButton else { return }
         button.image = micIcon()
         item.toolTip = micMuted ? "Microphone muted" : "Microphone active"
-    }
-
-    private func rebuildSpeakerVolumeMenu() {
-        speakerVolumeMenu.removeAllItems()
-
-        let muteItem = NSMenuItem(title: "Mute", action: #selector(toggleSpeakerMute), keyEquivalent: "")
-        muteItem.target = self
-        muteItem.state = speakerMuted ? .on : .off
-        speakerVolumeMenu.addItem(muteItem)
-
-        speakerVolumeMenu.addItem(NSMenuItem.separator())
-
-        // Volume slider in a custom menu item view
-        let sliderContainer = NSView(frame: NSRect(x: 0, y: 0, width: 200, height: 30))
-        let slider = NSSlider(value: Double(speakerVolumeLevel), minValue: 0, maxValue: 1, target: self, action: #selector(speakerVolumeChanged(_:)))
-        slider.frame = NSRect(x: 16, y: 5, width: 168, height: 20)
-        slider.isContinuous = true
-        sliderContainer.addSubview(slider)
-        speakerVolumeSlider = slider
-
-        let sliderItem = NSMenuItem()
-        sliderItem.view = sliderContainer
-        speakerVolumeMenu.addItem(sliderItem)
-
-        speakerVolumeItem?.menu = speakerVolumeMenu
     }
 
     private func updateCaptureKeysButton() {
@@ -1247,16 +1215,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
     @objc private func toggleSpeakerMute() {
         speakerMuted.toggle()
-        updateSpeakerVolumeButton()
-        rebuildSpeakerVolumeMenu()
+        updateSpeakerMuteButton()
         rebuildCaptureCommandsMenu()
         delegate?.toolbar(self, didToggleSpeakerMute: speakerMuted)
-    }
-
-    @objc private func speakerVolumeChanged(_ sender: NSSlider) {
-        speakerVolumeLevel = sender.floatValue
-        updateSpeakerVolumeButton()
-        delegate?.toolbar(self, didChangeSpeakerVolume: speakerVolumeLevel)
     }
 
     @objc private func toggleMicMute() {
@@ -1606,7 +1567,6 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
 protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didToggleSpeakerMute muted: Bool)
-    func toolbar(_ toolbar: HelperToolbar, didChangeSpeakerVolume volume: Float)
     func toolbar(_ toolbar: HelperToolbar, didToggleMicMute muted: Bool)
     func toolbar(_ toolbar: HelperToolbar, didSelectClipboardSyncMode mode: String)
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool)

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreAudio
 import Foundation
 import Virtualization
 import GhostVMKit
@@ -65,7 +66,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     // Audio state
     private var speakerMuted = false
-    private var speakerVolumeLevel: Float = 1.0
     private var micMuted = true
 
     // Capture key state
@@ -602,21 +602,53 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     func toolbar(_ toolbar: HelperToolbar, didToggleSpeakerMute muted: Bool) {
         speakerMuted = muted
         helperToolbar?.setSpeakerMuted(muted)
+        applySpeakerMute(muted)
         persistAudioSettings()
         NSLog("GhostVMHelper: Speaker mute changed to \(muted)")
-    }
-
-    func toolbar(_ toolbar: HelperToolbar, didChangeSpeakerVolume volume: Float) {
-        speakerVolumeLevel = volume
-        helperToolbar?.setSpeakerVolume(volume)
-        persistAudioSettings()
     }
 
     func toolbar(_ toolbar: HelperToolbar, didToggleMicMute muted: Bool) {
         micMuted = muted
         helperToolbar?.setMicMuted(muted)
+        applyMicMute(muted)
         persistAudioSettings()
         NSLog("GhostVMHelper: Microphone mute changed to \(muted)")
+    }
+
+    private func applySpeakerMute(_ muted: Bool) {
+        // kAudioHardwarePropertyProcessIsAudible: non-zero = audible, 0 = silent
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessIsAudible,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = muted ? 0 : 1
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil,
+            UInt32(MemoryLayout<UInt32>.size), &value
+        )
+        if status != noErr {
+            NSLog("GhostVMHelper: Failed to set process audible to %u: %d", value, status)
+        }
+    }
+
+    private func applyMicMute(_ muted: Bool) {
+        // kAudioHardwarePropertyProcessInputMute: non-zero = input muted, 0 = normal
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessInputMute,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = muted ? 1 : 0
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil,
+            UInt32(MemoryLayout<UInt32>.size), &value
+        )
+        if status != noErr {
+            NSLog("GhostVMHelper: Failed to set process input mute to %u: %d", value, status)
+        }
     }
 
     private func persistAudioSettings() {
@@ -624,7 +656,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let store = VMConfigStore(layout: layout)
         guard var config = try? store.load() else { return }
         config.speakerMuted = speakerMuted
-        config.speakerVolume = speakerVolumeLevel
         config.microphoneMuted = micMuted
         config.modifiedAt = Date()
         try? store.save(config)
@@ -1994,14 +2025,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         urlAlwaysAllowed = openURLsAuto
         toolbar.setOpenURLsAutomatically(openURLsAuto)
 
-        // Load audio settings from VM config
+        // Load audio settings from VM config and apply runtime mute state
         if let layout = layout, let config = try? VMConfigStore(layout: layout).load() {
             speakerMuted = config.speakerMuted
-            speakerVolumeLevel = config.speakerVolume
             micMuted = config.microphoneMuted
             toolbar.setSpeakerMuted(speakerMuted)
-            toolbar.setSpeakerVolume(speakerVolumeLevel)
             toolbar.setMicMuted(micMuted)
+            if speakerMuted { applySpeakerMute(true) }
+            if micMuted { applyMicMute(true) }
         }
 
         containerView.addSubview(vmView)

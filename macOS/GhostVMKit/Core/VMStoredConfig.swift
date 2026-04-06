@@ -46,7 +46,6 @@ public struct VMStoredConfig: Codable {
     public var iconMode: String?
     // Audio controls
     public var speakerMuted: Bool
-    public var speakerVolume: Float
     public var microphoneMuted: Bool
 
     public enum CodingKeys: String, CodingKey {
@@ -75,7 +74,6 @@ public struct VMStoredConfig: Codable {
         case networkConfig
         case iconMode
         case speakerMuted
-        case speakerVolume
         case microphoneMuted
     }
 
@@ -105,7 +103,6 @@ public struct VMStoredConfig: Codable {
         networkConfig: NetworkConfig? = nil,
         iconMode: String? = nil,
         speakerMuted: Bool = false,
-        speakerVolume: Float = 1.0,
         microphoneMuted: Bool = true
     ) {
         self.version = version
@@ -133,7 +130,6 @@ public struct VMStoredConfig: Codable {
         self.networkConfig = networkConfig
         self.iconMode = iconMode
         self.speakerMuted = speakerMuted
-        self.speakerVolume = speakerVolume
         self.microphoneMuted = microphoneMuted
     }
 
@@ -166,7 +162,6 @@ public struct VMStoredConfig: Codable {
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
         // Audio defaults: speaker unmuted at full volume, mic muted
         speakerMuted = try container.decodeIfPresent(Bool.self, forKey: .speakerMuted) ?? false
-        speakerVolume = try container.decodeIfPresent(Float.self, forKey: .speakerVolume) ?? 1.0
         microphoneMuted = try container.decodeIfPresent(Bool.self, forKey: .microphoneMuted) ?? true
     }
 
