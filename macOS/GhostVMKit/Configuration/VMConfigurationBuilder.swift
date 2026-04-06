@@ -149,21 +149,15 @@ public final class VMConfigurationBuilder {
         shareDevice.share = multiShare
         config.directorySharingDevices = [shareDevice]
 
-        // Audio device — always attached so the guest sees a sound card.
-        // Individual streams are added based on speaker/mic config.
+        // Audio device — both output and input streams are always attached so the
+        // guest sees a full sound card. Mute/disable state is handled at the host
+        // audio level, not by removing streams (which would hide devices from the guest).
         let soundDevice = VZVirtioSoundDeviceConfiguration()
-        var audioStreams: [VZVirtioSoundDeviceStreamConfiguration] = []
-        if storedConfig.speakerEnabled {
-            let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
-            outputStream.sink = VZHostAudioOutputStreamSink()
-            audioStreams.append(outputStream)
-        }
-        if storedConfig.microphoneEnabled {
-            let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
-            inputStream.source = VZHostAudioInputStreamSource()
-            audioStreams.append(inputStream)
-        }
-        soundDevice.streams = audioStreams
+        let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
+        outputStream.sink = VZHostAudioOutputStreamSink()
+        let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
+        inputStream.source = VZHostAudioInputStreamSource()
+        soundDevice.streams = [outputStream, inputStream]
         config.audioDevices = [soundDevice]
 
         // Add vsock device for host-guest communication
