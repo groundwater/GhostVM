@@ -640,14 +640,48 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
+
+        // Check if the property is settable
+        var settable: DarwinBoolean = false
+        let settableStatus = AudioObjectIsPropertySettable(
+            AudioObjectID(kAudioObjectSystemObject), &address, &settable
+        )
+        NSLog("GhostVMHelper: ProcessInputMute settable check: status=%d settable=%d", settableStatus, settable.boolValue ? 1 : 0)
+
         var value: UInt32 = muted ? 1 : 0
         let status = AudioObjectSetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
             &address, 0, nil,
             UInt32(MemoryLayout<UInt32>.size), &value
         )
-        if status != noErr {
-            NSLog("GhostVMHelper: Failed to set process input mute to %u: %d", value, status)
+        NSLog("GhostVMHelper: Set process input mute to %u: status=%d", value, status)
+
+        // Also try muting the default input device directly as a fallback
+        var defaultInputAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var inputDeviceID: AudioDeviceID = 0
+        var deviceSize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let deviceStatus = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &defaultInputAddress, 0, nil,
+            &deviceSize, &inputDeviceID
+        )
+        if deviceStatus == noErr && inputDeviceID != kAudioObjectUnknown {
+            // Set volume to 0 on the input device's master channel for our process
+            var muteAddress = AudioObjectPropertyAddress(
+                mSelector: kAudioDevicePropertyMute,
+                mScope: kAudioObjectPropertyScopeInput,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            var muteValue: UInt32 = muted ? 1 : 0
+            let muteStatus = AudioObjectSetPropertyData(
+                inputDeviceID, &muteAddress, 0, nil,
+                UInt32(MemoryLayout<UInt32>.size), &muteValue
+            )
+            NSLog("GhostVMHelper: Set input device %u mute to %u: status=%d", inputDeviceID, muteValue, muteStatus)
         }
     }
 
