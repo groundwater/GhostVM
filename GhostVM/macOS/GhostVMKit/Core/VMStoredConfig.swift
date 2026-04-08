@@ -44,6 +44,9 @@ public struct VMStoredConfig: Codable {
     public var networkConfig: NetworkConfig?
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
+    // Persisted VM window content size in points
+    public var windowWidth: Double?
+    public var windowHeight: Double?
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -70,6 +73,8 @@ public struct VMStoredConfig: Codable {
         case portForwards
         case networkConfig
         case iconMode
+        case windowWidth
+        case windowHeight
     }
 
     public init(
@@ -96,7 +101,9 @@ public struct VMStoredConfig: Codable {
         macAddress: String? = nil,
         portForwards: [PortForwardConfig] = [],
         networkConfig: NetworkConfig? = nil,
-        iconMode: String? = nil
+        iconMode: String? = nil,
+        windowWidth: Double? = nil,
+        windowHeight: Double? = nil
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -122,6 +129,8 @@ public struct VMStoredConfig: Codable {
         self.portForwards = portForwards
         self.networkConfig = networkConfig
         self.iconMode = iconMode
+        self.windowWidth = windowWidth
+        self.windowHeight = windowHeight
     }
 
     public init(from decoder: Decoder) throws {
@@ -151,6 +160,8 @@ public struct VMStoredConfig: Codable {
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
         networkConfig = try container.decodeIfPresent(NetworkConfig.self, forKey: .networkConfig)
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
+        windowWidth = try container.decodeIfPresent(Double.self, forKey: .windowWidth)
+        windowHeight = try container.decodeIfPresent(Double.self, forKey: .windowHeight)
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
