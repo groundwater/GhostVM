@@ -54,6 +54,22 @@ final class VMConfigStoreTests: XCTestCase {
         XCTAssertEqual(loaded.diskBytes, config.diskBytes)
         XCTAssertEqual(loaded.installed, config.installed)
         XCTAssertEqual(loaded.lastInstallBuild, config.lastInstallBuild)
+        XCTAssertNil(loaded.windowWidth)
+        XCTAssertNil(loaded.windowHeight)
+    }
+
+    func testLoadAndSavePersistsWindowSize() throws {
+        let layout = VMFileLayout(bundleURL: tempDir)
+        let store = VMConfigStore(layout: layout)
+        var config = makeConfig()
+        config.windowWidth = 1600
+        config.windowHeight = 1000
+
+        try store.save(config)
+        let loaded = try store.load()
+
+        XCTAssertEqual(loaded.windowWidth, 1600)
+        XCTAssertEqual(loaded.windowHeight, 1000)
     }
 
     func testSaveUpdatesModifiedAt() throws {
