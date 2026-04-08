@@ -1274,6 +1274,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 alert.addButton(withTitle: "Quit")
                 let response = alert.runModal()
                 if response == .alertSecondButtonReturn {
+                    state = .stopped
+                    postStateChange()
                     exit(0)
                 }
                 // Remove missing folders from config and persist
