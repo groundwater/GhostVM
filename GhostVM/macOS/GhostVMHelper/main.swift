@@ -1274,8 +1274,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 alert.addButton(withTitle: "Quit")
                 let response = alert.runModal()
                 if response == .alertSecondButtonReturn {
-                    NSApp.terminate(nil)
-                    return
+                    exit(0)
                 }
                 // Remove missing folders from config and persist
                 let missingSet = Set(missingPaths)
