@@ -1,6 +1,6 @@
 import AppKit
 import Combine
-import CoreAudio
+
 import Foundation
 import Virtualization
 import GhostVMKit
@@ -63,10 +63,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var fileCountCancellable: AnyCancellable?
     private var healthCheckCancellable: AnyCancellable?
     private var windowFocusObservers: [NSObjectProtocol] = []
-
-    // Audio state
-    private var speakerMuted = false
-    private var micMuted = true
 
     // Capture key state
     private var captureQuitEnabled = false
@@ -461,21 +457,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         terminateItem.target = self
         vmMenu.addItem(terminateItem)
 
-        // Audio menu
-        let audioMenuItem = NSMenuItem()
-        audioMenuItem.title = "Audio"
-        mainMenu.addItem(audioMenuItem)
-        let audioMenu = NSMenu(title: "Audio")
-        audioMenuItem.submenu = audioMenu
-
-        let muteSpeakerItem = NSMenuItem(title: "Mute Speaker", action: #selector(toggleSpeakerMuteMenu), keyEquivalent: "")
-        muteSpeakerItem.target = self
-        audioMenu.addItem(muteSpeakerItem)
-
-        let muteMicItem = NSMenuItem(title: "Mute Microphone", action: #selector(toggleMicMuteMenu), keyEquivalent: "")
-        muteMicItem.target = self
-        audioMenu.addItem(muteMicItem)
-
         // Window menu
         let windowMenuItem = NSMenuItem()
         windowMenuItem.title = "Window"
@@ -562,14 +543,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         toolbar(helperToolbar!, didSelectClipboardSyncMode: newMode)
     }
 
-    @objc private func toggleSpeakerMuteMenu() {
-        toolbar(helperToolbar!, didToggleSpeakerMute: !speakerMuted)
-    }
-
-    @objc private func toggleMicMuteMenu() {
-        toolbar(helperToolbar!, didToggleMicMute: !micMuted)
-    }
-
     // Menu validation
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
@@ -586,114 +559,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 menuItem.state = (currentMode != .disabled) ? .on : .off
             }
             return state == .running
-        case #selector(toggleSpeakerMuteMenu):
-            menuItem.state = speakerMuted ? .on : .off
-            return true
-        case #selector(toggleMicMuteMenu):
-            menuItem.state = micMuted ? .on : .off
-            return true
         default:
             return true
         }
     }
 
     // MARK: - HelperToolbarDelegate
-
-    func toolbar(_ toolbar: HelperToolbar, didToggleSpeakerMute muted: Bool) {
-        speakerMuted = muted
-        helperToolbar?.setSpeakerMuted(muted)
-        applySpeakerMute(muted)
-        persistAudioSettings()
-        NSLog("GhostVMHelper: Speaker mute changed to \(muted)")
-    }
-
-    func toolbar(_ toolbar: HelperToolbar, didToggleMicMute muted: Bool) {
-        micMuted = muted
-        helperToolbar?.setMicMuted(muted)
-        applyMicMute(muted)
-        persistAudioSettings()
-        NSLog("GhostVMHelper: Microphone mute changed to \(muted)")
-    }
-
-    private func applySpeakerMute(_ muted: Bool) {
-        // kAudioHardwarePropertyProcessIsAudible: non-zero = audible, 0 = silent
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessIsAudible,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var value: UInt32 = muted ? 0 : 1
-        let status = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address, 0, nil,
-            UInt32(MemoryLayout<UInt32>.size), &value
-        )
-        if status != noErr {
-            NSLog("GhostVMHelper: Failed to set process audible to %u: %d", value, status)
-        }
-    }
-
-    private func applyMicMute(_ muted: Bool) {
-        // kAudioHardwarePropertyProcessInputMute: non-zero = input muted, 0 = normal
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessInputMute,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        // Check if the property is settable
-        var settable: DarwinBoolean = false
-        let settableStatus = AudioObjectIsPropertySettable(
-            AudioObjectID(kAudioObjectSystemObject), &address, &settable
-        )
-        NSLog("GhostVMHelper: ProcessInputMute settable check: status=%d settable=%d", settableStatus, settable.boolValue ? 1 : 0)
-
-        var value: UInt32 = muted ? 1 : 0
-        let status = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address, 0, nil,
-            UInt32(MemoryLayout<UInt32>.size), &value
-        )
-        NSLog("GhostVMHelper: Set process input mute to %u: status=%d", value, status)
-
-        // Also try muting the default input device directly as a fallback
-        var defaultInputAddress = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var inputDeviceID: AudioDeviceID = 0
-        var deviceSize = UInt32(MemoryLayout<AudioDeviceID>.size)
-        let deviceStatus = AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &defaultInputAddress, 0, nil,
-            &deviceSize, &inputDeviceID
-        )
-        if deviceStatus == noErr && inputDeviceID != kAudioObjectUnknown {
-            // Set volume to 0 on the input device's master channel for our process
-            var muteAddress = AudioObjectPropertyAddress(
-                mSelector: kAudioDevicePropertyMute,
-                mScope: kAudioObjectPropertyScopeInput,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            var muteValue: UInt32 = muted ? 1 : 0
-            let muteStatus = AudioObjectSetPropertyData(
-                inputDeviceID, &muteAddress, 0, nil,
-                UInt32(MemoryLayout<UInt32>.size), &muteValue
-            )
-            NSLog("GhostVMHelper: Set input device %u mute to %u: status=%d", inputDeviceID, muteValue, muteStatus)
-        }
-    }
-
-    private func persistAudioSettings() {
-        guard let layout = layout else { return }
-        let store = VMConfigStore(layout: layout)
-        guard var config = try? store.load() else { return }
-        config.speakerMuted = speakerMuted
-        config.microphoneMuted = micMuted
-        config.modifiedAt = Date()
-        try? store.save(config)
-    }
 
     func toolbar(_ toolbar: HelperToolbar, didToggleCaptureSystemKeys enabled: Bool) {
         vmView?.capturesSystemKeys = enabled
@@ -2058,16 +1929,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let openURLsAuto = UserDefaults.standard.bool(forKey: openURLsKey)
         urlAlwaysAllowed = openURLsAuto
         toolbar.setOpenURLsAutomatically(openURLsAuto)
-
-        // Load audio settings from VM config and apply runtime mute state
-        if let layout = layout, let config = try? VMConfigStore(layout: layout).load() {
-            speakerMuted = config.speakerMuted
-            micMuted = config.microphoneMuted
-            toolbar.setSpeakerMuted(speakerMuted)
-            toolbar.setMicMuted(micMuted)
-            if speakerMuted { applySpeakerMute(true) }
-            if micMuted { applyMicMute(true) }
-        }
 
         containerView.addSubview(vmView)
 

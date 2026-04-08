@@ -44,9 +44,6 @@ public struct VMStoredConfig: Codable {
     public var networkConfig: NetworkConfig?
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
-    // Audio controls
-    public var speakerMuted: Bool
-    public var microphoneMuted: Bool
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -73,8 +70,6 @@ public struct VMStoredConfig: Codable {
         case portForwards
         case networkConfig
         case iconMode
-        case speakerMuted
-        case microphoneMuted
     }
 
     public init(
@@ -101,9 +96,7 @@ public struct VMStoredConfig: Codable {
         macAddress: String? = nil,
         portForwards: [PortForwardConfig] = [],
         networkConfig: NetworkConfig? = nil,
-        iconMode: String? = nil,
-        speakerMuted: Bool = false,
-        microphoneMuted: Bool = true
+        iconMode: String? = nil
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -129,8 +122,6 @@ public struct VMStoredConfig: Codable {
         self.portForwards = portForwards
         self.networkConfig = networkConfig
         self.iconMode = iconMode
-        self.speakerMuted = speakerMuted
-        self.microphoneMuted = microphoneMuted
     }
 
     public init(from decoder: Decoder) throws {
@@ -160,9 +151,6 @@ public struct VMStoredConfig: Codable {
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
         networkConfig = try container.decodeIfPresent(NetworkConfig.self, forKey: .networkConfig)
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
-        // Audio defaults: speaker unmuted at full volume, mic muted
-        speakerMuted = try container.decodeIfPresent(Bool.self, forKey: .speakerMuted) ?? false
-        microphoneMuted = try container.decodeIfPresent(Bool.self, forKey: .microphoneMuted) ?? true
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
