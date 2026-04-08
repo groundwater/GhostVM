@@ -1,3 +1,5 @@
 .DS_Store
 .claude/worktrees
+.claude/plans/
 settings.local.json
+

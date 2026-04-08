@@ -57,6 +57,12 @@ All build commands run from `GhostVM/`:
 - Do NOT include a "Test plan" section with manual testing checklists — they are not actionable in CI and add noise
 - If automated tests exist for the change, mention them briefly; otherwise omit the section
 
+## Documents
+
+- **Journal** — Every agent run adds one entry at `Documents/Journal/YYYY/MM/DD/{title}.md`. See `Documents/Developer/Journal-Policy.md` for required fields and naming rules.
+- **Plans** — Execution plans go in `Documents/Plans/YYYY/MM/DD/{title}.md`. Reuse existing plans before creating duplicates.
+- **Doc-search** — Prefer `bin/doc-search search <query>` over grep/glob when searching documentation. Keyword search via ripgrep.
+
 ## Common Mistakes to Avoid
 - Never use ad-hoc signing (`-s "-"`) for GhostTools — TCC permissions reset every rebuild
 - Never return just the vsock fd — return the VZVirtioSocketConnection object to keep it alive

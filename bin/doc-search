@@ -1,0 +1,37 @@
+#!/bin/bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DOCS_DIR="$ROOT/Documents"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  doc-search search <query>   Keyword search (ripgrep)
+  doc-search ls               List all documents
+  doc-search help             Show this message
+EOF
+}
+
+case "${1:-}" in
+  search)
+    shift
+    query="$*"
+    if [ -z "$query" ]; then
+      usage >&2
+      exit 1
+    fi
+    grep -rn -i -F -- "$query" "$DOCS_DIR"
+    ;;
+  ls)
+    find "$DOCS_DIR" -type f | sort
+    ;;
+  help|-h|--help|"")
+    usage
+    ;;
+  *)
+    echo "Unknown command: $1" >&2
+    usage >&2
+    exit 1
+    ;;
+esac
