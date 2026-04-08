@@ -1040,6 +1040,28 @@ public final class VMController {
         try discardSuspend(bundleURL: bundleURL(for: name))
     }
 
+    /// Validate that all shared folder paths in the VM config exist and are directories.
+    /// Call before launching a helper process so the error is reported in the CLI.
+    public func validateSharedFolders(bundleURL: URL) throws {
+        let layout = try layoutForExistingBundle(at: bundleURL)
+        let store = VMConfigStore(layout: layout)
+        let config = try store.load()
+
+        var sharedFolders: [SharedFolderConfig] = []
+        if !config.sharedFolders.isEmpty {
+            sharedFolders = config.sharedFolders
+        } else if let legacyPath = config.sharedFolderPath {
+            sharedFolders = [SharedFolderConfig(path: legacyPath, readOnly: config.sharedFolderReadOnly)]
+        }
+
+        for folder in sharedFolders {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                throw VMError.message("Shared folder path '\(folder.path)' does not exist or is not a directory.")
+            }
+        }
+    }
+
     // MARK: - CLI Start/Resume (blocking)
 
     /// Start a VM from the CLI. Blocks until the VM terminates.
