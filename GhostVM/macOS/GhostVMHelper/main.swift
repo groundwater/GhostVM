@@ -1271,7 +1271,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 alert.informativeText = "The following shared folder path\(missingPaths.count == 1 ? " does" : "s do") not exist:\n\n\(list)\n\nBoot anyway? The missing folder\(missingPaths.count == 1 ? "" : "s") will be removed from the configuration."
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "Boot Anyway")
-                alert.addButton(withTitle: "Cancel")
+                alert.addButton(withTitle: "Quit")
                 let response = alert.runModal()
                 if response == .alertSecondButtonReturn {
                     NSApp.terminate(nil)
