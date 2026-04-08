@@ -1251,6 +1251,42 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 try store.save(config)
             }
 
+            // Check for missing shared folder paths before building configuration
+            let allFolders: [SharedFolderConfig] = {
+                if !config.sharedFolders.isEmpty { return config.sharedFolders }
+                if let p = config.sharedFolderPath, !p.isEmpty {
+                    return [SharedFolderConfig(path: p, readOnly: config.sharedFolderReadOnly)]
+                }
+                return []
+            }()
+            let missingPaths = allFolders.filter { folder in
+                var isDir: ObjCBool = false
+                return !FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDir) || !isDir.boolValue
+            }.map(\.path)
+
+            if !missingPaths.isEmpty {
+                let list = missingPaths.joined(separator: "\n")
+                let alert = NSAlert()
+                alert.messageText = "Shared Folder Not Found"
+                alert.informativeText = "The following shared folder path\(missingPaths.count == 1 ? " does" : "s do") not exist:\n\n\(list)\n\nBoot anyway? The missing folder\(missingPaths.count == 1 ? "" : "s") will be removed from the configuration."
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "Boot Anyway")
+                alert.addButton(withTitle: "Quit")
+                let response = alert.runModal()
+                if response == .alertSecondButtonReturn {
+                    state = .stopped
+                    postStateChange()
+                    exit(0)
+                }
+                // Remove missing folders from config and persist
+                let missingSet = Set(missingPaths)
+                config.sharedFolders = config.sharedFolders.filter { !missingSet.contains($0.path) }
+                if let legacyPath = config.sharedFolderPath, missingSet.contains(legacyPath) {
+                    config.sharedFolderPath = nil
+                }
+                try store.save(config)
+            }
+
             // Build VM configuration
             let builder = VMConfigurationBuilder(layout: layout!, storedConfig: config)
             let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
