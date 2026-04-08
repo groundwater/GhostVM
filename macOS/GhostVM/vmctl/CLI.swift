@@ -237,6 +237,11 @@ struct CLI {
         if headless {
             try controller.startVM(bundleURL: bundleURL, headless: true, runtimeSharedFolder: runtimeSharedFolder)
         } else {
+            // Validate shared folders before launching the helper so errors
+            // are reported in the terminal instead of a GUI dialog.
+            if runtimeSharedFolder == nil {
+                try controller.validateSharedFolders(bundleURL: bundleURL)
+            }
             try launchViaHelper(bundleURL: bundleURL)
         }
     }

@@ -127,7 +127,7 @@ public final class VMConfigurationBuilder {
         for folder in sharedFolders {
             var isDirectory: ObjCBool = false
             guard FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                throw VMError.message("Shared folder path \(folder.path) does not exist or is not a directory.")
+                throw VMError.message("Shared folder path '\(folder.path)' does not exist or is not a directory.")
             }
             let url = URL(fileURLWithPath: folder.path)
             let sharedDirectory = VZSharedDirectory(url: url, readOnly: folder.readOnly)
