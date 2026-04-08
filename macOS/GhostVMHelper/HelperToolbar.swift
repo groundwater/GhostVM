@@ -62,6 +62,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         static let sharedFolders = NSToolbarItem.Identifier("sharedFolders")
         static let clipboardSync = NSToolbarItem.Identifier("clipboardSync")
         static let iconChooser = NSToolbarItem.Identifier("iconChooser")
+
         static let captureKeys = NSToolbarItem.Identifier("captureKeys")
         static let captureCommands = NSToolbarItem.Identifier("captureCommands")
         static let queuedFiles = NSToolbarItem.Identifier("queuedFiles")
