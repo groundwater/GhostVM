@@ -149,6 +149,17 @@ public final class VMConfigurationBuilder {
         shareDevice.share = multiShare
         config.directorySharingDevices = [shareDevice]
 
+        // Audio device — output and input streams are always attached.
+        // Virtualization.framework provides no runtime mute/volume controls;
+        // streams are fixed at VM creation time.
+        let soundDevice = VZVirtioSoundDeviceConfiguration()
+        let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
+        outputStream.sink = VZHostAudioOutputStreamSink()
+        let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
+        inputStream.source = VZHostAudioInputStreamSource()
+        soundDevice.streams = [outputStream, inputStream]
+        config.audioDevices = [soundDevice]
+
         // Add vsock device for host-guest communication
         // This enables direct socket communication between host and guest without going through the network stack
         let socketDevice = VZVirtioSocketDeviceConfiguration()

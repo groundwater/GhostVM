@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>HelperApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>GhostVM needs microphone access to pass audio input to the virtual machine.</string>
 </dict>
 </plist>

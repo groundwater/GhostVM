@@ -130,6 +130,8 @@ final class VMStoredConfigTests: XCTestCase {
         XCTAssertEqual(decoded.restoreImagePath, config.restoreImagePath)
         XCTAssertEqual(decoded.installed, config.installed)
         XCTAssertEqual(decoded.lastInstallBuild, config.lastInstallBuild)
+        XCTAssertNil(decoded.windowWidth)
+        XCTAssertNil(decoded.windowHeight)
     }
 
     func testLegacyNameKey() throws {
@@ -213,6 +215,65 @@ final class VMStoredConfigTests: XCTestCase {
         let data = try encoder.encode(config)
         let decoded = try decoder.decode(VMStoredConfig.self, from: data)
         XCTAssertTrue(decoded.isSuspended)
+    }
+
+    func testWindowSizeDefaultsToNilWhenMissing() throws {
+        let json = """
+        {
+            "version": 1,
+            "createdAt": 0,
+            "modifiedAt": 0,
+            "cpus": 2,
+            "memoryBytes": 4294967296,
+            "diskBytes": 34359738368,
+            "restoreImagePath": "/restore.ipsw",
+            "hardwareModelPath": "HardwareModel.bin",
+            "machineIdentifierPath": "MachineIdentifier.bin",
+            "auxiliaryStoragePath": "AuxiliaryStorage.bin",
+            "diskPath": "disk.img",
+            "sharedFolderReadOnly": true,
+            "installed": false
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let config = try decoder.decode(VMStoredConfig.self, from: json.data(using: .utf8)!)
+        XCTAssertNil(config.windowWidth)
+        XCTAssertNil(config.windowHeight)
+    }
+
+    func testWindowSizeRoundTrips() throws {
+        let now = Date()
+        let config = VMStoredConfig(
+            version: 1,
+            createdAt: now,
+            modifiedAt: now,
+            cpus: 4,
+            memoryBytes: 8 * 1024 * 1024 * 1024,
+            diskBytes: 64 * 1024 * 1024 * 1024,
+            restoreImagePath: "/path/to/restore.ipsw",
+            hardwareModelPath: "HardwareModel.bin",
+            machineIdentifierPath: "MachineIdentifier.bin",
+            auxiliaryStoragePath: "AuxiliaryStorage.bin",
+            diskPath: "disk.img",
+            sharedFolderPath: nil,
+            sharedFolderReadOnly: true,
+            installed: true,
+            lastInstallBuild: "24A123",
+            lastInstallVersion: "15.0",
+            lastInstallDate: now,
+            legacyName: nil,
+            windowWidth: 1440,
+            windowHeight: 900
+        )
+
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(config)
+
+        let decoder = JSONDecoder()
+        let decoded = try decoder.decode(VMStoredConfig.self, from: data)
+        XCTAssertEqual(decoded.windowWidth, 1440)
+        XCTAssertEqual(decoded.windowHeight, 900)
     }
 }
 
