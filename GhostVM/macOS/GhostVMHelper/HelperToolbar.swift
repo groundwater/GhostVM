@@ -173,7 +173,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     /// Returns the anchor view for a toolbar item identifier.
     /// Falls back to any visible toolbar button if the requested item was removed by toolbar customization.
     /// Crashes in debug builds if no toolbar items are visible at all.
-    func anchorView(for identifier: NSToolbarItem.Identifier) -> NSView {
+    func anchorView(for identifier: NSToolbarItem.Identifier) -> NSView? {
         // Direct lookup for items with custom views
         let item: NSToolbarItem?
         switch identifier {
@@ -218,7 +218,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             }
         }
 
-        fatalError("PopoverManager: no visible toolbar items to anchor popover for \(identifier.rawValue)")
+        return nil
     }
 
     // MARK: - State Updates
