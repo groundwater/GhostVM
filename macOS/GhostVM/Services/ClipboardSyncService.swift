@@ -78,17 +78,12 @@ public final class ClipboardSyncService: ObservableObject {
     /// Pushes host clipboard to guest and/or pulls guest clipboard to host.
     public func windowDidBecomeKey() {
         guard syncMode != .disabled else { return }
-        guard let client = guestClient else { return }
 
-        Task {
-            // Push host clipboard to guest if it changed while away
-            if syncMode.allowsHostToGuest {
-                await pushHostToGuest(client: client)
-            }
-            // Pull guest clipboard to host
-            if syncMode.allowsGuestToHost {
-                await pullGuestToHost(client: client)
-            }
+        if syncMode.allowsHostToGuest {
+            copyToGuestIfChanged()
+        }
+        if syncMode.allowsGuestToHost {
+            copyToHost()
         }
     }
 
@@ -96,42 +91,53 @@ public final class ClipboardSyncService: ObservableObject {
     /// Pulls guest clipboard so the user can paste on the host side.
     public func windowDidResignKey() {
         guard syncMode != .disabled else { return }
-        guard let client = guestClient else { return }
 
+        if syncMode.allowsGuestToHost {
+            copyToHost()
+        }
+    }
+
+    // MARK: - Copy
+
+    /// Push the host clipboard to the guest unconditionally.
+    public func copyToGuest() {
+        guard let client = guestClient else { return }
+        guard let (data, type) = bestPasteboardItem() else { return }
+        lastHostChangeCount = hostPasteboard.changeCount
         Task {
-            if syncMode.allowsGuestToHost {
-                await pullGuestToHost(client: client)
+            do {
+                try await client.setClipboard(data: data, type: type)
+                isConnected = true
+                lastError = nil
+            } catch {
+                lastError = "Failed to send to guest: \(error.localizedDescription)"
+                isConnected = false
             }
         }
+    }
+
+    /// Push the host clipboard to the guest only if it changed since the last sync.
+    public func copyToGuestIfChanged() {
+        let currentCount = hostPasteboard.changeCount
+        guard currentCount != lastHostChangeCount else { return }
+
+        guard let (data, _) = bestPasteboardItem() else { return }
+        let hash = Self.sha256(data)
+        if hash == lastGuestDataHash { return }
+
+        copyToGuest()
+    }
+
+    /// Pull the guest clipboard to the host.
+    public func copyToHost() {
+        guard let client = guestClient else { return }
+        Task { await pullGuestToHost(client: client) }
     }
 
     // MARK: - Private
 
     private static func sha256(_ data: Data) -> Data {
         Data(SHA256.hash(data: data))
-    }
-
-    private func pushHostToGuest(client: any GhostClientProtocol) async {
-        let currentCount = hostPasteboard.changeCount
-        guard currentCount != lastHostChangeCount else { return }
-
-        lastHostChangeCount = currentCount
-
-        // Find the richest available type
-        guard let (data, type) = bestPasteboardItem() else { return }
-
-        // Avoid echo: don't send if this is what we just received from guest
-        let hash = Self.sha256(data)
-        if hash == lastGuestDataHash { return }
-
-        do {
-            try await client.setClipboard(data: data, type: type)
-            isConnected = true
-            lastError = nil
-        } catch {
-            lastError = "Failed to send to guest: \(error.localizedDescription)"
-            isConnected = false
-        }
     }
 
     private func pullGuestToHost(client: any GhostClientProtocol) async {
