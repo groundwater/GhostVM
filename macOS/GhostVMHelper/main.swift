@@ -445,16 +445,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let clipboardMenu = NSMenu(title: "Clipboard")
         clipboardMenuItem.submenu = clipboardMenu
 
-        let syncItem = NSMenuItem(title: "Synchronize", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
-        syncItem.target = self
-        clipboardMenu.addItem(syncItem)
-
-        let alwaysAllowItem = NSMenuItem(title: "Always Allow", action: #selector(toggleAlwaysAllowClipboard), keyEquivalent: "")
-        alwaysAllowItem.target = self
-        clipboardMenu.addItem(alwaysAllowItem)
-
-        clipboardMenu.addItem(NSMenuItem.separator())
-
         let copyToGuestItem = NSMenuItem(title: "Copy to Guest", action: #selector(copyClipboardToGuest), keyEquivalent: "")
         copyToGuestItem.target = self
         clipboardMenu.addItem(copyToGuestItem)
@@ -462,6 +452,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let copyToHostItem = NSMenuItem(title: "Copy to Host", action: #selector(copyClipboardToHost), keyEquivalent: "")
         copyToHostItem.target = self
         clipboardMenu.addItem(copyToHostItem)
+
+        clipboardMenu.addItem(NSMenuItem.separator())
+
+        let syncItem = NSMenuItem(title: "Automatically Sync", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
+        syncItem.target = self
+        clipboardMenu.addItem(syncItem)
+
+        let alwaysAllowItem = NSMenuItem(title: "Always Allow", action: #selector(toggleAlwaysAllowClipboard), keyEquivalent: "")
+        alwaysAllowItem.target = self
+        clipboardMenu.addItem(alwaysAllowItem)
 
         vmMenu.addItem(clipboardMenuItem)
 
@@ -602,9 +602,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             let syncEnabled = clipboardSyncService?.syncMode != .disabled
             return state == .running && syncEnabled
         case #selector(copyClipboardToGuest):
-            return state == .running && clipboardSyncService?.syncMode != .disabled
+            return state == .running
         case #selector(copyClipboardToHost):
-            return state == .running && clipboardSyncService?.syncMode != .disabled
+            return state == .running
         default:
             return true
         }
