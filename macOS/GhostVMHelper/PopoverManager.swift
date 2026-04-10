@@ -34,8 +34,8 @@ extension PopoverContent {
 final class PopoverManager: NSObject, NSPopoverDelegate {
 
     /// Resolves a toolbar item identifier to its anchor view.
-    /// Must be set before calling show(). Crashes if the identifier cannot be resolved.
-    var anchorViewResolver: ((NSToolbarItem.Identifier) -> NSView)!
+    /// Must be set before calling show(). Returns nil when the toolbar is not visible (e.g. full screen).
+    var anchorViewResolver: ((NSToolbarItem.Identifier) -> NSView?)!
 
     /// Fires when the manager goes idle→active or active→idle.
     var onActiveStateChanged: ((Bool) -> Void)?
@@ -270,7 +270,7 @@ final class PopoverManager: NSObject, NSPopoverDelegate {
 
     private func present(_ entry: inout StackEntry) {
         let content = entry.content
-        let anchorView = anchorViewResolver(content.preferredToolbarAnchor)
+        guard let anchorView = anchorViewResolver(content.preferredToolbarAnchor) else { return }
 
         let popover = NSPopover()
         switch content.dismissBehavior {
