@@ -439,10 +439,31 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         vmMenu.addItem(NSMenuItem.separator())
 
-        // Clipboard Sync toggle
-        let clipboardItem = NSMenuItem(title: "Clipboard Sync", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
-        clipboardItem.target = self
-        vmMenu.addItem(clipboardItem)
+        // Clipboard submenu
+        let clipboardMenuItem = NSMenuItem()
+        clipboardMenuItem.title = "Clipboard"
+        let clipboardMenu = NSMenu(title: "Clipboard")
+        clipboardMenuItem.submenu = clipboardMenu
+
+        let copyToGuestItem = NSMenuItem(title: "Copy to Guest", action: #selector(copyClipboardToGuest), keyEquivalent: "")
+        copyToGuestItem.target = self
+        clipboardMenu.addItem(copyToGuestItem)
+
+        let copyToHostItem = NSMenuItem(title: "Copy to Host", action: #selector(copyClipboardToHost), keyEquivalent: "")
+        copyToHostItem.target = self
+        clipboardMenu.addItem(copyToHostItem)
+
+        clipboardMenu.addItem(NSMenuItem.separator())
+
+        let syncItem = NSMenuItem(title: "Automatically Sync", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
+        syncItem.target = self
+        clipboardMenu.addItem(syncItem)
+
+        let alwaysAllowItem = NSMenuItem(title: "Always Allow", action: #selector(toggleAlwaysAllowClipboard), keyEquivalent: "")
+        alwaysAllowItem.target = self
+        clipboardMenu.addItem(alwaysAllowItem)
+
+        vmMenu.addItem(clipboardMenuItem)
 
         vmMenu.addItem(NSMenuItem.separator())
 
@@ -545,6 +566,21 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         toolbar(helperToolbar!, didSelectClipboardSyncMode: newMode)
     }
 
+    @objc private func toggleAlwaysAllowClipboard() {
+        clipboardAlwaysAllowed.toggle()
+        if clipboardAlwaysAllowed {
+            clipboardSyncService?.windowDidBecomeKey()
+        }
+    }
+
+    @objc private func copyClipboardToGuest() {
+        clipboardSyncService?.copyToGuest()
+    }
+
+    @objc private func copyClipboardToHost() {
+        clipboardSyncService?.copyToHost()
+    }
+
     // Menu validation
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         switch menuItem.action {
@@ -560,6 +596,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             if let currentMode = clipboardSyncService?.syncMode {
                 menuItem.state = (currentMode != .disabled) ? .on : .off
             }
+            return state == .running
+        case #selector(toggleAlwaysAllowClipboard):
+            menuItem.state = clipboardAlwaysAllowed ? .on : .off
+            let syncEnabled = clipboardSyncService?.syncMode != .disabled
+            return state == .running && syncEnabled
+        case #selector(copyClipboardToGuest):
+            return state == .running
+        case #selector(copyClipboardToHost):
             return state == .running
         default:
             return true
