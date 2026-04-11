@@ -39,8 +39,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var virtualMachine: VZVirtualMachine?
     private var vmQueue: DispatchQueue?
     private var layout: VMFileLayout?
-    private var lastSavedWindowContentSize: NSSize?
-    private var pendingWindowSizeSaveWorkItem: DispatchWorkItem?
+    private var pendingWindowStateSaveWorkItem: DispatchWorkItem?
+    private var shouldEnterFullScreenOnShow = false
+    private let windowConfigQueue = DispatchQueue(label: "org.ghostvm.helper.windowConfig", qos: .utility)
 
     private let controller = VMController()
     private let center = DistributedNotificationCenter.default()
@@ -1437,9 +1438,17 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             startServices()
 
             // Show window
-            window?.center()
             window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+
+            // Restore fullscreen if the VM was shut down in fullscreen.
+            // Dispatch to next run loop iteration so the window is fully visible.
+            if shouldEnterFullScreenOnShow {
+                shouldEnterFullScreenOnShow = false
+                DispatchQueue.main.async {
+                    self.window?.toggleFullScreen(nil)
+                }
+            }
 
             NSLog("GhostVMHelper: VM '\(vmName)' is now running")
 
@@ -1944,52 +1953,93 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     // MARK: - Window
 
-    private func persistedWindowContentSize() -> NSSize? {
-        guard let layout = layout else { return nil }
+    private struct PersistedWindowState {
+        var contentSize: NSSize
+        var origin: NSPoint?
+        var fullScreen: Bool
+        var displayID: UInt32?
+    }
 
+    private func persistedWindowState() -> PersistedWindowState? {
+        guard let layout = layout else { return nil }
         do {
             let config = try VMConfigStore(layout: layout).load()
-            guard let width = config.windowWidth, let height = config.windowHeight else {
-                return nil
+            guard let width = config.windowWidth, let height = config.windowHeight else { return nil }
+            guard width >= 512, height >= 512 else { return nil }
+
+            let origin: NSPoint?
+            if let x = config.windowX, let y = config.windowY {
+                origin = NSPoint(x: x, y: y)
+            } else {
+                origin = nil
             }
-            guard width >= 512, height >= 512 else {
-                return nil
-            }
-            return NSSize(width: width, height: height)
+
+            return PersistedWindowState(
+                contentSize: NSSize(width: width, height: height),
+                origin: origin,
+                fullScreen: config.windowFullScreen ?? false,
+                displayID: config.windowDisplayID
+            )
         } catch {
-            NSLog("GhostVMHelper: Failed to load persisted window size: \(error)")
+            NSLog("GhostVMHelper: Failed to load persisted window state: \(error)")
             return nil
         }
     }
 
-    private func schedulePersistWindowContentSize(_ size: NSSize) {
+    private func schedulePersistWindowState() {
         guard !isUITesting else { return }
         guard let window = window, !window.styleMask.contains(.fullScreen) else { return }
-        guard size.width >= 512, size.height >= 512 else { return }
-        guard lastSavedWindowContentSize != size else { return }
+        let contentSize = window.contentRect(forFrameRect: window.frame).size
+        guard contentSize.width >= 512, contentSize.height >= 512 else { return }
 
-        pendingWindowSizeSaveWorkItem?.cancel()
+        let origin = window.frame.origin
+        let displayID = window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? UInt32
+
+        pendingWindowStateSaveWorkItem?.cancel()
         let bundleURL = self.vmBundleURL!
-        let workItem = DispatchWorkItem { [size] in
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let queue = self?.windowConfigQueue else { return }
+            queue.async {
+                do {
+                    let layout = VMFileLayout(bundleURL: bundleURL)
+                    let store = VMConfigStore(layout: layout)
+                    var config = try store.load()
+                    config.windowWidth = contentSize.width
+                    config.windowHeight = contentSize.height
+                    config.windowX = origin.x
+                    config.windowY = origin.y
+                    config.windowFullScreen = false
+                    config.windowDisplayID = displayID
+                    try store.save(config)
+                } catch {
+                    NSLog("GhostVMHelper: Failed to persist window state: \(error)")
+                }
+            }
+        }
+        pendingWindowStateSaveWorkItem = workItem
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25, execute: workItem)
+    }
+
+    private func persistFullScreenFlag(_ isFullScreen: Bool) {
+        guard !isUITesting else { return }
+        guard let bundleURL = vmBundleURL else { return }
+        pendingWindowStateSaveWorkItem?.cancel()
+        windowConfigQueue.async {
             do {
                 let layout = VMFileLayout(bundleURL: bundleURL)
                 let store = VMConfigStore(layout: layout)
                 var config = try store.load()
-                config.windowWidth = size.width
-                config.windowHeight = size.height
+                config.windowFullScreen = isFullScreen
                 try store.save(config)
-                NSLog("GhostVMHelper: Persisted window size \(Int(size.width))x\(Int(size.height))")
             } catch {
-                NSLog("GhostVMHelper: Failed to persist window size: \(error)")
+                NSLog("GhostVMHelper: Failed to persist fullscreen flag: \(error)")
             }
         }
-        pendingWindowSizeSaveWorkItem = workItem
-        lastSavedWindowContentSize = size
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.25, execute: workItem)
     }
 
     private func createWindow() {
-        let initialContentSize = persistedWindowContentSize() ?? NSSize(width: 1024, height: 768)
+        let state = persistedWindowState()
+        let initialContentSize = state?.contentSize ?? NSSize(width: 1024, height: 768)
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: initialContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -2001,6 +2051,23 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 512, height: 512)
         window.collectionBehavior = [.fullScreenPrimary]
+
+        // Restore window position, falling back to center if the title bar
+        // would be off-screen (e.g., saved display disconnected).
+        if let origin = state?.origin {
+            window.setFrameOrigin(origin)
+            let titleBarRect = NSRect(x: window.frame.minX, y: window.frame.maxY - 40,
+                                      width: window.frame.width, height: 40)
+            let titleBarVisible = NSScreen.screens.contains { screen in
+                screen.visibleFrame.intersects(titleBarRect)
+            }
+            if !titleBarVisible {
+                window.center()
+            }
+        } else {
+            window.center()
+        }
+        shouldEnterFullScreenOnShow = state?.fullScreen ?? false
 
         // Setup toolbar
         let toolbar = HelperToolbar()
@@ -2080,7 +2147,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         self.window = window
         self.vmView = vmView
         self.statusOverlay = overlay
-        self.lastSavedWindowContentSize = window.contentRect(forFrameRect: window.frame).size
     }
 
     // MARK: - NSWindowDelegate
@@ -2100,24 +2166,30 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     }
 
     func windowWillClose(_ notification: Notification) {
-        pendingWindowSizeSaveWorkItem?.cancel()
+        pendingWindowStateSaveWorkItem?.cancel()
         vmView?.virtualMachine = nil
     }
 
     func windowDidResize(_ notification: Notification) {
         guard let window = notification.object as? NSWindow, window === self.window else { return }
-        let contentSize = window.contentRect(forFrameRect: window.frame).size
-        schedulePersistWindowContentSize(contentSize)
+        schedulePersistWindowState()
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === self.window else { return }
+        schedulePersistWindowState()
     }
 
     func windowWillEnterFullScreen(_ notification: Notification) {
         window?.toolbar?.isVisible = false
+        persistFullScreenFlag(true)
     }
 
     func windowDidExitFullScreen(_ notification: Notification) {
         DispatchQueue.main.async {
             self.window?.toolbar?.isVisible = true
         }
+        persistFullScreenFlag(false)
     }
 
     // MARK: - VZVirtualMachineDelegate

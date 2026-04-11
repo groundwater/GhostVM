@@ -44,9 +44,13 @@ public struct VMStoredConfig: Codable {
     public var networkConfig: NetworkConfig?
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
-    // Persisted VM window content size in points
+    // Persisted VM window state
     public var windowWidth: Double?
     public var windowHeight: Double?
+    public var windowX: Double?
+    public var windowY: Double?
+    public var windowFullScreen: Bool?
+    public var windowDisplayID: UInt32?
 
     public enum CodingKeys: String, CodingKey {
         case version
@@ -75,6 +79,10 @@ public struct VMStoredConfig: Codable {
         case iconMode
         case windowWidth
         case windowHeight
+        case windowX
+        case windowY
+        case windowFullScreen
+        case windowDisplayID
     }
 
     public init(
@@ -103,7 +111,11 @@ public struct VMStoredConfig: Codable {
         networkConfig: NetworkConfig? = nil,
         iconMode: String? = nil,
         windowWidth: Double? = nil,
-        windowHeight: Double? = nil
+        windowHeight: Double? = nil,
+        windowX: Double? = nil,
+        windowY: Double? = nil,
+        windowFullScreen: Bool? = nil,
+        windowDisplayID: UInt32? = nil
     ) {
         self.version = version
         self.createdAt = createdAt
@@ -131,6 +143,10 @@ public struct VMStoredConfig: Codable {
         self.iconMode = iconMode
         self.windowWidth = windowWidth
         self.windowHeight = windowHeight
+        self.windowX = windowX
+        self.windowY = windowY
+        self.windowFullScreen = windowFullScreen
+        self.windowDisplayID = windowDisplayID
     }
 
     public init(from decoder: Decoder) throws {
@@ -162,6 +178,10 @@ public struct VMStoredConfig: Codable {
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
         windowWidth = try container.decodeIfPresent(Double.self, forKey: .windowWidth)
         windowHeight = try container.decodeIfPresent(Double.self, forKey: .windowHeight)
+        windowX = try container.decodeIfPresent(Double.self, forKey: .windowX)
+        windowY = try container.decodeIfPresent(Double.self, forKey: .windowY)
+        windowFullScreen = try container.decodeIfPresent(Bool.self, forKey: .windowFullScreen)
+        windowDisplayID = try container.decodeIfPresent(UInt32.self, forKey: .windowDisplayID)
     }
 
     public mutating func normalize(relativeTo layout: VMFileLayout) -> Bool {
