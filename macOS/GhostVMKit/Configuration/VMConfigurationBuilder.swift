@@ -149,16 +149,21 @@ public final class VMConfigurationBuilder {
         shareDevice.share = multiShare
         config.directorySharingDevices = [shareDevice]
 
-        // Audio device — output and input streams are always attached.
-        // Virtualization.framework provides no runtime mute/volume controls;
-        // streams are fixed at VM creation time.
-        let soundDevice = VZVirtioSoundDeviceConfiguration()
+        // Audio devices — output and input use separate VZVirtioSoundDeviceConfiguration
+        // objects so that audio playback does not activate the microphone input session.
+        // A single shared device causes macOS to show the microphone privacy indicator
+        // whenever the guest plays sound, even though nothing is recording.
+        let outputDevice = VZVirtioSoundDeviceConfiguration()
         let outputStream = VZVirtioSoundDeviceOutputStreamConfiguration()
         outputStream.sink = VZHostAudioOutputStreamSink()
+        outputDevice.streams = [outputStream]
+
+        let inputDevice = VZVirtioSoundDeviceConfiguration()
         let inputStream = VZVirtioSoundDeviceInputStreamConfiguration()
         inputStream.source = VZHostAudioInputStreamSource()
-        soundDevice.streams = [outputStream, inputStream]
-        config.audioDevices = [soundDevice]
+        inputDevice.streams = [inputStream]
+
+        config.audioDevices = [outputDevice, inputDevice]
 
         // Add vsock device for host-guest communication
         // This enables direct socket communication between host and guest without going through the network stack
