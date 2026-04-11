@@ -2477,7 +2477,6 @@ struct VMWindowView: View {
 @available(macOS 13.0, *)
 struct SettingsDemoView: View {
     @Environment(\.sparkleUpdater) private var updater
-    @State private var vmPath: String
     @State private var ipswPath: String
     @State private var feedURLString: String
     @State private var verificationMessage: String? = nil
@@ -2489,27 +2488,14 @@ struct SettingsDemoView: View {
 
     init() {
         let ipswService = App2IPSWService.shared
-        _vmPath = State(initialValue: "~/VMs")
         _ipswPath = State(initialValue: ipswService.cacheDirectory.path)
         _feedURLString = State(initialValue: ipswService.feedURL.absoluteString)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Choose where GhostVM stores virtual machines and IPSW downloads, and configure the IPSW feed. Changes in this demo view are not persisted.")
+            Text("Choose where GhostVM stores IPSW downloads and configure the IPSW feed.")
                 .fixedSize(horizontal: false, vertical: true)
-
-            labeledRow("VMs Folder") {
-                HStack(spacing: 8) {
-                    TextField("Path to virtual machines", text: $vmPath)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("settings.vmPathField")
-                    Button("Browse…") {
-                        // Intentionally no-op in demo app.
-                    }
-                    .accessibilityIdentifier("settings.browseVMsButton")
-                }
-            }
 
             labeledRow("IPSW Cache") {
                 HStack(spacing: 8) {
@@ -2517,7 +2503,15 @@ struct SettingsDemoView: View {
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("settings.ipswPathField")
                     Button("Browse…") {
-                        // Intentionally no-op in demo app.
+                        let panel = NSOpenPanel()
+                        panel.canChooseFiles = false
+                        panel.canChooseDirectories = true
+                        panel.allowsMultipleSelection = false
+                        panel.directoryURL = URL(fileURLWithPath: ipswPath)
+                        if panel.runModal() == .OK, let url = panel.url {
+                            ipswPath = url.path
+                            try? App2IPSWService.shared.setCacheDirectory(path: url.path)
+                        }
                     }
                 }
             }
