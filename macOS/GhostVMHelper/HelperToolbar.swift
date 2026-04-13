@@ -883,7 +883,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         shutItem.isEnabled = vmRunning && shutDownEnabled
         captureCommandsMenu.addItem(shutItem)
 
-        let termItem = NSMenuItem(title: "Terminate", action: #selector(terminateVM), keyEquivalent: "")
+        let termItem = NSMenuItem(title: "Terminate…", action: #selector(terminateVM), keyEquivalent: "")
         termItem.target = self
         termItem.isEnabled = vmRunning
         captureCommandsMenu.addItem(termItem)

@@ -476,7 +476,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         shutdownItem.target = self
         vmMenu.addItem(shutdownItem)
 
-        let terminateItem = NSMenuItem(title: "Terminate", action: nil, keyEquivalent: "")
+        let terminateItem = NSMenuItem(title: "Terminate…", action: nil, keyEquivalent: "")
         terminateItem.action = #selector(terminateVMAction)
         terminateItem.target = self
         vmMenu.addItem(terminateItem)
