@@ -93,15 +93,38 @@ struct GhostVMSwiftUIApp: App {
     }
 }
 
-// FocusedValue for passing active VM session to menu commands
-struct FocusedVMSessionKey: FocusedValueKey {
-    typealias Value = App2VMRunSession
+// FocusedValue for passing the selected VM from the sidebar to menu commands
+struct FocusedSelectedVMKey: FocusedValueKey {
+    typealias Value = App2VM
+}
+
+// FocusedValue for triggering the Create VM sheet from the menu
+struct FocusedCreateVMActionKey: FocusedValueKey {
+    typealias Value = Binding<Bool>
 }
 
 extension FocusedValues {
-    var vmSession: App2VMRunSession? {
-        get { self[FocusedVMSessionKey.self] }
-        set { self[FocusedVMSessionKey.self] = newValue }
+    var selectedVM: App2VM? {
+        get { self[FocusedSelectedVMKey.self] }
+        set { self[FocusedSelectedVMKey.self] = newValue }
+    }
+    var showCreateSheet: Binding<Bool>? {
+        get { self[FocusedCreateVMActionKey.self] }
+        set { self[FocusedCreateVMActionKey.self] = newValue }
+    }
+}
+
+/// ViewModifier that publishes an optional App2VM as a focused scene value.
+/// focusedSceneValue requires a non-optional value, so we conditionally apply it.
+@available(macOS 13.0, *)
+private struct OptionalFocusedVM: ViewModifier {
+    let vm: App2VM?
+    func body(content: Content) -> some View {
+        if let vm = vm {
+            content.focusedSceneValue(\.selectedVM, vm)
+        } else {
+            content
+        }
     }
 }
 
@@ -139,12 +162,19 @@ struct DemoAppCommands: Commands {
     @ObservedObject var restoreStore: App2RestoreImageStore
     @ObservedObject private var checkForUpdatesVM: CheckForUpdatesViewModel
     @Environment(\.openWindow) private var openWindow
-    @FocusedValue(\.vmSession) private var activeSession
+    @FocusedValue(\.selectedVM) private var selectedVM
+    @FocusedValue(\.showCreateSheet) private var showCreateSheet
 
     init(store: App2VMStore, restoreStore: App2RestoreImageStore, updater: SPUUpdater) {
         self.store = store
         self.restoreStore = restoreStore
         self.checkForUpdatesVM = CheckForUpdatesViewModel(updater: updater)
+    }
+
+    /// Look up the selected VM fresh from the store so we get reactive status updates.
+    private var selectedStoreVM: App2VM? {
+        guard let vm = selectedVM else { return nil }
+        return store.vms.first { $0.id == vm.id }
     }
 
     var body: some Commands {
@@ -175,41 +205,41 @@ struct DemoAppCommands: Commands {
             .disabled(!checkForUpdatesVM.canCheckForUpdates)
         }
 
+        // Replace File > New to suppress auto-generated "New Settings Window"
+        // and "New Restore Images Window", and add Create VM.
+        CommandGroup(replacing: .newItem) {
+            Button("Create VM\u{2026}") {
+                showCreateSheet?.wrappedValue = true
+            }
+            .keyboardShortcut("n", modifiers: [.command])
+        }
+
+        // Remove "Toggle Full Screen" from the View menu (not applicable to library window).
+        CommandGroup(replacing: .windowSize) { }
+
         CommandMenu("VM") {
             Button("Start") {
-                activeSession?.startIfNeeded()
+                if let vm = selectedStoreVM {
+                    App2VMSessionRegistry.shared.startVM(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
+                }
             }
             .keyboardShortcut("r", modifiers: [.command])
             .disabled(!canStart)
 
             Divider()
 
-            Menu("Clipboard Sync") {
-                ForEach(ClipboardSyncMode.allCases) { mode in
-                    Button {
-                        activeSession?.setClipboardSyncMode(mode)
-                    } label: {
-                        HStack {
-                            Text(mode.displayName)
-                            if activeSession?.clipboardSyncMode == mode {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
-                }
-            }
-            .disabled(activeSession == nil)
-
-            Divider()
-
             Button("Suspend") {
-                activeSession?.suspend()
+                if let vm = selectedStoreVM {
+                    App2VMSessionRegistry.shared.session(for: vm.bundlePath)?.suspend()
+                }
             }
             .keyboardShortcut("s", modifiers: [.command, .option])
             .disabled(!canSuspend)
 
             Button("Shut Down") {
-                activeSession?.stop()
+                if let vm = selectedStoreVM {
+                    App2VMSessionRegistry.shared.session(for: vm.bundlePath)?.stop()
+                }
             }
             .keyboardShortcut("q", modifiers: [.command, .option])
             .disabled(!canShutDown)
@@ -217,7 +247,9 @@ struct DemoAppCommands: Commands {
             Divider()
 
             Button("Terminate") {
-                activeSession?.terminate()
+                if let vm = selectedStoreVM {
+                    App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                }
             }
             .disabled(!canTerminate)
         }
@@ -233,35 +265,22 @@ struct DemoAppCommands: Commands {
     }
 
     private var canStart: Bool {
-        guard let session = activeSession else { return false }
-        switch session.state {
-        case .idle, .stopped, .failed:
-            return true
-        default:
-            return false
-        }
+        guard let vm = selectedStoreVM, vm.installed else { return false }
+        let status = vm.status
+        return status != "Running" && status != "Starting\u{2026}" && status != "Stopping\u{2026}" && status != "Suspending\u{2026}"
     }
 
     private var canSuspend: Bool {
-        guard let session = activeSession else { return false }
-        if case .running = session.state { return true }
-        return false
+        selectedStoreVM?.status == "Running"
     }
 
     private var canShutDown: Bool {
-        guard let session = activeSession else { return false }
-        if case .running = session.state { return true }
-        return false
+        selectedStoreVM?.status == "Running"
     }
 
     private var canTerminate: Bool {
-        guard let session = activeSession else { return false }
-        switch session.state {
-        case .running, .stopping:
-            return true
-        default:
-            return false
-        }
+        guard let status = selectedStoreVM?.status else { return false }
+        return status == "Running" || status == "Stopping\u{2026}"
     }
 
 }
@@ -290,6 +309,11 @@ struct VMListDemoView: View {
     // Clone state
     @State private var vmToClone: App2VM?
     @State private var cloneErrorMessage: String?
+
+    private var selectedVM: App2VM? {
+        guard let id = selectedVMID else { return nil }
+        return store.vms.first { $0.id == id }
+    }
 
     // Watermark
     @AppStorage("showListWatermark") private var showListWatermark: Bool = true
@@ -496,6 +520,8 @@ struct VMListDemoView: View {
                 }
             } // ZStack
         }
+        .modifier(OptionalFocusedVM(vm: selectedVM))
+        .focusedSceneValue(\.showCreateSheet, $isShowingCreateSheet)
         .frame(minWidth: 520, minHeight: 360)
         .sheet(isPresented: $isShowingCreateSheet) {
             CreateVMDemoView(isPresented: $isShowingCreateSheet)
@@ -2470,7 +2496,6 @@ struct VMWindowView: View {
             healthCheckService.stop()
             session.stopIfNeeded()
         }
-        .focusedSceneValue(\.vmSession, session)
     }
 }
 
