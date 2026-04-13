@@ -246,7 +246,7 @@ struct DemoAppCommands: Commands {
 
             Divider()
 
-            Button("Terminate") {
+            Button("Terminate\u{2026}") {
                 if let vm = selectedStoreVM {
                     App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
                 }
