@@ -103,6 +103,11 @@ struct FocusedCreateVMActionKey: FocusedValueKey {
     typealias Value = Binding<Bool>
 }
 
+// FocusedValue for triggering the Terminate confirmation from the menu
+struct FocusedTerminateVMKey: FocusedValueKey {
+    typealias Value = Binding<App2VM?>
+}
+
 extension FocusedValues {
     var selectedVM: App2VM? {
         get { self[FocusedSelectedVMKey.self] }
@@ -111,6 +116,10 @@ extension FocusedValues {
     var showCreateSheet: Binding<Bool>? {
         get { self[FocusedCreateVMActionKey.self] }
         set { self[FocusedCreateVMActionKey.self] = newValue }
+    }
+    var terminateVM: Binding<App2VM?>? {
+        get { self[FocusedTerminateVMKey.self] }
+        set { self[FocusedTerminateVMKey.self] = newValue }
     }
 }
 
@@ -164,6 +173,7 @@ struct DemoAppCommands: Commands {
     @Environment(\.openWindow) private var openWindow
     @FocusedValue(\.selectedVM) private var selectedVM
     @FocusedValue(\.showCreateSheet) private var showCreateSheet
+    @FocusedValue(\.terminateVM) private var terminateVM
 
     init(store: App2VMStore, restoreStore: App2RestoreImageStore, updater: SPUUpdater) {
         self.store = store
@@ -246,10 +256,8 @@ struct DemoAppCommands: Commands {
 
             Divider()
 
-            Button("Terminate") {
-                if let vm = selectedStoreVM {
-                    App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
-                }
+            Button("Terminate\u{2026}") {
+                terminateVM?.wrappedValue = selectedStoreVM
             }
             .disabled(!canTerminate)
         }
@@ -294,6 +302,7 @@ struct VMListDemoView: View {
     @State private var selectedVMID: App2VM.ID?
     @State private var isShowingCreateSheet: Bool = false
     @State private var vmPendingDelete: App2VM?
+    @State private var vmPendingTerminate: App2VM?
     @State private var isDropTarget: Bool = false
     // Snapshot state
     @State private var vmForSnapshot: App2VM?
@@ -522,6 +531,7 @@ struct VMListDemoView: View {
         }
         .modifier(OptionalFocusedVM(vm: selectedVM))
         .focusedSceneValue(\.showCreateSheet, $isShowingCreateSheet)
+        .focusedSceneValue(\.terminateVM, $vmPendingTerminate)
         .frame(minWidth: 520, minHeight: 360)
         .sheet(isPresented: $isShowingCreateSheet) {
             CreateVMDemoView(isPresented: $isShowingCreateSheet)
@@ -555,6 +565,21 @@ struct VMListDemoView: View {
             }
         } message: { vm in
             Text("\"\(vm.name)\" will be moved to the Trash. You can restore it from the Trash later if you change your mind.")
+        }
+        // Terminate confirmation
+        .alert("Terminate this virtual machine?", isPresented: Binding(
+            get: { vmPendingTerminate != nil },
+            set: { if !$0 { vmPendingTerminate = nil } }
+        ), presenting: vmPendingTerminate) { vm in
+            Button("Terminate", role: .destructive) {
+                App2VMSessionRegistry.shared.terminateSession(for: vm.bundlePath)
+                vmPendingTerminate = nil
+            }
+            Button("Cancel", role: .cancel) {
+                vmPendingTerminate = nil
+            }
+        } message: { vm in
+            Text("This will immediately stop \"\(vm.name)\" without a graceful shutdown. Any unsaved work inside the VM will be lost.")
         }
         // Create Snapshot sheet
         .sheet(item: $vmForSnapshot) { vm in
