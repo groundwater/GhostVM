@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 2.10.0</title>
+      <pubDate>Mon, 13 Apr 2026 23:44:17 -0700</pubDate>
+      <sparkle:version>2.10.0</sparkle:version>
+      <sparkle:shortVersionString>2.10.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Auto-renew DHCP lease when host switches Wi-Fi networks (bridged VMs)</li><li>Add ellipsis to Terminate menu items per macOS HIG</li><li>Fix GhostVM.app menu bar items</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v2.10.0/GhostVM-2.10.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="ToITc5nM8j7xmsmy4QtO7DcCm7geTIhjw35bOQuzQ1lwrktiWZokuPeAF9GtTzA5MQ6E3xPBJfDo+1GIAgmjDw=="
+        length="32038102"
+      />
+    </item>
+    <item>
       <title>GhostVM 2.5.0</title>
       <pubDate>Wed, 11 Mar 2026 12:05:14 -0700</pubDate>
       <sparkle:version>2.5.0</sparkle:version>
