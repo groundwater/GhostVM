@@ -61,6 +61,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var healthCheckService: HealthCheckService?
     private var autoPortMapService: AutoPortMapService?
     private var hostAPIService: HostAPIService?
+    private var bridgeMonitorService: BridgeMonitorService?
     private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
     private var fileCountCancellable: AnyCancellable?
@@ -1659,6 +1660,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             NSLog("GhostVMHelper: Port forwarding enabled (NAT mode)")
         } else {
             NSLog("GhostVMHelper: Port forwarding disabled (bridged mode)")
+
+            // 3a. Bridge monitor — cycle the network attachment when the host
+            // network path changes so the guest re-runs DHCP automatically.
+            if let interfaceId = networkConfig.bridgeInterfaceIdentifier {
+                let bmService = BridgeMonitorService(vm: vm, queue: queue, interfaceIdentifier: interfaceId)
+                bmService.start()
+                self.bridgeMonitorService = bmService
+            }
         }
         updateToolbarPortForwards()
 
@@ -1795,6 +1804,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         portForwardService?.stop()
         portForwardService = nil
+
+        bridgeMonitorService?.stop()
+        bridgeMonitorService = nil
 
         folderShareService?.stop()
         folderShareService = nil
