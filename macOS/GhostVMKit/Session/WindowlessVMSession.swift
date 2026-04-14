@@ -45,13 +45,13 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
     /// Whether the VM was suspended and should be resumed instead of started fresh.
     public let wasSuspended: Bool
 
-    public init(name: String, bundleURL: URL, layout: VMFileLayout, storedConfig: VMStoredConfig, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
+    public init(name: String, bundleURL: URL, layout: VMFileLayout, storedConfig: VMStoredConfig, headless: Bool = false, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
         self.wasSuspended = storedConfig.isSuspended && FileManager.default.fileExists(atPath: layout.suspendStateURL.path)
         self.name = name
         self.bundlePath = bundleURL.path
         self.layout = layout
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
-        let configuration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
+        let configuration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
         self.vmQueue = DispatchQueue(label: "vmctl.windowless.\(name)")
         self._virtualMachine = VZVirtualMachine(configuration: configuration, queue: vmQueue)
         super.init()
