@@ -9,6 +9,7 @@ CODESIGN_ID ?= Apple Development
 GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
 APP_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_App_Distribution.provisionprofile
 HELPER_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_Helper_Distribution.provisionprofile
+VMCTL_PROVISIONING_PROFILE ?= .var/profiles/vmctl_command_line.provisionprofile
 
 # Inject build timestamp into patch version during development builds.
 # Set to 0 for production releases (make dist does this automatically).
@@ -97,7 +98,7 @@ cli: $(XCODE_PROJECT)
 		-derivedDataPath $(BUILD_DIR) \
 		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
-	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl"
+	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl.app/Contents/MacOS/vmctl"
 
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
 app: $(XCODE_PROJECT) dmg ghostvm-icon
@@ -400,15 +401,15 @@ dist:
 	fi
 	@# Verify provisioning profile certificates match the signing identity (AMFI rejects
 	@# apps where the profile cert doesn't match the signing cert, even if entitlements match)
-	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE)
+	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE) $(VMCTL_PROVISIONING_PROFILE)
 	@echo "Creating distribution DMG (version $(VERSION))..."
 	@echo "Signing with: $(DIST_CODESIGN_ID)"
 	@rm -rf "$(DIST_DIR)"
 	@mkdir -p "$(DIST_DIR)/dmg-stage"
 	@# Stage app bundle
 	cp -R "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app" "$(DIST_DIR)/dmg-stage/"
-	@# Embed vmctl CLI inside the app bundle
-	cp "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/"
+	@# Embed vmctl.app inside the app bundle (alongside GhostVMHelper)
+	cp -R "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl.app" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/"
 	@# Restricted entitlements (e.g. com.apple.vm.networking) require a matching embedded provisioning profile.
 	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVMHelper/entitlements.plist >/dev/null 2>&1 && [ -z "$(HELPER_PROVISIONING_PROFILE)" ]; then \
 		echo "ERROR: HELPER_PROVISIONING_PROFILE is required for macOS/GhostVMHelper/entitlements.plist (com.apple.vm.networking present)"; \
@@ -425,6 +426,14 @@ dist:
 	@if [ -n "$(APP_PROVISIONING_PROFILE)" ]; then \
 		test -f "$(APP_PROVISIONING_PROFILE)" || (echo "ERROR: APP_PROVISIONING_PROFILE not found: $(APP_PROVISIONING_PROFILE)" && exit 1); \
 		cp "$(APP_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/embedded.provisionprofile"; \
+	fi
+	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/vmctl/entitlements.plist >/dev/null 2>&1 && [ -z "$(VMCTL_PROVISIONING_PROFILE)" ]; then \
+		echo "ERROR: VMCTL_PROVISIONING_PROFILE is required for macOS/GhostVM/vmctl/entitlements.plist (com.apple.vm.networking present)"; \
+		exit 1; \
+	fi
+	@if [ -n "$(VMCTL_PROVISIONING_PROFILE)" ]; then \
+		test -f "$(VMCTL_PROVISIONING_PROFILE)" || (echo "ERROR: VMCTL_PROVISIONING_PROFILE not found: $(VMCTL_PROVISIONING_PROFILE)" && exit 1); \
+		cp "$(VMCTL_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/embedded.provisionprofile"; \
 	fi
 	@# --- Inside-out code signing for notarization ---
 	@echo "Signing nested components (inside-out)..."
@@ -479,11 +488,24 @@ dist:
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
 		fi; \
 	done
-	@# 5. Sign vmctl binary
-	@echo "  Signing vmctl"
+	@# 5. Sign vmctl.app (frameworks, then the bundle itself with entitlements)
+	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/Frameworks/"*.framework; do \
+		if [ -d "$$fw" ]; then \
+			echo "  Signing $$(basename $$fw) (in vmctl)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$fw"; \
+		fi; \
+	done
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/Frameworks/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib) (in vmctl)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@echo "  Signing vmctl.app"
 	codesign --force --options runtime --timestamp \
+		--entitlements macOS/GhostVM/vmctl/entitlements.plist \
 		-s "$(DIST_CODESIGN_ID)" \
-		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/vmctl"
+		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app"
 	@# 5b. Re-create GhostTools.dmg with Developer ID signing for notarization
 	@echo "  Re-signing GhostTools for distribution..."
 	@rm -rf "$(DIST_DIR)/ghosttools-stage"
@@ -524,7 +546,7 @@ dist:
 		--wait
 	xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
-	@echo "vmctl is at: $(APP_NAME).app/Contents/MacOS/vmctl"
+	@echo "vmctl is at: $(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/MacOS/vmctl"
 
 # Sign DMG for Sparkle auto-updates (run after make dist)
 sparkle-sign: sparkle-tools

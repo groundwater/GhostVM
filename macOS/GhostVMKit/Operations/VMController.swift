@@ -1044,7 +1044,7 @@ public final class VMController {
 
     /// Start a VM from the CLI. Blocks until the VM terminates.
     public func startVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
-        let session = try makeWindowlessSession(bundleURL: bundleURL, runtimeSharedFolder: runtimeSharedFolder)
+        let session = try makeWindowlessSession(bundleURL: bundleURL, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
         let vmName = displayName(for: bundleURL)
 
         if session.wasSuspended {
@@ -1094,7 +1094,7 @@ public final class VMController {
 
     /// Resume a suspended VM from the CLI. Blocks until the VM terminates.
     public func resumeVM(bundleURL: URL, headless: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws {
-        let session = try makeWindowlessSession(bundleURL: bundleURL, runtimeSharedFolder: runtimeSharedFolder)
+        let session = try makeWindowlessSession(bundleURL: bundleURL, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
         let vmName = displayName(for: bundleURL)
 
         guard session.wasSuspended else {
@@ -1215,7 +1215,7 @@ public final class VMController {
 
     // MARK: - Windowless Session Support (for SwiftUI apps that manage their own window)
 
-    public func makeWindowlessSession(bundleURL: URL, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> WindowlessVMSession {
+    public func makeWindowlessSession(bundleURL: URL, headless: Bool = false, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> WindowlessVMSession {
         let layout = try layoutForExistingBundle(at: bundleURL)
         let store = VMConfigStore(layout: layout)
         var config = try store.load()
@@ -1240,7 +1240,7 @@ public final class VMController {
             }
         }
 
-        return try WindowlessVMSession(name: name, bundleURL: bundleURL, layout: layout, storedConfig: config, runtimeSharedFolder: runtimeSharedFolder)
+        return try WindowlessVMSession(name: name, bundleURL: bundleURL, layout: layout, storedConfig: config, headless: headless, runtimeSharedFolder: runtimeSharedFolder)
     }
 
     // MARK: - Private Helpers

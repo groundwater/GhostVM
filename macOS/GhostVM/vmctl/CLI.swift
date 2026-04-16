@@ -371,14 +371,14 @@ struct CLI {
     private func findHelperApp() -> URL? {
         let vmctlURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
 
-        // When embedded in GhostVM.app/Contents/MacOS/vmctl:
-        // Helper is at GhostVM.app/Contents/PlugIns/Helpers/GhostVMHelper.app
-        let appContents = vmctlURL
-            .deletingLastPathComponent()  // MacOS/
-            .deletingLastPathComponent()  // Contents/
-        let embeddedHelper = appContents
-            .appendingPathComponent("PlugIns")
-            .appendingPathComponent("Helpers")
+        // When embedded in GhostVM.app/Contents/PlugIns/Helpers/vmctl.app/Contents/MacOS/vmctl:
+        // Helper is a sibling at GhostVM.app/Contents/PlugIns/Helpers/GhostVMHelper.app
+        let helpersDir = vmctlURL
+            .deletingLastPathComponent()  // -> MacOS/
+            .deletingLastPathComponent()  // -> Contents/
+            .deletingLastPathComponent()  // -> vmctl.app/
+            .deletingLastPathComponent()  // -> Helpers/
+        let embeddedHelper = helpersDir
             .appendingPathComponent("GhostVMHelper.app")
         if FileManager.default.fileExists(atPath: embeddedHelper.path) {
             return embeddedHelper

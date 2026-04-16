@@ -48,7 +48,7 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
 
   vmctl:
-    type: tool
+    type: application
     platform: macOS
     sources:
       - path: GhostVM/vmctl
@@ -57,13 +57,17 @@ targets:
     dependencies:
       - target: GhostVMKit
         link: true
-        embed: false
+        embed: true
     settings:
       base:
         PRODUCT_NAME: vmctl
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.vmctl
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_LSBackgroundOnly: YES
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
+        CODE_SIGN_ENTITLEMENTS: GhostVM/vmctl/entitlements.plist
         DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
         SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhostVM/vmctl/CEditLine"
@@ -124,7 +128,8 @@ targets:
         embed: true
         codeSign: true
         copy:
-          destination: executables
+          destination: plugins
+          subpath: Helpers
       - target: GhostVMHelper
         embed: true
         codeSign: true
