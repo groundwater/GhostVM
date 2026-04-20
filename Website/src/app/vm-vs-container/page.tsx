@@ -128,11 +128,6 @@ export default function VMvsContainer() {
         </div>
 
         <h2 id="docker">Docker on Mac: What It Actually Does</h2>
-        <p>
-          There&apos;s a common misconception that Docker provides isolation on
-          macOS. Here&apos;s the reality:
-        </p>
-
         <h3>How Docker Desktop Works on Mac</h3>
         <p>
           Docker Desktop on macOS runs a hidden Linux VM (using Apple&apos;s
