@@ -217,13 +217,6 @@ export default function MacOSVirtualMachineForDevelopment() {
                   Works
                 </td>
               </tr>
-              </tr>
-              <tr>
-                <td className="py-3 px-4">Windows guest (ARM64)</td>
-                <td className="py-3 px-4 text-amber-600 dark:text-amber-400">
-                  Limited (requires Windows ARM)
-                </td>
-              </tr>
               <tr>
                 <td className="py-3 px-4">x86/Intel software</td>
                 <td className="py-3 px-4 text-red-600 dark:text-red-400">

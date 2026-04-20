@@ -49,7 +49,7 @@ const jsonLd = {
     "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects.",
   url: "https://ghostvm.org",
   downloadUrl: "https://github.com/groundwater/GhostVM/releases/latest",
-  softwareVersion: "2.5.0",
+  softwareVersion: "2.11.0",
   author: {
     "@type": "Organization",
     name: "GhostVM",
