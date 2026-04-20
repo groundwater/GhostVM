@@ -2,7 +2,8 @@ import type { Metadata } from "next"
 import { ThemeProvider } from "next-themes"
 import Navbar from "@/components/layout/Navbar"
 import Footer from "@/components/layout/Footer"
-import { siteConfig } from "@/config/site"
+import fs from "fs"
+import path from "path"
 import "./globals.css"
 
 export const metadata: Metadata = {
@@ -35,6 +36,8 @@ export const metadata: Metadata = {
   },
 }
 
+const version = fs.readFileSync(path.resolve(process.cwd(), "../.version"), "utf-8").trim();
+
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
@@ -50,7 +53,7 @@ const jsonLd = {
     "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects.",
   url: "https://ghostvm.org",
   downloadUrl: "https://github.com/groundwater/GhostVM/releases/latest",
-  softwareVersion: siteConfig.version,
+  softwareVersion: version,
   author: {
     "@type": "Organization",
     name: "GhostVM",
