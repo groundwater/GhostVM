@@ -327,7 +327,7 @@ vmctl snapshot ~/VMs/dev-template.GhostVM create clean-state`}
 
         <CodeBlock language="bash">
           {`# Start with a shared folder
-vmctl start ~/VMs/untrusted-project.GhostVM \\
+vmctl start ~/VMs/untrusted-project.GhostVM --headless \\
   --shared-folder ~/Projects/client-repo --read-only`}
         </CodeBlock>
 

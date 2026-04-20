@@ -217,11 +217,6 @@ export default function MacOSVirtualMachineForDevelopment() {
                   Works
                 </td>
               </tr>
-              <tr>
-                <td className="py-3 px-4">Linux guest (ARM64)</td>
-                <td className="py-3 px-4 text-green-600 dark:text-green-400">
-                  Works
-                </td>
               </tr>
               <tr>
                 <td className="py-3 px-4">Windows guest (ARM64)</td>
@@ -245,11 +240,7 @@ export default function MacOSVirtualMachineForDevelopment() {
             <strong>Mac with Apple Silicon</strong> (M1, M2, M3, M4, or later)
           </li>
           <li>
-            <strong>macOS 13 Ventura or later</strong> for guest VMs
-          </li>
-          <li>
-            <strong>macOS 15 Sequoia</strong> recommended for host (latest
-            Virtualization.framework features)
+            <strong>macOS 15 Sequoia or later</strong>
           </li>
           <li>
             <strong>8GB+ RAM</strong> recommended (16GB+ for comfortable
@@ -361,7 +352,7 @@ vmctl snapshot ~/VMs/dev.GhostVM create dev-ready`}
           Use shared folders to access project files from your host:
         </p>
         <CodeBlock language="bash">
-          {`vmctl start ~/VMs/dev.GhostVM \\
+          {`vmctl start ~/VMs/dev.GhostVM --headless \\
   --shared-folder ~/Projects/my-app --read-only`}
         </CodeBlock>
 

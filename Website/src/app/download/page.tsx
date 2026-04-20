@@ -62,7 +62,7 @@ export default function DownloadPage() {
               <code>
                 {`brew install xcodegen
 git clone ${siteConfig.repo}
-cd ghostvm
+cd GhostVM
 make app`}
               </code>
             </pre>

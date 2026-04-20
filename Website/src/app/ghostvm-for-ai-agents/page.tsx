@@ -325,11 +325,11 @@ cp -c ~/VMs/agent-template.GhostVM ~/VMs/agent-session-001.GhostVM`}
         </p>
         <CodeBlock language="bash">
           {`# Share only the project folder, read-only
-vmctl start ~/VMs/agent-session-001.GhostVM \\
+vmctl start ~/VMs/agent-session-001.GhostVM --headless \\
   --shared-folder ~/Projects/my-app --read-only
 
 # Or read-write if the agent needs to modify files
-vmctl start ~/VMs/agent-session-001.GhostVM \\
+vmctl start ~/VMs/agent-session-001.GhostVM --headless \\
   --shared-folder ~/Projects/my-app`}
         </CodeBlock>
 

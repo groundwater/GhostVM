@@ -1,19 +1,18 @@
 const terminalLines = [
   { prompt: true, text: "vmctl init ~/VMs/dev.GhostVM --cpus 6 --memory 16" },
-  { prompt: false, text: "Created ~/VMs/dev.GhostVM" },
+  { prompt: false, text: "Initialized macOS VM 'dev' at ~/VMs/dev.GhostVM." },
   { prompt: false, text: "" },
   { prompt: true, text: "vmctl install ~/VMs/dev.GhostVM" },
-  { prompt: false, text: "Installing macOS — this takes a few minutes." },
-  { prompt: false, text: "Installation complete" },
+  { prompt: false, text: "Installation completed successfully." },
   { prompt: false, text: "" },
-  { prompt: true, text: "vmctl start ~/VMs/dev.GhostVM" },
-  { prompt: false, text: "VM running (PID 4821)" },
+  { prompt: true, text: "vmctl start ~/VMs/dev.GhostVM --headless" },
+  { prompt: false, text: "VM 'dev' is running. Press Ctrl-C to stop." },
   { prompt: false, text: "" },
   { prompt: true, text: "vmctl snapshot ~/VMs/dev.GhostVM create clean-install" },
-  { prompt: false, text: 'Snapshot "clean-install" saved' },
+  { prompt: false, text: "Snapshot 'clean-install' created for 'dev'." },
   { prompt: false, text: "" },
   { prompt: true, text: "vmctl stop ~/VMs/dev.GhostVM" },
-  { prompt: false, text: "VM stopped" },
+  { prompt: false, text: "VM 'dev' stopped." },
 ];
 
 function TerminalBlock() {

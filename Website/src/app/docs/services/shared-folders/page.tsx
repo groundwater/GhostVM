@@ -25,8 +25,8 @@ export default function SharedFolders() {
         {`# When creating a VM
 vmctl init ~/VMs/dev.GhostVM --shared-folder ~/Projects --writable
 
-# When starting a VM
-vmctl start ~/VMs/dev.GhostVM --shared-folder ~/Projects --read-only`}
+# When starting a VM (headless mode)
+vmctl start ~/VMs/dev.GhostVM --headless --shared-folder ~/Projects --read-only`}
       </CodeBlock>
 
       <h3>Via GUI</h3>
