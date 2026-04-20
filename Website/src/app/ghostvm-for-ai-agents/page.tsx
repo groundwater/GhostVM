@@ -56,11 +56,6 @@ export default function GhostVMForAIAgents() {
                 The GhostVM Agent Workflow
               </a>
             </li>
-            <li>
-              <a href="#host-api" className="text-ghost-600 dark:text-ghost-400 hover:underline">
-                Programmatic Control with the Host API
-              </a>
-            </li>
           </ul>
         </nav>
 
@@ -355,7 +350,7 @@ vmctl start ~/VMs/agent-session-001.GhostVM \\
 vmctl snapshot ~/VMs/agent-session-001.GhostVM create before-refactor
 
 # If things go wrong
-vmctl snapshot ~/VMs/agent-session-001.GhostVM restore before-refactor`}
+vmctl snapshot ~/VMs/agent-session-001.GhostVM revert before-refactor`}
         </CodeBlock>
 
         <h3>6. Clean Up</h3>
@@ -365,85 +360,11 @@ vmctl snapshot ~/VMs/agent-session-001.GhostVM restore before-refactor`}
         </p>
         <CodeBlock language="bash">
           {`# Option A: Restore to clean state for reuse
-vmctl snapshot ~/VMs/agent-session-001.GhostVM restore ready
+vmctl snapshot ~/VMs/agent-session-001.GhostVM revert ready
 
 # Option B: Delete the VM entirely
 rm -rf ~/VMs/agent-session-001.GhostVM`}
         </CodeBlock>
-
-        <h2 id="host-api">Programmatic Control with the Host API</h2>
-        <p>
-          For automated agent workflows, GhostVM provides a Host API that lets
-          you control VMs programmatically from inside the guest. This enables:
-        </p>
-
-        <h3>Agent-Driven Snapshots</h3>
-        <p>
-          An agent running inside the VM can create its own checkpoints:
-        </p>
-        <CodeBlock language="bash">
-          {`# From inside the VM, create a snapshot
-curl -X POST http://host.local:8080/snapshot/create \\
-  -d '{"name": "before-npm-install"}'`}
-        </CodeBlock>
-
-        <h3>Self-Revert on Failure</h3>
-        <p>
-          If an operation fails, the agent can restore to a previous state:
-        </p>
-        <CodeBlock language="bash">
-          {`# Attempt risky operation
-npm install some-sketchy-package
-
-# If something went wrong, revert
-if [ $? -ne 0 ]; then
-  curl -X POST http://host.local:8080/snapshot/restore \\
-    -d '{"name": "before-npm-install"}'
-fi`}
-        </CodeBlock>
-
-        <h3>File Transfer Without Shared Folders</h3>
-        <p>
-          Pull specific files into the VM or push results out, without mounting
-          entire directories:
-        </p>
-        <CodeBlock language="bash">
-          {`# Pull a file from host into the VM
-curl http://host.local:8080/files/Projects/my-app/config.json > config.json
-
-# Push results back to host
-curl -X PUT http://host.local:8080/files/Projects/my-app/output.json \\
-  --data-binary @output.json`}
-        </CodeBlock>
-
-        <h3>VM Lifecycle Control</h3>
-        <p>
-          Agents can even control their own VM lifecycle for advanced
-          workflows:
-        </p>
-        <CodeBlock language="bash">
-          {`# Graceful shutdown when work is done
-curl -X POST http://host.local:8080/vm/shutdown
-
-# Request more resources (if supported)
-curl -X POST http://host.local:8080/vm/configure \\
-  -d '{"memory": 16}'`}
-        </CodeBlock>
-
-        <div className="not-prose my-8 p-6 border-l-4 border-ghost-500 bg-ghost-50 dark:bg-ghost-950/30 rounded-r-xl">
-          <h4 className="font-semibold text-ghost-800 dark:text-ghost-200 mb-2">
-            Building agent frameworks?
-          </h4>
-          <p className="text-ghost-900 dark:text-ghost-100 text-sm">
-            The Host API makes GhostVM a building block for agent
-            infrastructure. You can programmatically spin up VMs, run agent
-            tasks, capture results, and tear down — all via API. See the{" "}
-            <Link href="/docs/host-api" className="underline">
-              Host API documentation
-            </Link>{" "}
-            for details.
-          </p>
-        </div>
 
         <h2>Why This Matters</h2>
         <p>
@@ -471,8 +392,8 @@ curl -X POST http://host.local:8080/vm/configure \\
           </h3>
           <p className="text-gray-700 dark:text-gray-300 mb-6">
             GhostVM is free, open-source, and built for exactly this workflow.
-            Native macOS app with instant cloning, snapshots, a scriptable CLI,
-            and the Host API for programmatic control.
+            Native macOS app with instant cloning, snapshots, and a scriptable
+            CLI.
           </p>
           <div className="flex flex-col sm:flex-row gap-4">
             <Link
@@ -482,10 +403,10 @@ curl -X POST http://host.local:8080/vm/configure \\
               Download GhostVM
             </Link>
             <Link
-              href="/docs/host-api"
+              href="/docs/getting-started"
               className="inline-flex items-center justify-center px-6 py-3 rounded-lg border border-gray-300 dark:border-gray-700 hover:bg-white dark:hover:bg-gray-800 font-medium transition-colors"
             >
-              Host API Docs
+              Get Started
             </Link>
           </div>
         </div>
@@ -503,13 +424,7 @@ curl -X POST http://host.local:8080/vm/configure \\
             </Link>
           </li>
           <li>
-            <Link href="/docs/host-api">Host API Reference</Link>
-          </li>
-          <li>
             <Link href="/docs/snapshots">Managing VM Snapshots</Link>
-          </li>
-          <li>
-            <Link href="/docs/cli">CLI Reference for Automation</Link>
           </li>
         </ul>
       </article>

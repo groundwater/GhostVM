@@ -1,5 +1,3 @@
-import Link from "next/link";
-
 const terminalLines = [
   { prompt: true, text: "vmctl init ~/VMs/dev.GhostVM --cpus 6 --memory 16" },
   { prompt: false, text: "Created ~/VMs/dev.GhostVM" },
@@ -64,15 +62,9 @@ export default function AutomationSection() {
             <p className="text-gray-600 dark:text-gray-400 mb-6">
               Every action in the GUI is also available from the terminal via{" "}
               <code className="text-sm bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">vmctl</code>.
-              Create, start, snapshot, clone, and manage workspaces
+              Create, start, snapshot, and manage workspaces
               programmatically.
             </p>
-            <Link
-              href="/docs/cli"
-              className="inline-flex items-center text-ghost-600 dark:text-ghost-400 hover:underline font-medium"
-            >
-              Full CLI reference &rarr;
-            </Link>
           </div>
 
           {/* Right: terminal block */}

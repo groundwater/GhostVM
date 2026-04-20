@@ -425,9 +425,6 @@ vmctl snapshot ~/VMs/dev.GhostVM create dev-ready`}
           <li>
             <Link href="/docs/vm-clone">Instant VM Cloning</Link>
           </li>
-          <li>
-            <Link href="/docs/cli">CLI Reference</Link>
-          </li>
         </ul>
       </article>
     </div>

@@ -398,9 +398,6 @@ rm -rf ~/VMs/untrusted-project.GhostVM`}
               Shared Folders Configuration
             </Link>
           </li>
-          <li>
-            <Link href="/docs/cli">CLI Reference for Automation</Link>
-          </li>
         </ul>
       </article>
     </div>

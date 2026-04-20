@@ -74,8 +74,7 @@ export default function Architecture() {
         <code>~/Library/Application Support/GhostVM/api/</code>. The socket
         accepts standard HTTP/1.1 requests (with JSON bodies) and provides access
         to guest proxy operations (clipboard, exec, files, apps). Any HTTP client
-        that supports Unix sockets can connect. See the{" "}
-        <a href="/docs/host-api">Host API</a> docs for details.
+        that supports Unix sockets can connect.
       </p>
 
       <h2>Services Architecture</h2>

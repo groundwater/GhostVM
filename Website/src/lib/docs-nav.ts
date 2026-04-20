@@ -15,8 +15,6 @@ export const docsNav: NavItem[] = [
     ],
   },
   { title: "VM Clone", href: "/docs/vm-clone" },
-  { title: "CLI Reference", href: "/docs/cli" },
-  { title: "VM Bundles", href: "/docs/vm-bundles" },
   { title: "Snapshots", href: "/docs/snapshots" },
   {
     title: "Services",
@@ -29,7 +27,6 @@ export const docsNav: NavItem[] = [
     ],
   },
   { title: "GhostTools", href: "/docs/ghosttools" },
-  { title: "Host API", href: "/docs/host-api" },
   { title: "Architecture", href: "/docs/architecture" },
   { title: "Building from Source", href: "/docs/building-from-source" },
 ];
