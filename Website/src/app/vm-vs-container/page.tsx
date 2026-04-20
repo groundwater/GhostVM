@@ -123,11 +123,6 @@ export default function VMvsContainer() {
                 <td className="py-3 px-4 text-amber-600 dark:text-amber-400">Image layers</td>
                 <td className="py-3 px-4 text-green-600 dark:text-green-400">Yes</td>
               </tr>
-              <tr>
-                <td className="py-3 px-4 font-medium">Price</td>
-                <td className="py-3 px-4">Free</td>
-                <td className="py-3 px-4">Free (GhostVM)</td>
-              </tr>
             </tbody>
           </table>
         </div>
