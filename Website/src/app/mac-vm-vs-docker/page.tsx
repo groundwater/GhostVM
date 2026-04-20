@@ -9,7 +9,7 @@ export const metadata: Metadata = {
     title: "Mac VM vs Docker - Comparison Guide",
     description:
       "Compare macOS virtual machines and Docker containers on Apple Silicon. Performance, isolation, and use cases.",
-    url: "https://ghostvm.org/mac-vm-vs-docker-parallels",
+    url: "https://ghostvm.org/mac-vm-vs-docker",
     type: "article",
   },
 };

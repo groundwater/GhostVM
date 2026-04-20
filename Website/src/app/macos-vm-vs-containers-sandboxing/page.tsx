@@ -493,8 +493,8 @@ export default function MacOSVMvsContainersSandboxing() {
             </Link>
           </li>
           <li>
-            <Link href="/mac-vm-vs-docker-parallels">
-              Mac VM vs Docker vs Parallels — Detailed Comparison
+            <Link href="/mac-vm-vs-docker">
+              Mac VM vs Docker — Detailed Comparison
             </Link>
           </li>
           <li>
