@@ -493,8 +493,8 @@ export default function MacOSVMvsContainersSandboxing() {
             </Link>
           </li>
           <li>
-            <Link href="/mac-vm-vs-docker">
-              Mac VM vs Docker — Detailed Comparison
+            <Link href="/vm-vs-container">
+              VM vs Container — Detailed Comparison
             </Link>
           </li>
           <li>

@@ -2,26 +2,26 @@ import type { Metadata } from "next";
 import Link from "next/link";
 
 export const metadata: Metadata = {
-  title: "Mac VM vs Docker - Which Should You Use? (2026)",
+  title: "VM vs Container - Which Should You Use? (2026)",
   description:
-    "Compare macOS virtual machines and Docker containers on Apple Silicon. Performance, isolation, use cases, and when to use each.",
+    "Compare macOS virtual machines and Linux containers on Apple Silicon. Performance, isolation, use cases, and when to use each.",
   openGraph: {
-    title: "Mac VM vs Docker - Comparison Guide",
+    title: "VM vs Container - Comparison Guide",
     description:
-      "Compare macOS virtual machines and Docker containers on Apple Silicon. Performance, isolation, and use cases.",
-    url: "https://ghostvm.org/mac-vm-vs-docker",
+      "Compare macOS virtual machines and Linux containers on Apple Silicon. Performance, isolation, and use cases.",
+    url: "https://ghostvm.org/vm-vs-container",
     type: "article",
   },
 };
 
-export default function MacVMvsDockerParallels() {
+export default function VMvsContainer() {
   return (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
       <article className="prose prose-gray dark:prose-invert prose-lg max-w-none">
-        <h1>Mac VM vs Docker</h1>
+        <h1>VM vs Container</h1>
         <p className="lead text-xl text-gray-600 dark:text-gray-400">
           Two different tools, two different purposes. Here&apos;s how to
-          choose between macOS virtual machines and Docker containers on
+          choose between macOS virtual machines and Linux containers on
           Apple Silicon.
         </p>
 

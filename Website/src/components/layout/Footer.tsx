@@ -92,10 +92,10 @@ export default function Footer() {
               </li>
               <li>
                 <Link
-                  href="/mac-vm-vs-docker"
+                  href="/vm-vs-container"
                   className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
                 >
-                  VM vs Docker
+                  VM vs Container
                 </Link>
               </li>
             </ul>
