@@ -214,7 +214,7 @@ export default function VMvsContainer() {
             <strong>macOS only</strong> — designed exclusively for macOS guests
           </li>
           <li>
-            <strong>Boot time</strong> — 30-60 seconds vs instant containers
+            <strong>Boot time</strong> — ~10 seconds vs instant containers
           </li>
           <li>
             <strong>Memory overhead</strong> — each VM needs dedicated RAM

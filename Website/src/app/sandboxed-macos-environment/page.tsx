@@ -230,7 +230,7 @@ export default function SandboxedMacOSEnvironment() {
               <tr>
                 <td className="py-3 px-4">Startup time</td>
                 <td className="py-3 px-4 text-green-600 dark:text-green-400">Seconds</td>
-                <td className="py-3 px-4 text-amber-600 dark:text-amber-400">30-60 seconds</td>
+                <td className="py-3 px-4 text-amber-600 dark:text-amber-400">~10 seconds</td>
               </tr>
             </tbody>
           </table>
