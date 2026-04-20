@@ -111,7 +111,7 @@ export default function VMvsContainer() {
               <tr>
                 <td className="py-3 px-4 font-medium">Startup time</td>
                 <td className="py-3 px-4 text-green-600 dark:text-green-400">Seconds</td>
-                <td className="py-3 px-4 text-amber-600 dark:text-amber-400">30-60s</td>
+                <td className="py-3 px-4 text-amber-600 dark:text-amber-400">~10s</td>
               </tr>
               <tr>
                 <td className="py-3 px-4 font-medium">Resource overhead</td>
