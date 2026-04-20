@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { ThemeProvider } from "next-themes"
 import Navbar from "@/components/layout/Navbar"
 import Footer from "@/components/layout/Footer"
+import { siteConfig } from "@/config/site"
 import "./globals.css"
 
 export const metadata: Metadata = {
@@ -49,7 +50,7 @@ const jsonLd = {
     "Mac virtual machine for secure development. Run isolated macOS workspaces for AI agents, sandboxed code, and untrusted projects.",
   url: "https://ghostvm.org",
   downloadUrl: "https://github.com/groundwater/GhostVM/releases/latest",
-  softwareVersion: "2.11.0",
+  softwareVersion: siteConfig.version,
   author: {
     "@type": "Organization",
     name: "GhostVM",
