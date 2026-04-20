@@ -82,15 +82,8 @@ vmctl start ~/VMs/sandbox.GhostVM`}
           Learn about the <Link href="/docs/gui-app">GUI App</Link> features
         </li>
         <li>
-          Explore the <Link href="/docs/cli">CLI Reference</Link>
-        </li>
-        <li>
           Set up <Link href="/docs/services">host-guest services</Link> like clipboard
           sync and file transfer
-        </li>
-        <li>
-          Automate VMs with the{" "}
-          <Link href="/docs/host-api">Host API</Link>
         </li>
       </ul>
 

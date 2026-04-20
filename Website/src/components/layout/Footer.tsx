@@ -27,22 +27,6 @@ export default function Footer() {
                   Documentation
                 </Link>
               </li>
-              <li>
-                <Link
-                  href="/docs/cli"
-                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
-                >
-                  CLI Reference
-                </Link>
-              </li>
-              <li>
-                <Link
-                  href="/docs/host-api"
-                  className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
-                >
-                  Host API
-                </Link>
-              </li>
             </ul>
           </div>
           <div>
@@ -92,10 +76,10 @@ export default function Footer() {
               </li>
               <li>
                 <Link
-                  href="/mac-vm-vs-docker-parallels"
+                  href="/vm-vs-container"
                   className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white"
                 >
-                  VM vs Docker vs Parallels
+                  VM vs Container
                 </Link>
               </li>
             </ul>

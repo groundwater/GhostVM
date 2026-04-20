@@ -1,5 +1,4 @@
 import Image from "next/image";
-import { DesktopFrame, WindowScreenshot } from "./DesktopFrame";
 
 export default function ScreenshotShowcase() {
   return (

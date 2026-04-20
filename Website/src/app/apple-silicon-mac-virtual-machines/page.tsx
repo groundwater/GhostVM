@@ -68,8 +68,8 @@ export default function AppleSiliconMacVirtualMachines() {
         <p>
           When Apple transitioned from Intel to Apple Silicon in 2020,
           everything about Mac virtualization changed. The old approaches —
-          VMware Fusion, Parallels running x86 Windows, VirtualBox — either
-          stopped working or required fundamental redesigns.
+          VMware Fusion, VirtualBox — either stopped working or required
+          fundamental redesigns.
         </p>
         <p>
           But Apple also introduced something new:{" "}
@@ -110,9 +110,6 @@ export default function AppleSiliconMacVirtualMachines() {
             <strong>macOS guest support</strong> — run macOS inside macOS
             (starting with macOS 12)
           </li>
-          <li>
-            <strong>Linux guest support</strong> — run ARM64 Linux distributions
-          </li>
         </ul>
 
         <h3>ARM64 Architecture</h3>
@@ -121,8 +118,7 @@ export default function AppleSiliconMacVirtualMachines() {
         </p>
         <ul>
           <li>
-            <strong>Guest VMs must be ARM64</strong> — you can&apos;t run x86
-            Windows or Linux
+            <strong>Guest VMs must be ARM64</strong> — no x86 guest support
           </li>
           <li>
             <strong>No Intel emulation</strong> — unlike Rosetta 2 for apps,
@@ -173,12 +169,6 @@ export default function AppleSiliconMacVirtualMachines() {
                 </td>
               </tr>
               <tr>
-                <td className="py-3 px-4 font-medium">Docker</td>
-                <td className="py-3 px-4">
-                  Docker Desktop works. Runs ARM64 Linux containers.
-                </td>
-              </tr>
-              <tr>
                 <td className="py-3 px-4 font-medium">GUI apps</td>
                 <td className="py-3 px-4">
                   Full GPU acceleration. Smooth graphics and animations.
@@ -196,12 +186,6 @@ export default function AppleSiliconMacVirtualMachines() {
                   VirtioFS for high-performance file sharing.
                 </td>
               </tr>
-              <tr>
-                <td className="py-3 px-4 font-medium">ARM64 Linux</td>
-                <td className="py-3 px-4">
-                  Ubuntu, Debian, Fedora ARM editions work well.
-                </td>
-              </tr>
             </tbody>
           </table>
         </div>
@@ -216,18 +200,6 @@ export default function AppleSiliconMacVirtualMachines() {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100 dark:divide-gray-800">
-              <tr>
-                <td className="py-3 px-4 font-medium">x86 Windows</td>
-                <td className="py-3 px-4">
-                  Requires x86 emulation. Use Windows 11 ARM instead (Parallels).
-                </td>
-              </tr>
-              <tr>
-                <td className="py-3 px-4 font-medium">x86 Linux</td>
-                <td className="py-3 px-4">
-                  No x86 emulation. Use ARM64 Linux distributions.
-                </td>
-              </tr>
               <tr>
                 <td className="py-3 px-4 font-medium">Nested virtualization</td>
                 <td className="py-3 px-4">
@@ -258,10 +230,6 @@ export default function AppleSiliconMacVirtualMachines() {
 
         <h3>The &quot;Works, With Caveats&quot; List</h3>
         <ul>
-          <li>
-            <strong>Windows 11 ARM</strong> — runs via Parallels Desktop
-            (commercial). Can use x86 emulation inside Windows for some apps.
-          </li>
           <li>
             <strong>Android emulator</strong> — ARM Android emulator works in
             Android Studio, but performance varies.
@@ -385,7 +353,7 @@ export default function AppleSiliconMacVirtualMachines() {
         <h3>Requirements</h3>
         <ul>
           <li>Mac with Apple Silicon (M1, M2, M3, M4, or later)</li>
-          <li>macOS 13 Ventura or later for guest VMs</li>
+          <li>macOS 15 Sequoia or later</li>
           <li>At least 8GB RAM (16GB+ recommended)</li>
           <li>20GB+ free disk space per VM</li>
         </ul>

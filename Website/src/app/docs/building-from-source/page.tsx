@@ -31,7 +31,7 @@ export default function BuildingFromSource() {
       <h2>Clone and Build</h2>
       <CodeBlock language="bash">
         {`git clone ${siteConfig.repo}
-cd ghostvm
+cd GhostVM
 make app`}
       </CodeBlock>
       <p>

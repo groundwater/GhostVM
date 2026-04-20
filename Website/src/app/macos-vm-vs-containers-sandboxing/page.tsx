@@ -316,7 +316,7 @@ export default function MacOSVMvsContainersSandboxing() {
                 <td className="py-3 px-4 font-medium">Startup time</td>
                 <td className="py-3 px-4">Instant</td>
                 <td className="py-3 px-4">Seconds</td>
-                <td className="py-3 px-4">30-60 seconds</td>
+                <td className="py-3 px-4">~10 seconds</td>
               </tr>
               <tr>
                 <td className="py-3 px-4 font-medium">Resource overhead</td>
@@ -493,8 +493,8 @@ export default function MacOSVMvsContainersSandboxing() {
             </Link>
           </li>
           <li>
-            <Link href="/mac-vm-vs-docker-parallels">
-              Mac VM vs Docker vs Parallels — Detailed Comparison
+            <Link href="/vm-vs-container">
+              VM vs Container — Detailed Comparison
             </Link>
           </li>
           <li>

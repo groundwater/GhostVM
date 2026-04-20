@@ -218,18 +218,6 @@ export default function MacOSVirtualMachineForDevelopment() {
                 </td>
               </tr>
               <tr>
-                <td className="py-3 px-4">Linux guest (ARM64)</td>
-                <td className="py-3 px-4 text-green-600 dark:text-green-400">
-                  Works
-                </td>
-              </tr>
-              <tr>
-                <td className="py-3 px-4">Windows guest (ARM64)</td>
-                <td className="py-3 px-4 text-amber-600 dark:text-amber-400">
-                  Limited (requires Windows ARM)
-                </td>
-              </tr>
-              <tr>
                 <td className="py-3 px-4">x86/Intel software</td>
                 <td className="py-3 px-4 text-red-600 dark:text-red-400">
                   No (ARM only)
@@ -245,11 +233,7 @@ export default function MacOSVirtualMachineForDevelopment() {
             <strong>Mac with Apple Silicon</strong> (M1, M2, M3, M4, or later)
           </li>
           <li>
-            <strong>macOS 13 Ventura or later</strong> for guest VMs
-          </li>
-          <li>
-            <strong>macOS 15 Sequoia</strong> recommended for host (latest
-            Virtualization.framework features)
+            <strong>macOS 15 Sequoia or later</strong>
           </li>
           <li>
             <strong>8GB+ RAM</strong> recommended (16GB+ for comfortable
@@ -361,7 +345,7 @@ vmctl snapshot ~/VMs/dev.GhostVM create dev-ready`}
           Use shared folders to access project files from your host:
         </p>
         <CodeBlock language="bash">
-          {`vmctl start ~/VMs/dev.GhostVM \\
+          {`vmctl start ~/VMs/dev.GhostVM --headless \\
   --shared-folder ~/Projects/my-app --read-only`}
         </CodeBlock>
 
@@ -424,9 +408,6 @@ vmctl snapshot ~/VMs/dev.GhostVM create dev-ready`}
           </li>
           <li>
             <Link href="/docs/vm-clone">Instant VM Cloning</Link>
-          </li>
-          <li>
-            <Link href="/docs/cli">CLI Reference</Link>
           </li>
         </ul>
       </article>
