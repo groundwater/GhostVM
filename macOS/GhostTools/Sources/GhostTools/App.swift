@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "App")
     private var statusItem: NSStatusItem?
     private var server: VsockServer?
+    private var nioServer: NIOVsockServer?
     private var tunnelServer: TunnelServer?
     private var healthServer: HealthServer?
     private var isServerRunning = false
@@ -688,6 +689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ForegroundAppService.shared.stop()
         PortScannerService.shared.stop()
         server?.stop()
+        nioServer?.stop()
         tunnelServer?.stop()
         healthServer?.stop()
         EventPushServer.shared.stop()
@@ -909,26 +911,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .autoStartPreferenceChanged, object: nil)
     }
 
+    /// Use NIO-based server (HTTP/2 capable) when kqueue works with vsock
+    private static let useNIOServer = true
+
     private func startServer() {
-        print("[GhostTools] startServer() called")
+        print("[GhostTools] startServer() called (NIO=\(Self.useNIOServer))")
         Task {
             do {
-                print("[GhostTools] Creating router...")
                 let router = Router()
-                print("[GhostTools] Creating VsockServer on port 5000...")
-                server = VsockServer(port: 5000, router: router)
 
-                server?.onStatusChange = { [weak self] running in
-                    Task { @MainActor in
-                        print("[GhostTools] Server status changed: \(running)")
-                        self?.isServerRunning = running
-                        self?.updateStatusIcon(connected: running)
-                        self?.updateMenu()
+                if Self.useNIOServer {
+                    print("[GhostTools] Creating NIOVsockServer on port 5000...")
+                    let nio = NIOVsockServer(port: 5000, router: router)
+                    nio.onStatusChange = { [weak self] running in
+                        Task { @MainActor in
+                            print("[GhostTools] Server status changed: \(running)")
+                            self?.isServerRunning = running
+                            self?.updateStatusIcon(connected: running)
+                            self?.updateMenu()
+                        }
                     }
+                    nioServer = nio
+                    try await nio.start()
+                } else {
+                    print("[GhostTools] Creating VsockServer on port 5000...")
+                    server = VsockServer(port: 5000, router: router)
+                    server?.onStatusChange = { [weak self] running in
+                        Task { @MainActor in
+                            print("[GhostTools] Server status changed: \(running)")
+                            self?.isServerRunning = running
+                            self?.updateStatusIcon(connected: running)
+                            self?.updateMenu()
+                        }
+                    }
+                    try await server?.start()
                 }
 
-                print("[GhostTools] Starting vsock server...")
-                try await server?.start()
                 print("[GhostTools] Server started successfully")
             } catch {
                 print("[GhostTools] Failed to start server: \(error)")
