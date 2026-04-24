@@ -164,6 +164,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.handleAutoStartDisableRequest()
         }
 
+        // Probe kqueue+vsock support (one-time diagnostic)
+        let kqResult = KqueueVsockProbe.run()
+        print("[GhostTools] kqueue+vsock probe result: \(kqResult.rawValue)")
+
         startServer()
         startTunnelServer()
         startHealthServer()
