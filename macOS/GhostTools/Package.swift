@@ -14,9 +14,15 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.34.0"),
     ],
     targets: [
+        .target(
+            name: "CPty",
+            path: "Sources/CPty",
+            publicHeadersPath: "include"
+        ),
         .executableTarget(
             name: "GhostTools",
             dependencies: [
+                "CPty",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),

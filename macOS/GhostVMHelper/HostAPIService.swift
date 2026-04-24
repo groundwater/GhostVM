@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import GhostVMKit
+import Virtualization
 
 /// Host-side HTTP API served over a Unix domain socket.
 /// vmctl connects here. Requests are proxied to GhostTools in the guest
@@ -104,55 +105,93 @@ final class HostAPIService {
     // MARK: - Connection Handler
 
     private func handleConnection(_ fd: Int32) async {
-        // Read HTTP request from the socket on a background queue
-        let requestData: Data = await withCheckedContinuation { continuation in
+        // Read HTTP headers from the socket (don't read body yet — might be streaming)
+        let headerResult: (data: Data, headerStr: String)? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var data = Data()
-                var buffer = [UInt8](repeating: 0, count: 65536)
-                // Read until we have the full request (headers + body)
-                var headerEnd = -1
-                var contentLength = 0
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                let endMarker = Data("\r\n\r\n".utf8)
 
                 while true {
                     let n = Darwin.read(fd, &buffer, buffer.count)
-                    if n <= 0 { break }
+                    if n <= 0 {
+                        continuation.resume(returning: nil)
+                        return
+                    }
                     data.append(contentsOf: buffer[0..<n])
 
-                    // Check if we've received all headers
-                    if headerEnd < 0, let str = String(data: data, encoding: .utf8),
-                       let range = str.range(of: "\r\n\r\n") {
-                        headerEnd = str.distance(from: str.startIndex, to: range.upperBound)
-                        // Parse Content-Length
-                        let headerStr = String(str[str.startIndex..<range.lowerBound])
-                        for line in headerStr.components(separatedBy: "\r\n") {
-                            if line.lowercased().hasPrefix("content-length:") {
-                                contentLength = Int(line.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? 0
-                            }
-                        }
+                    if data.range(of: endMarker) != nil {
+                        let str = String(data: data, encoding: .utf8) ?? ""
+                        continuation.resume(returning: (data, str))
+                        return
                     }
 
-                    // Check if we have the full body
-                    if headerEnd >= 0 && data.count >= headerEnd + contentLength {
-                        break
+                    if data.count > 65536 {
+                        continuation.resume(returning: nil)
+                        return
                     }
                 }
-                continuation.resume(returning: data)
             }
         }
 
-        guard !requestData.isEmpty,
-              let requestStr = String(data: requestData, encoding: .utf8) else {
+        guard let headerResult = headerResult else {
             Darwin.close(fd)
             return
         }
 
-        // Parse method, path, body
-        let (method, path, headers, body) = parseHTTPRequest(requestStr, rawData: requestData)
+        let requestStr = headerResult.headerStr
+        let requestData = headerResult.data
 
-        // Route and get response
-        let response = await route(method: method, path: path, headers: headers, body: body)
+        // Quick check: is this a shell request?
+        let (method, path, headers, _) = parseHTTPRequest(requestStr, rawData: requestData)
+        let cleanPath = path.components(separatedBy: "?").first ?? path
 
-        // Write response on background queue
+        if cleanPath == "/api/v1/shell" && method == "POST" {
+            await handleShellProxy(vmctlFD: fd, requestData: requestData, headers: headers)
+            return
+        }
+
+        // Normal request/response flow — read remaining body if needed
+        let fullData: Data = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var data = requestData
+                let endMarker = Data("\r\n\r\n".utf8)
+
+                guard let range = data.range(of: endMarker) else {
+                    continuation.resume(returning: data)
+                    return
+                }
+
+                let headerEndIndex = data.distance(from: data.startIndex, to: range.upperBound)
+                let headerStr = String(data: data[..<range.lowerBound], encoding: .utf8) ?? ""
+
+                var contentLength = 0
+                for line in headerStr.components(separatedBy: "\r\n") {
+                    if line.lowercased().hasPrefix("content-length:") {
+                        contentLength = Int(line.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? 0
+                    }
+                }
+
+                var buffer = [UInt8](repeating: 0, count: 65536)
+                while data.count < headerEndIndex + contentLength {
+                    let n = Darwin.read(fd, &buffer, buffer.count)
+                    if n <= 0 { break }
+                    data.append(contentsOf: buffer[0..<n])
+                }
+
+                continuation.resume(returning: data)
+            }
+        }
+
+        guard let fullStr = String(data: fullData, encoding: .utf8) else {
+            Darwin.close(fd)
+            return
+        }
+
+        let (method2, path2, headers2, body) = parseHTTPRequest(fullStr, rawData: fullData)
+        let response = await route(method: method2, path: path2, headers: headers2, body: body)
+
+        // Write response
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 var headerStr = "HTTP/1.1 \(response.statusCode) \(response.statusText)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n"
@@ -170,6 +209,98 @@ final class HostAPIService {
                     }
                 }
                 Darwin.close(fd)
+                continuation.resume()
+            }
+        }
+    }
+
+    // MARK: - Shell Proxy
+
+    /// Proxies a shell session: vmctl ↔ HostAPIService ↔ GhostTools (vsock).
+    /// Instead of request/response, switches to bidirectional byte bridging.
+    private func handleShellProxy(vmctlFD: Int32, requestData: Data, headers: [String: String]?) async {
+        guard let client = client else {
+            let err = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+            _ = err.withCString { Darwin.write(vmctlFD, $0, strlen($0)) }
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        NSLog("HostAPIService: Shell proxy starting")
+
+        // Open a raw vsock connection to GhostTools on port 5000
+        let guestConnection: VZVirtioSocketConnection
+        do {
+            guestConnection = try await client.connectRaw(port: 5000)
+        } catch {
+            NSLog("HostAPIService: Shell proxy failed to connect to guest: \(error)")
+            let err = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+            _ = err.withCString { Darwin.write(vmctlFD, $0, strlen($0)) }
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        let guestFD = guestConnection.fileDescriptor
+        NSLog("HostAPIService: Shell proxy connected to guest (fd=\(guestFD))")
+
+        // Forward the original HTTP request to the guest
+        requestData.withUnsafeBytes { ptr in
+            _ = Darwin.write(guestFD, ptr.baseAddress!, requestData.count)
+        }
+
+        // Now bridge bidirectionally: vmctlFD ↔ guestFD
+        // Both sides are raw byte streams from this point on.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let group = DispatchGroup()
+
+            // vmctl → guest
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                while true {
+                    let n = Darwin.read(vmctlFD, &buffer, buffer.count)
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        var offset = 0
+                        while offset < n {
+                            let written = Darwin.write(guestFD, ptr.baseAddress! + offset, n - offset)
+                            if written <= 0 { return false }
+                            offset += written
+                        }
+                        return true
+                    }
+                    if !ok { break }
+                }
+                Darwin.shutdown(guestFD, SHUT_WR)
+                group.leave()
+            }
+
+            // guest → vmctl
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                while true {
+                    let n = Darwin.read(guestFD, &buffer, buffer.count)
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        var offset = 0
+                        while offset < n {
+                            let written = Darwin.write(vmctlFD, ptr.baseAddress! + offset, n - offset)
+                            if written <= 0 { return false }
+                            offset += written
+                        }
+                        return true
+                    }
+                    if !ok { break }
+                }
+                Darwin.shutdown(vmctlFD, SHUT_WR)
+                group.leave()
+            }
+
+            group.notify(queue: .global()) {
+                guestConnection.close()
+                Darwin.close(vmctlFD)
+                NSLog("HostAPIService: Shell proxy session ended")
                 continuation.resume()
             }
         }

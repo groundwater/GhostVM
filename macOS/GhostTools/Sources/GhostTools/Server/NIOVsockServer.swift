@@ -153,9 +153,8 @@ private final class ProtocolDetector: ChannelInboundHandler, RemovableChannelHan
         context.pipeline.addHandlers([
             ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes)),
             HTTPResponseEncoder(),
-            HTTP1RequestHandler(router: router),
+            StreamDispatcher(router: router),
         ]).whenComplete { _ in
-            // Re-fire the buffered bytes
             context.fireChannelRead(NIOAny(buffered))
         }
     }
@@ -167,124 +166,10 @@ private final class ProtocolDetector: ChannelInboundHandler, RemovableChannelHan
         context.channel.configureHTTP2Pipeline(mode: .server) { streamChannel in
             streamChannel.pipeline.addHandlers([
                 HTTP2FramePayloadToHTTP1ServerCodec(),
-                HTTP1RequestHandler(router: router),
+                StreamDispatcher(router: router),
             ])
         }.whenComplete { _ in
-            // Re-fire the buffered bytes (contains the HTTP/2 preface)
             context.fireChannelRead(NIOAny(buffered))
-        }
-    }
-}
-
-// MARK: - HTTP/1.1 Request Handler
-
-/// Bridges NIO's HTTP/1.1 types to the existing Router.
-private final class HTTP1RequestHandler: ChannelInboundHandler, RemovableChannelHandler {
-    typealias InboundIn = HTTPServerRequestPart
-    typealias OutboundOut = HTTPServerResponsePart
-
-    private let router: Router
-    private var requestHead: HTTPRequestHead?
-    private var bodyBuffer = ByteBuffer()
-
-    init(router: Router) {
-        self.router = router
-    }
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let part = unwrapInboundIn(data)
-
-        switch part {
-        case .head(let head):
-            requestHead = head
-            bodyBuffer.clear()
-
-        case .body(var body):
-            bodyBuffer.writeBuffer(&body)
-
-        case .end:
-            guard let head = requestHead else { return }
-            requestHead = nil
-
-            // Convert NIO types to our Router types
-            let method = convertMethod(head.method)
-            var headers: [String: String] = [:]
-            for (name, value) in head.headers {
-                headers[name] = value
-            }
-
-            let body: Data?
-            if bodyBuffer.readableBytes > 0 {
-                body = Data(bodyBuffer.readableBytesView)
-            } else {
-                body = nil
-            }
-            bodyBuffer.clear()
-
-            let request = HTTPRequest(
-                method: method,
-                path: head.uri,
-                headers: headers,
-                body: body
-            )
-
-            // Dispatch to router (async)
-            let channel = context.channel
-            let routerRef = self.router
-            Task {
-                let response = await routerRef.handle(request)
-                // Write response back on the event loop
-                channel.eventLoop.execute {
-                    self.writeResponse(response, context: context)
-                }
-            }
-        }
-    }
-
-    private func writeResponse(_ response: HTTPResponse, context: ChannelHandlerContext) {
-        guard context.channel.isActive else { return }
-
-        let status = HTTPResponseStatus(statusCode: response.status.rawValue)
-        var headers = HTTPHeaders()
-        for (key, value) in response.headers {
-            headers.add(name: key, value: value)
-        }
-        if let body = response.body {
-            headers.replaceOrAdd(name: "content-length", value: "\(body.count)")
-        } else {
-            headers.replaceOrAdd(name: "content-length", value: "0")
-        }
-        headers.replaceOrAdd(name: "connection", value: "close")
-
-        let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
-        context.write(wrapOutboundOut(.head(head)), promise: nil)
-
-        if let body = response.body, !body.isEmpty {
-            var buffer = context.channel.allocator.buffer(capacity: body.count)
-            buffer.writeBytes(body)
-            context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-        }
-
-        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
-        }
-    }
-
-    func errorCaught(context: ChannelHandlerContext, error: Error) {
-        print("[NIOVsockServer] Error: \(error)")
-        context.close(promise: nil)
-    }
-
-    private func convertMethod(_ method: NIOHTTP1.HTTPMethod) -> HTTPMethod {
-        switch method {
-        case .GET: return .GET
-        case .POST: return .POST
-        case .PUT: return .PUT
-        case .DELETE: return .DELETE
-        case .HEAD: return .HEAD
-        case .OPTIONS: return .OPTIONS
-        case .PATCH: return .PATCH
-        default: return .GET
         }
     }
 }

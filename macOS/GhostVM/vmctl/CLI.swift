@@ -75,6 +75,12 @@ struct CLI {
             } catch {
                 fail(error)
             }
+        case "shell":
+            do {
+                try ShellCommand.run(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
         case "socket":
             do {
                 try handleSocket(arguments: Array(arguments.dropFirst()))
@@ -462,6 +468,7 @@ Commands:
   discard-suspend <bundle-path>
   snapshot <bundle-path> list
   snapshot <bundle-path> <create|revert|delete> <snapshot-name>
+  shell --name <VMName> [--command /bin/bash]  Interactive terminal on guest
   remote --name <VMName> [--json] <subcommand> [args...]
   remote --socket <path> [--json] <subcommand> [args...]
 
