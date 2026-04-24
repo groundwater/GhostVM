@@ -1,27 +1,24 @@
 import Foundation
 import NIOCore
 import NIOPosix
-import NIOHTTP1
+import NIOWebSocket
 import CPty
 
-/// Handles an HTTP/2 (or HTTP/1.1) stream for `/api/v1/shell`.
+/// WebSocket handler for interactive shell sessions on `/api/v1/shell`.
 ///
-/// Protocol:
-///   1. Client sends: POST /api/v1/shell with headers:
-///      - X-Shell-Command: /bin/bash (optional, defaults to user's shell)
-///      - X-Shell-Cols: 80
-///      - X-Shell-Rows: 24
-///   2. Server responds: 200 OK with header X-Shell-PID
-///   3. Bidirectional DATA streaming:
-///      - Client DATA → PTY stdin
-///      - PTY stdout → Server DATA
-///   4. Control messages via special streams (or in-band):
-///      - POST /api/v1/shell/resize with X-Shell-Cols/X-Shell-Rows headers
+/// Protocol (after WebSocket upgrade):
+///   - Binary frames: raw PTY data (both directions)
+///   - Text frames: JSON control messages
+///     - Client → Server: {"type":"resize","cols":120,"rows":40}
+///     - Server → Client: {"type":"exit","code":0}
 ///
-/// The stream stays open until the shell process exits or the client disconnects.
-final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
-    typealias InboundIn = HTTPServerRequestPart
-    typealias OutboundOut = HTTPServerResponsePart
+/// Query parameters on the upgrade request:
+///   - cols: initial terminal columns (default 80)
+///   - rows: initial terminal rows (default 24)
+///   - command: shell to run (default: user's login shell)
+final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = WebSocketFrame
+    typealias OutboundOut = WebSocketFrame
 
     private var masterFD: Int32 = -1
     private var shellPID: pid_t = 0
@@ -29,31 +26,71 @@ final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
     private var waitSource: DispatchSourceProcess?
     private weak var channelRef: Channel?
 
+    private let command: String
+    private let initialCols: UInt16
+    private let initialRows: UInt16
+
+    init(command: String? = nil, cols: UInt16 = 80, rows: UInt16 = 24) {
+        self.command = command ?? ShellWebSocketHandler.defaultShell()
+        self.initialCols = cols
+        self.initialRows = rows
+    }
+
     deinit {
         cleanup()
     }
 
+    func channelActive(context: ChannelHandlerContext) {
+        self.channelRef = context.channel
+        spawnShell(context: context)
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let part = unwrapInboundIn(data)
+        let frame = unwrapInboundIn(data)
 
-        switch part {
-        case .head(let head):
-            handleHead(head, context: context)
-
-        case .body(let buffer):
-            // Client stdin → PTY
-            if masterFD >= 0 {
-                buffer.withUnsafeReadableBytes { ptr in
-                    if !ptr.isEmpty {
-                        _ = Darwin.write(masterFD, ptr.baseAddress!, ptr.count)
-                    }
+        switch frame.opcode {
+        case .binary:
+            // Stdin data → PTY
+            guard masterFD >= 0 else { return }
+            var frameData = frame.unmaskedData
+            guard let bytes = frameData.readBytes(length: frameData.readableBytes) else { return }
+            bytes.withUnsafeBufferPointer { ptr in
+                if let base = ptr.baseAddress, ptr.count > 0 {
+                    _ = Darwin.write(masterFD, base, ptr.count)
                 }
             }
 
-        case .end:
-            // Client closed their send side — close PTY stdin
-            // (This signals EOF to the shell, like Ctrl-D)
-            // Don't close the channel yet — wait for shell to exit
+        case .text:
+            // Control message (JSON)
+            var textData = frame.unmaskedData
+            guard let text = textData.readString(length: textData.readableBytes),
+                  let jsonData = text.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+                  let type = json["type"] as? String else {
+                return
+            }
+
+            switch type {
+            case "resize":
+                handleResize(json: json)
+            default:
+                print("[Shell] Unknown control message type: \(type)")
+            }
+
+        case .connectionClose:
+            var closeData = frame.unmaskedData
+            let closeCode = closeData.readSlice(length: 2) ?? ByteBuffer()
+            let closeFrame = WebSocketFrame(fin: true, opcode: .connectionClose, data: closeCode)
+            context.writeAndFlush(wrapOutboundOut(closeFrame)).whenComplete { _ in
+                context.close(promise: nil)
+            }
+
+        case .ping:
+            var pongData = frame.unmaskedData
+            let pong = WebSocketFrame(fin: true, opcode: .pong, data: pongData)
+            context.writeAndFlush(wrapOutboundOut(pong), promise: nil)
+
+        default:
             break
         }
     }
@@ -70,72 +107,62 @@ final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
 
     // MARK: - Shell Lifecycle
 
-    private func handleHead(_ head: HTTPRequestHead, context: ChannelHandlerContext) {
-        let command = head.headers.first(name: "x-shell-command") ?? defaultShell()
-        let cols = UInt16(head.headers.first(name: "x-shell-cols") ?? "80") ?? 80
-        let rows = UInt16(head.headers.first(name: "x-shell-rows") ?? "24") ?? 24
+    private func spawnShell(context: ChannelHandlerContext) {
+        print("[Shell] Spawning: \(command) (\(initialCols)x\(initialRows))")
 
-        print("[Shell] Spawning: \(command) (\(cols)x\(rows))")
-
-        // Set up terminal size
         var winSize = winsize()
-        winSize.ws_col = cols
-        winSize.ws_row = rows
+        winSize.ws_col = initialCols
+        winSize.ws_row = initialRows
 
-        // Fork with PTY
         var masterFD: Int32 = -1
         let pid = forkpty(&masterFD, nil, nil, &winSize)
 
         if pid < 0 {
             print("[Shell] forkpty failed: \(errno)")
-            sendError(context: context, message: "forkpty failed: \(String(cString: strerror(errno)))")
+            sendControlMessage(context: context, json: [
+                "type": "error",
+                "message": "forkpty failed: \(String(cString: strerror(errno)))"
+            ])
+            context.close(promise: nil)
             return
         }
 
         if pid == 0 {
-            // Child process — exec the shell
-            // Set up environment
+            // Child process
             setenv("TERM", "xterm-256color", 1)
             setenv("LANG", "en_US.UTF-8", 1)
 
-            // Exec as login shell (argv[0] = "-bash" convention)
             let shellBasename = "-" + (command as NSString).lastPathComponent
             let argv: [UnsafeMutablePointer<CChar>?] = [
                 strdup(shellBasename),
                 nil
             ]
             execv(command, argv)
-            // If execl returns, it failed
             _exit(127)
         }
 
-        // Parent process
+        // Parent
         self.masterFD = masterFD
         self.shellPID = pid
-        self.channelRef = context.channel
 
         print("[Shell] Started PID \(pid) on fd \(masterFD)")
 
-        // Set master fd to non-blocking
         let flags = fcntl(masterFD, F_GETFL, 0)
         _ = fcntl(masterFD, F_SETFL, flags | O_NONBLOCK)
 
-        // Send response headers (keep stream open — no END_STREAM)
-        var headers = HTTPHeaders()
-        headers.add(name: "content-type", value: "application/octet-stream")
-        headers.add(name: "x-shell-pid", value: "\(pid)")
-        let responseHead = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
-        context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
-        context.flush()
+        // Send started message
+        sendControlMessage(context: context, json: [
+            "type": "started",
+            "pid": pid,
+            "command": command
+        ])
 
-        // Start reading PTY output → client
         startReadingPTY(context: context)
-
-        // Watch for shell exit
         startWatchingProcess(context: context)
     }
 
-    /// Reads data from the PTY master fd and sends it as HTTP DATA frames.
+    // MARK: - PTY I/O
+
     private func startReadingPTY(context: ChannelHandlerContext) {
         let fd = masterFD
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .global(qos: .userInitiated))
@@ -147,32 +174,29 @@ final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
             let n = Darwin.read(fd, &buf, buf.count)
 
             if n > 0 {
-                let data = Data(buf[0..<n])
                 let channel = self.channelRef
-
+                // Copy the data before crossing to the event loop
+                let bytes = Array(buf[0..<n])
                 channel?.eventLoop.execute {
                     guard let channel = channel, channel.isActive else { return }
                     var buffer = channel.allocator.buffer(capacity: n)
-                    buffer.writeBytes(data)
-                    let part = HTTPServerResponsePart.body(.byteBuffer(buffer))
-                    channel.writeAndFlush(NIOAny(part), promise: nil)
+                    buffer.writeBytes(bytes)
+                    let frame = WebSocketFrame(fin: true, opcode: .binary, data: buffer)
+                    channel.writeAndFlush(NIOAny(frame), promise: nil)
                 }
             } else if n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR) {
-                // EOF or error — shell closed
                 source.cancel()
             }
         }
 
         source.setCancelHandler { [weak self] in
-            // PTY closed — end the HTTP stream
-            self?.endStream()
+            // PTY closed — the process exit handler will close the WebSocket
         }
 
         source.resume()
         self.readSource = source
     }
 
-    /// Watches for the shell process to exit.
     private func startWatchingProcess(context: ChannelHandlerContext) {
         let source = DispatchSource.makeProcessSource(
             identifier: shellPID,
@@ -185,19 +209,33 @@ final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
             var status: Int32 = 0
             waitpid(self.shellPID, &status, 0)
 
-            // WIFEXITED/WEXITSTATUS are C macros; reimplement in Swift
             let exitCode: Int32
             if (status & 0x7f) == 0 {
-                // Normal exit — extract exit code
                 exitCode = (status >> 8) & 0xff
             } else {
                 exitCode = -1
             }
             print("[Shell] PID \(self.shellPID) exited with code \(exitCode)")
 
-            // Give a moment for final PTY output to flush
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) {
-                self.readSource?.cancel()
+            // Flush remaining PTY output, then close
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.readSource?.cancel()
+
+                guard let channel = self?.channelRef, channel.isActive else { return }
+                channel.eventLoop.execute {
+                    // Send exit code as text frame
+                    let json = "{\"type\":\"exit\",\"code\":\(exitCode)}"
+                    var buf = channel.allocator.buffer(capacity: json.utf8.count)
+                    buf.writeString(json)
+                    let frame = WebSocketFrame(fin: true, opcode: .text, data: buf)
+                    channel.writeAndFlush(NIOAny(frame)).whenComplete { _ in
+                        // Send WebSocket close frame
+                        let closeFrame = WebSocketFrame(fin: true, opcode: .connectionClose, data: ByteBuffer())
+                        channel.writeAndFlush(NIOAny(closeFrame)).whenComplete { _ in
+                            channel.close(promise: nil)
+                        }
+                    }
+                }
             }
         }
 
@@ -205,28 +243,32 @@ final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
         self.waitSource = source
     }
 
-    private func endStream() {
-        guard let channel = channelRef, channel.isActive else { return }
-        channel.eventLoop.execute {
-            let end = HTTPServerResponsePart.end(nil)
-            channel.writeAndFlush(NIOAny(end)).whenComplete { _ in
-                channel.close(promise: nil)
-            }
+    // MARK: - Control Messages
+
+    private func handleResize(json: [String: Any]) {
+        guard let cols = json["cols"] as? Int, let rows = json["rows"] as? Int,
+              cols > 0, rows > 0, masterFD >= 0 else {
+            return
         }
+
+        var winSize = winsize()
+        winSize.ws_col = UInt16(cols)
+        winSize.ws_row = UInt16(rows)
+        _ = ioctl(masterFD, TIOCSWINSZ, &winSize)
+
+        print("[Shell] Resized to \(cols)x\(rows)")
     }
 
-    private func sendError(context: ChannelHandlerContext, message: String) {
-        let body = ByteBuffer(string: "{\"error\":\"\(message)\"}\n")
-        var headers = HTTPHeaders()
-        headers.add(name: "content-type", value: "application/json")
-        headers.add(name: "content-length", value: "\(body.readableBytes)")
-        let head = HTTPResponseHead(version: .http1_1, status: .internalServerError, headers: headers)
-        context.write(wrapOutboundOut(.head(head)), promise: nil)
-        context.write(wrapOutboundOut(.body(.byteBuffer(body))), promise: nil)
-        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
-            context.close(promise: nil)
-        }
+    private func sendControlMessage(context: ChannelHandlerContext, json: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: json),
+              let str = String(data: data, encoding: .utf8) else { return }
+        var buffer = context.channel.allocator.buffer(capacity: str.utf8.count)
+        buffer.writeString(str)
+        let frame = WebSocketFrame(fin: true, opcode: .text, data: buffer)
+        context.writeAndFlush(wrapOutboundOut(frame), promise: nil)
     }
+
+    // MARK: - Cleanup
 
     private func cleanup() {
         readSource?.cancel()
@@ -245,60 +287,10 @@ final class ShellHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    private func defaultShell() -> String {
+    private static func defaultShell() -> String {
         if let shell = ProcessInfo.processInfo.environment["SHELL"], !shell.isEmpty {
             return shell
         }
         return "/bin/zsh"
-    }
-}
-
-// MARK: - Shell Resize Handler
-
-/// Handles POST /api/v1/shell/resize to change the terminal size of a running shell.
-/// Uses a shared registry of active shell sessions keyed by PID.
-final class ShellResizeHandler: ChannelInboundHandler {
-    typealias InboundIn = HTTPServerRequestPart
-    typealias OutboundOut = HTTPServerResponsePart
-
-    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
-        let part = unwrapInboundIn(data)
-        guard case .head(let head) = part else { return }
-
-        guard let pidStr = head.headers.first(name: "x-shell-pid"),
-              let pid = Int32(pidStr),
-              let colsStr = head.headers.first(name: "x-shell-cols"),
-              let cols = UInt16(colsStr),
-              let rowsStr = head.headers.first(name: "x-shell-rows"),
-              let rows = UInt16(rowsStr) else {
-            let body = ByteBuffer(string: "{\"error\":\"need x-shell-pid, x-shell-cols, x-shell-rows\"}\n")
-            var headers = HTTPHeaders()
-            headers.add(name: "content-type", value: "application/json")
-            headers.add(name: "content-length", value: "\(body.readableBytes)")
-            let head = HTTPResponseHead(version: .http1_1, status: .badRequest, headers: headers)
-            context.write(wrapOutboundOut(.head(head)), promise: nil)
-            context.write(wrapOutboundOut(.body(.byteBuffer(body))), promise: nil)
-            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
-            return
-        }
-
-        // Send SIGWINCH to the shell process group — the PTY driver handles the rest
-        var winSize = winsize()
-        winSize.ws_col = cols
-        winSize.ws_row = rows
-
-        // We need the master fd to ioctl on. For now, use SIGWINCH to the process.
-        // The shell will query the PTY for the new size.
-        // TODO: Store master fds in a registry keyed by PID for direct ioctl
-        kill(pid, SIGWINCH)
-
-        let body = ByteBuffer(string: "{\"ok\":true}\n")
-        var headers = HTTPHeaders()
-        headers.add(name: "content-type", value: "application/json")
-        headers.add(name: "content-length", value: "\(body.readableBytes)")
-        let respHead = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
-        context.write(wrapOutboundOut(.head(respHead)), promise: nil)
-        context.write(wrapOutboundOut(.body(.byteBuffer(body))), promise: nil)
-        context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
     }
 }

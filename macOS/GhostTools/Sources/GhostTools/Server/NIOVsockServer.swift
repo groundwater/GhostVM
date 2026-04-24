@@ -3,6 +3,7 @@ import NIOCore
 import NIOPosix
 import NIOHTTP1
 import NIOHTTP2
+import NIOWebSocket
 
 /// NIO-based vsock server that supports both HTTP/1.1 and HTTP/2.
 ///
@@ -150,13 +151,59 @@ private final class ProtocolDetector: ChannelInboundHandler, RemovableChannelHan
         let router = self.router
         context.pipeline.removeHandler(self, promise: nil)
 
-        context.pipeline.addHandlers([
-            ByteToMessageHandler(HTTPRequestDecoder(leftOverBytesStrategy: .forwardBytes)),
-            HTTPResponseEncoder(),
-            StreamDispatcher(router: router),
-        ]).whenComplete { _ in
+        // WebSocket upgrader for /api/v1/shell
+        let wsUpgrader = NIOWebSocketServerUpgrader(
+            shouldUpgrade: { channel, head in
+                let path = head.uri.components(separatedBy: "?").first ?? head.uri
+                if path == "/api/v1/shell" {
+                    return channel.eventLoop.makeSucceededFuture(HTTPHeaders())
+                }
+                // Return nil to reject the upgrade — request will be handled as normal HTTP
+                return channel.eventLoop.makeSucceededFuture(nil)
+            },
+            upgradePipelineHandler: { channel, head in
+                // Parse shell parameters from query string
+                let query = head.uri.components(separatedBy: "?").dropFirst().joined()
+                let params = ProtocolDetector.parseQuery(query)
+                let cols = UInt16(params["cols"] ?? "80") ?? 80
+                let rows = UInt16(params["rows"] ?? "24") ?? 24
+                let command = params["command"]
+
+                return channel.pipeline.addHandler(
+                    ShellWebSocketHandler(command: command, cols: cols, rows: rows)
+                )
+            }
+        )
+
+        // Use NIO's built-in pipeline setup with WebSocket upgrade support
+        context.channel.pipeline.configureHTTPServerPipeline(
+            withServerUpgrade: (
+                upgraders: [wsUpgrader],
+                completionHandler: { context in
+                    // Upgrade complete — nothing else to do, ShellWebSocketHandler is installed
+                    print("[NIOVsockServer] WebSocket upgrade complete")
+                }
+            )
+        ).flatMap {
+            // Add the router handler for non-upgraded requests
+            context.channel.pipeline.addHandler(StreamDispatcher(router: router))
+        }.whenComplete { _ in
             context.fireChannelRead(NIOAny(buffered))
         }
+    }
+
+    /// Parse URL query string into key-value pairs
+    static func parseQuery(_ query: String) -> [String: String] {
+        var result: [String: String] = [:]
+        for pair in query.split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1)
+            if parts.count == 2 {
+                let key = String(parts[0]).removingPercentEncoding ?? String(parts[0])
+                let value = String(parts[1]).removingPercentEncoding ?? String(parts[1])
+                result[key] = value
+            }
+        }
+        return result
     }
 
     private func installHTTP2(context: ChannelHandlerContext, buffered: ByteBuffer) {

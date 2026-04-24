@@ -30,20 +30,10 @@ final class StreamDispatcher: ChannelInboundHandler, RemovableChannelHandler {
 
             dispatched = true
 
-            let path = head.uri.components(separatedBy: "?").first ?? head.uri
+            // Shell requests are handled via WebSocket upgrade in the HTTP pipeline,
+            // not here. All requests reaching the StreamDispatcher are normal HTTP.
 
-            if path == "/api/v1/shell" {
-                // Replace ourselves with ShellHandler
-                let handler = ShellHandler()
-                context.pipeline.removeHandler(self, promise: nil)
-                context.pipeline.addHandler(handler).whenComplete { _ in
-                    // Re-fire the .head
-                    context.fireChannelRead(data)
-                }
-                return
-            }
-
-            // Default: replace ourselves with the Router bridge
+            // Replace ourselves with the Router bridge
             let handler = RouterBridgeHandler(router: router)
             context.pipeline.removeHandler(self, promise: nil)
             context.pipeline.addHandler(handler).whenComplete { _ in
