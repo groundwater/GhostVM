@@ -17,8 +17,6 @@ enum KqueueVsockProbe {
     /// registers with kqueue, and checks if readability events fire.
     /// Returns immediately — non-blocking test.
     static func run() -> Result {
-        let AF_VSOCK: Int32 = 40
-
         // Step 1: Create a vsock listening socket on an ephemeral port
         let listenFD = socket(AF_VSOCK, SOCK_STREAM, 0)
         guard listenFD >= 0 else {

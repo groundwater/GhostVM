@@ -31,8 +31,6 @@ final class NIOVsockServer: @unchecked Sendable {
 
     /// Starts the NIO-based vsock server.
     func start() async throws {
-        let AF_VSOCK: Int32 = 40
-
         // Create and bind the vsock listen socket manually,
         // then hand it to NIO via withBoundSocket.
         let listenFD = socket(AF_VSOCK, SOCK_STREAM, 0)
