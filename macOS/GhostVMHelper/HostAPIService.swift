@@ -146,7 +146,7 @@ final class HostAPIService {
         let (method, path, headers, _) = parseHTTPRequest(requestStr, rawData: requestData)
         let cleanPath = path.components(separatedBy: "?").first ?? path
 
-        if cleanPath == "/api/v1/shell" && method == "POST" {
+        if cleanPath == "/api/v1/shell" {
             await handleShellProxy(vmctlFD: fd, requestData: requestData, headers: headers)
             return
         }

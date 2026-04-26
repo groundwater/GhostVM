@@ -189,10 +189,6 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
             }
         }
 
-        source.setCancelHandler { [weak self] in
-            // PTY closed — the process exit handler will close the WebSocket
-        }
-
         source.resume()
         self.readSource = source
     }
@@ -217,23 +213,45 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             print("[Shell] PID \(self.shellPID) exited with code \(exitCode)")
 
-            // Flush remaining PTY output, then close
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { [weak self] in
-                self?.readSource?.cancel()
+            // Drain remaining PTY output: read until EOF, then close.
+            // This runs on the same serial queue as the read source,
+            // so no concurrent reads can race with us.
+            let ptyFD = self.masterFD
+            if ptyFD >= 0 {
+                self.readSource?.cancel()
+                self.readSource = nil
 
-                guard let channel = self?.channelRef, channel.isActive else { return }
-                channel.eventLoop.execute {
-                    // Send exit code as text frame
-                    let json = "{\"type\":\"exit\",\"code\":\(exitCode)}"
-                    var buf = channel.allocator.buffer(capacity: json.utf8.count)
-                    buf.writeString(json)
-                    let frame = WebSocketFrame(fin: true, opcode: .text, data: buf)
-                    channel.writeAndFlush(NIOAny(frame)).whenComplete { _ in
-                        // Send WebSocket close frame
-                        let closeFrame = WebSocketFrame(fin: true, opcode: .connectionClose, data: ByteBuffer())
-                        channel.writeAndFlush(NIOAny(closeFrame)).whenComplete { _ in
-                            channel.close(promise: nil)
+                // Synchronously drain any remaining bytes from the PTY
+                var buf = [UInt8](repeating: 0, count: 16384)
+                while true {
+                    let n = Darwin.read(ptyFD, &buf, buf.count)
+                    if n > 0 {
+                        let bytes = Array(buf[0..<n])
+                        let channel = self.channelRef
+                        channel?.eventLoop.execute {
+                            guard let channel = channel, channel.isActive else { return }
+                            var buffer = channel.allocator.buffer(capacity: bytes.count)
+                            buffer.writeBytes(bytes)
+                            let frame = WebSocketFrame(fin: true, opcode: .binary, data: buffer)
+                            channel.writeAndFlush(NIOAny(frame), promise: nil)
                         }
+                    } else {
+                        break
+                    }
+                }
+            }
+
+            // Send exit code and close the WebSocket on the event loop
+            guard let channel = self.channelRef, channel.isActive else { return }
+            channel.eventLoop.execute {
+                let json = "{\"type\":\"exit\",\"code\":\(exitCode)}"
+                var buf = channel.allocator.buffer(capacity: json.utf8.count)
+                buf.writeString(json)
+                let frame = WebSocketFrame(fin: true, opcode: .text, data: buf)
+                channel.writeAndFlush(NIOAny(frame)).whenComplete { _ in
+                    let closeFrame = WebSocketFrame(fin: true, opcode: .connectionClose, data: ByteBuffer())
+                    channel.writeAndFlush(NIOAny(closeFrame)).whenComplete { _ in
+                        channel.close(promise: nil)
                     }
                 }
             }
