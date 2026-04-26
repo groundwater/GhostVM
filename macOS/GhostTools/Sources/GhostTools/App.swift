@@ -59,7 +59,7 @@ struct GhostToolsApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "App")
     private var statusItem: NSStatusItem?
-    private var server: VsockServer?
+    private var server: NIOVsockServer?
     private var tunnelServer: TunnelServer?
     private var healthServer: HealthServer?
     private var isServerRunning = false
@@ -163,6 +163,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.addObserver(forName: .autoStartDisableRequested, object: nil, queue: .main) { [weak self] _ in
             self?.handleAutoStartDisableRequest()
         }
+
+        // Probe kqueue+vsock support (one-time diagnostic)
+        let kqResult = KqueueVsockProbe.run()
+        print("[GhostTools] kqueue+vsock probe result: \(kqResult.rawValue)")
 
         startServer()
         startTunnelServer()
@@ -909,12 +913,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         print("[GhostTools] startServer() called")
         Task {
             do {
-                print("[GhostTools] Creating router...")
                 let router = Router()
-                print("[GhostTools] Creating VsockServer on port 5000...")
-                server = VsockServer(port: 5000, router: router)
 
-                server?.onStatusChange = { [weak self] running in
+                print("[GhostTools] Creating NIOVsockServer on port 5000...")
+                let srv = NIOVsockServer(port: 5000, router: router)
+                srv.onStatusChange = { [weak self] running in
                     Task { @MainActor in
                         print("[GhostTools] Server status changed: \(running)")
                         self?.isServerRunning = running
@@ -922,9 +925,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         self?.updateMenu()
                     }
                 }
+                server = srv
+                try await srv.start()
 
-                print("[GhostTools] Starting vsock server...")
-                try await server?.start()
                 print("[GhostTools] Server started successfully")
             } catch {
                 print("[GhostTools] Failed to start server: \(error)")
