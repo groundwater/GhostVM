@@ -153,6 +153,22 @@ final class App2VMStore: ObservableObject {
         vms[index] = updated
     }
 
+    /// Replace a VM's bundle URL after migration. The old URL is swapped out,
+    /// the new one takes its place in the list. The old bundle is NOT deleted.
+    func replaceBundleURL(vmID: App2VM.ID, newBundleURL: URL) {
+        guard let index = vms.firstIndex(where: { $0.id == vmID }) else { return }
+        let old = vms[index]
+        vms[index] = App2VM(
+            id: old.id,
+            name: controller.displayName(for: newBundleURL),
+            bundlePath: newBundleURL.path,
+            osVersion: old.osVersion,
+            status: old.status,
+            installed: old.installed
+        )
+        persistKnownVMs()
+    }
+
     func removeFromList(_ vm: App2VM) {
         vms.removeAll { $0.id == vm.id }
         persistKnownVMs()
