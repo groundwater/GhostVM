@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import GhostVMKit
+import Virtualization
 
 /// Host-side HTTP API served over a Unix domain socket.
 /// vmctl connects here. Requests are proxied to GhostTools in the guest
@@ -101,58 +102,235 @@ final class HostAPIService {
         NSLog("HostAPIService: Stopped")
     }
 
+    @discardableResult
+    private static func writeAll(fd: Int32, data: Data) -> Bool {
+        if data.isEmpty { return true }
+
+        return data.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return true }
+
+            var offset = 0
+            while offset < data.count {
+                let written = Darwin.write(fd, base + offset, data.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0 && (errno == EAGAIN || errno == EINTR) {
+                    usleep(1000)
+                } else {
+                    if written == 0 {
+                        errno = EPIPE
+                    }
+                    return false
+                }
+            }
+            return true
+        }
+    }
+
+    @discardableResult
+    private static func writeAll(fd: Int32, ptr: UnsafeRawPointer, count: Int) -> Bool {
+        if count == 0 { return true }
+
+        var offset = 0
+        while offset < count {
+            let written = Darwin.write(fd, ptr + offset, count - offset)
+            if written > 0 {
+                offset += written
+            } else if written < 0 && (errno == EAGAIN || errno == EINTR) {
+                usleep(1000)
+            } else {
+                if written == 0 {
+                    errno = EPIPE
+                }
+                return false
+            }
+        }
+        return true
+    }
+
+    private static func setReceiveTimeout(fd: Int32, seconds: Int) {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    }
+
+    private static func logTransportFailure(_ message: String) {
+        NSLog("HostAPIService FATAL: \(message)\n\(Thread.callStackSymbols.joined(separator: "\n"))")
+    }
+
+    private static func withTimeout<T>(_ seconds: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(ETIMEDOUT),
+                    userInfo: [NSLocalizedDescriptionKey: "Operation timed out after \(seconds) seconds"]
+                )
+            }
+            let value = try await group.next()!
+            group.cancelAll()
+            return value
+        }
+    }
+
+    private static func readHTTPHeaders(fd: Int32, maxBytes: Int = 65536) -> Data? {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let endMarker = Data("\r\n\r\n".utf8)
+
+        while true {
+            let n = Darwin.read(fd, &buffer, buffer.count)
+            if n > 0 {
+                data.append(contentsOf: buffer[0..<n])
+                if data.range(of: endMarker) != nil {
+                    return data
+                }
+                if data.count > maxBytes {
+                    return nil
+                }
+            } else if n < 0 && errno == EINTR {
+                continue
+            } else {
+                return nil
+            }
+        }
+    }
+
     // MARK: - Connection Handler
 
     private func handleConnection(_ fd: Int32) async {
-        // Read HTTP request from the socket on a background queue
-        let requestData: Data = await withCheckedContinuation { continuation in
+        Self.setReceiveTimeout(fd: fd, seconds: 30)
+
+        // Read HTTP headers from the socket (don't read body yet — might be streaming)
+        let headerResult: (data: Data, headerStr: String)? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var data = Data()
-                var buffer = [UInt8](repeating: 0, count: 65536)
-                // Read until we have the full request (headers + body)
-                var headerEnd = -1
-                var contentLength = 0
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                let endMarker = Data("\r\n\r\n".utf8)
 
                 while true {
                     let n = Darwin.read(fd, &buffer, buffer.count)
-                    if n <= 0 { break }
+                    if n < 0 && errno == EINTR {
+                        continue
+                    }
+                    if n <= 0 {
+                        continuation.resume(returning: nil)
+                        return
+                    }
                     data.append(contentsOf: buffer[0..<n])
 
-                    // Check if we've received all headers
-                    if headerEnd < 0, let str = String(data: data, encoding: .utf8),
-                       let range = str.range(of: "\r\n\r\n") {
-                        headerEnd = str.distance(from: str.startIndex, to: range.upperBound)
-                        // Parse Content-Length
-                        let headerStr = String(str[str.startIndex..<range.lowerBound])
-                        for line in headerStr.components(separatedBy: "\r\n") {
-                            if line.lowercased().hasPrefix("content-length:") {
-                                contentLength = Int(line.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? 0
-                            }
+                    if data.range(of: endMarker) != nil {
+                        let headerSlice: Data
+                        if let range = data.range(of: endMarker) {
+                            headerSlice = data.subdata(in: data.startIndex..<range.lowerBound)
+                        } else {
+                            headerSlice = Data()
                         }
+                        let str = String(data: headerSlice, encoding: .utf8) ?? ""
+                        continuation.resume(returning: (data, str))
+                        return
                     }
 
-                    // Check if we have the full body
-                    if headerEnd >= 0 && data.count >= headerEnd + contentLength {
-                        break
+                    if data.count > 65536 {
+                        continuation.resume(returning: nil)
+                        return
                     }
                 }
-                continuation.resume(returning: data)
             }
         }
 
-        guard !requestData.isEmpty,
-              let requestStr = String(data: requestData, encoding: .utf8) else {
+        guard let headerResult = headerResult else {
+            Self.logTransportFailure("Failed to read request headers from unix socket")
             Darwin.close(fd)
             return
         }
 
-        // Parse method, path, body
-        let (method, path, headers, body) = parseHTTPRequest(requestStr, rawData: requestData)
+        let requestStr = headerResult.headerStr
+        let requestData = headerResult.data
 
-        // Route and get response
-        let response = await route(method: method, path: path, headers: headers, body: body)
+        // Quick check: is this a shell request?
+        let (method, path, headers, _) = parseHTTPRequest(requestStr, rawData: requestData)
+        let cleanPath = path.components(separatedBy: "?").first ?? path
 
-        // Write response on background queue
+        if cleanPath == "/api/v1/shell" {
+            await handleShellProxy(vmctlFD: fd, requestData: requestData, headers: headers)
+            return
+        }
+
+        // Normal request/response flow — read remaining body if needed
+        let fullData: Data? = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var data = requestData
+                let endMarker = Data("\r\n\r\n".utf8)
+
+                guard let range = data.range(of: endMarker) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                let headerEndIndex = data.distance(from: data.startIndex, to: range.upperBound)
+                let headerStr = String(data: data[..<range.lowerBound], encoding: .utf8) ?? ""
+
+                var contentLength = 0
+                for line in headerStr.components(separatedBy: "\r\n") {
+                    if line.lowercased().hasPrefix("content-length:") {
+                        contentLength = Int(line.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? 0
+                    }
+                }
+
+                var buffer = [UInt8](repeating: 0, count: 65536)
+                while data.count < headerEndIndex + contentLength {
+                    let n = Darwin.read(fd, &buffer, buffer.count)
+                    if n > 0 {
+                        data.append(contentsOf: buffer[0..<n])
+                    } else if n < 0 && errno == EINTR {
+                        continue
+                    } else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                }
+
+                continuation.resume(returning: data)
+            }
+        }
+
+        guard let fullData = fullData else {
+            let response = Response.error(408, message: "Timed out or failed while reading request body")
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    Self.logTransportFailure("Timed out or failed while reading request body")
+                    let headerStr = "HTTP/1.1 \(response.statusCode) \(response.statusText)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n\r\n"
+                    let headerData = Data(headerStr.utf8)
+                    _ = Self.writeAll(fd: fd, data: headerData)
+                    if !response.body.isEmpty {
+                        _ = Self.writeAll(fd: fd, data: response.body)
+                    }
+                    Darwin.close(fd)
+                    continuation.resume()
+                }
+            }
+            return
+        }
+
+        let delimiter = Data("\r\n\r\n".utf8)
+        guard let delimiterRange = fullData.range(of: delimiter) else {
+            Darwin.close(fd)
+            return
+        }
+        let headerData = fullData.subdata(in: fullData.startIndex..<delimiterRange.lowerBound)
+        guard let fullStr = String(data: headerData, encoding: .utf8) else {
+            Darwin.close(fd)
+            return
+        }
+
+        let (method2, path2, headers2, body) = parseHTTPRequest(fullStr, rawData: fullData)
+        let response = await route(method: method2, path: path2, headers: headers2, body: body)
+
+        // Write response
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
                 var headerStr = "HTTP/1.1 \(response.statusCode) \(response.statusText)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n"
@@ -161,15 +339,171 @@ final class HostAPIService {
                 }
                 headerStr += "\r\n"
                 let headerData = Data(headerStr.utf8)
-                headerData.withUnsafeBytes { ptr in
-                    _ = Darwin.write(fd, ptr.baseAddress!, headerData.count)
+                guard Self.writeAll(fd: fd, data: headerData) else {
+                    NSLog("HostAPIService: Failed to write response headers: errno \(errno)")
+                    Darwin.close(fd)
+                    continuation.resume()
+                    return
                 }
                 if !response.body.isEmpty {
-                    response.body.withUnsafeBytes { ptr in
-                        _ = Darwin.write(fd, ptr.baseAddress!, response.body.count)
+                    guard Self.writeAll(fd: fd, data: response.body) else {
+                        NSLog("HostAPIService: Failed to write response body: errno \(errno)")
+                        Darwin.close(fd)
+                        continuation.resume()
+                        return
                     }
                 }
                 Darwin.close(fd)
+                continuation.resume()
+            }
+        }
+    }
+
+    // MARK: - Shell Proxy
+
+    /// Proxies a shell session: vmctl ↔ HostAPIService ↔ GhostTools (vsock).
+    /// Instead of request/response, switches to bidirectional byte bridging.
+    private func handleShellProxy(vmctlFD: Int32, requestData: Data, headers: [String: String]?) async {
+        guard let client = client else {
+            let err = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n"
+            _ = err.withCString { Darwin.write(vmctlFD, $0, strlen($0)) }
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        NSLog("HostAPIService: Shell proxy starting")
+
+        // Open a raw vsock connection to GhostTools on port 5000
+        let guestConnection: VZVirtioSocketConnection
+        do {
+            guestConnection = try await Self.withTimeout(10) {
+                try await client.connectRaw(port: 5000)
+            }
+        } catch {
+            NSLog("HostAPIService: Shell proxy failed to connect to guest: \(error)")
+            let err = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+            _ = err.withCString { Darwin.write(vmctlFD, $0, strlen($0)) }
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        let guestFD = guestConnection.fileDescriptor
+        NSLog("HostAPIService: Shell proxy connected to guest (fd=\(guestFD))")
+
+        // Forward the original HTTP request to the guest
+        let forwardOK: Bool = requestData.withUnsafeBytes { ptr -> Bool in
+            guard let base = ptr.baseAddress else { return false }
+            var offset = 0
+            while offset < requestData.count {
+                let n = Darwin.write(guestFD, base + offset, requestData.count - offset)
+                if n > 0 {
+                    offset += n
+                } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
+                    usleep(1000)
+                } else {
+                    Self.logTransportFailure("Shell proxy failed to forward upgrade request to guest: errno \(errno)")
+                    return false
+                }
+            }
+            return true
+        }
+
+        if !forwardOK {
+            NSLog("HostAPIService: Shell proxy failed to forward upgrade request to guest")
+            let err = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+            _ = err.withCString { Darwin.write(vmctlFD, $0, strlen($0)) }
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        Self.setReceiveTimeout(fd: guestFD, seconds: 30)
+        guard let guestUpgradeResponse = Self.readHTTPHeaders(fd: guestFD) else {
+            Self.logTransportFailure("Shell proxy failed to read guest upgrade response")
+            let err = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+            _ = err.withCString { Darwin.write(vmctlFD, $0, strlen($0)) }
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+        Self.setReceiveTimeout(fd: guestFD, seconds: 0)
+
+        guard Self.writeAll(fd: vmctlFD, data: guestUpgradeResponse) else {
+            Self.logTransportFailure("Shell proxy failed to relay guest upgrade response to client")
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        guard let guestUpgradeString = String(data: guestUpgradeResponse, encoding: .utf8),
+              guestUpgradeString.contains(" 101 ") || guestUpgradeString.contains(" 101\r\n") else {
+            Self.logTransportFailure("Shell proxy guest upgrade rejected request")
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        // Now bridge bidirectionally: vmctlFD ↔ guestFD
+        // Both sides are raw byte streams from this point on.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let group = DispatchGroup()
+
+            // vmctl → guest
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                var shouldSignalGuestEOF = true
+                while true {
+                    let n = Darwin.read(vmctlFD, &buffer, buffer.count)
+                    if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return n == 0 }
+                        return Self.writeAll(fd: guestFD, ptr: base, count: n)
+                    }
+                    if !ok {
+                        Self.logTransportFailure("Shell proxy write vmctl -> guest failed: errno \(errno)")
+                        Darwin.shutdown(vmctlFD, SHUT_RD)
+                        shouldSignalGuestEOF = false
+                        break
+                    }
+                }
+                if shouldSignalGuestEOF {
+                    Darwin.shutdown(guestFD, SHUT_WR)
+                }
+                group.leave()
+            }
+
+            // guest → vmctl
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                var shouldSignalClientEOF = true
+                while true {
+                    let n = Darwin.read(guestFD, &buffer, buffer.count)
+                    if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return n == 0 }
+                        return Self.writeAll(fd: vmctlFD, ptr: base, count: n)
+                    }
+                    if !ok {
+                        Self.logTransportFailure("Shell proxy write guest -> vmctl failed: errno \(errno)")
+                        Darwin.shutdown(guestFD, SHUT_RD)
+                        shouldSignalClientEOF = false
+                        break
+                    }
+                }
+                if shouldSignalClientEOF {
+                    Darwin.shutdown(vmctlFD, SHUT_WR)
+                }
+                group.leave()
+            }
+
+            group.notify(queue: .global()) {
+                guestConnection.close()
+                Darwin.close(vmctlFD)
+                NSLog("HostAPIService: Shell proxy session ended")
                 continuation.resume()
             }
         }
@@ -205,6 +539,33 @@ final class HostAPIService {
             }
         }
         return (method, path, headers.isEmpty ? nil : headers, nil)
+    }
+
+    private func headerValue(_ name: String, in headers: [String: String]?) -> String? {
+        guard let headers else { return nil }
+        return headers.first { key, _ in
+            key.caseInsensitiveCompare(name) == .orderedSame
+        }?.value
+    }
+
+    private func clipboardType(explicitType: String?, contentType: String?) -> String {
+        if let explicitType, !explicitType.isEmpty {
+            return explicitType
+        }
+        guard let contentType else { return "public.utf8-plain-text" }
+
+        let mimeType = contentType.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch mimeType {
+        case "image/png": return "public.png"
+        case "image/tiff": return "public.tiff"
+        case "image/jpeg": return "public.jpeg"
+        case "text/rtf", "application/rtf": return "public.rtf"
+        case "text/plain": return "public.utf8-plain-text"
+        default: return "public.utf8-plain-text"
+        }
     }
 
     // MARK: - Response Type
@@ -336,8 +697,8 @@ final class HostAPIService {
                     guard let body = body, !body.isEmpty else {
                         return .error(400, message: "Request body required")
                     }
-                    let explicitType = headers?["X-Clipboard-Type"] ?? headers?["x-clipboard-type"]
-                    let contentType = (headers?["Content-Type"] ?? headers?["content-type"])?.lowercased()
+                    let explicitType = headerValue("X-Clipboard-Type", in: headers)
+                    let contentType = headerValue("Content-Type", in: headers)?.lowercased()
 
                     let (clipboardBody, clipType): (Data, String) = {
                         // Backward compatibility for older UI clients posting JSON:
@@ -349,7 +710,7 @@ final class HostAPIService {
                             let parsedType = (object["type"] as? String) ?? "public.utf8-plain-text"
                             return (Data(content.utf8), parsedType)
                         }
-                        return (body, explicitType ?? "public.utf8-plain-text")
+                        return (body, clipboardType(explicitType: explicitType, contentType: contentType))
                     }()
 
                     try await client.setClipboard(data: clipboardBody, type: clipType)
