@@ -2084,6 +2084,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         // Setup toolbar
         let toolbar = HelperToolbar()
         toolbar.delegate = self
+        toolbar.vmName = vmName
         toolbar.attach(to: window)
         helperToolbar = toolbar
 

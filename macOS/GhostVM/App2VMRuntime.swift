@@ -38,6 +38,288 @@ final class App2VMSessionRegistry {
         session?.terminate()
     }
 
+    // MARK: - ASIF Migration
+
+    /// Retained reference to the migration prompt panel so it isn't
+    /// deallocated while visible (avoids CoreAnimation use-after-free).
+    fileprivate static var migrationPanel: NSPanel?
+
+    private static func promptMigration(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, recovery: Bool) {
+        DispatchQueue.main.async {
+            let vmName = bundleURL.deletingPathExtension().lastPathComponent
+
+            // Build a lightweight NSPanel instead of NSAlert.
+            // NSAlert's internal _NSWindowTransformAnimation is deallocated
+            // by SwiftUI's window management, causing a use-after-free crash
+            // ~30s after dismissal on macOS 26. A plain NSPanel we retain
+            // ourselves has no such animation object.
+            let panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 420, height: 200),
+                styleMask: [.titled],
+                backing: .buffered,
+                defer: false
+            )
+            panel.title = "Upgrade Disk Format"
+            panel.isFloatingPanel = true
+            panel.becomesKeyOnlyIfNeeded = false
+            panel.level = .modalPanel
+            panel.isReleasedWhenClosed = false
+            Self.migrationPanel = panel
+
+            // --- Layout ---
+            let contentView = NSView(frame: panel.contentView!.bounds)
+            contentView.autoresizingMask = [.width, .height]
+
+            let icon = NSImageView(frame: NSRect(x: 20, y: 130, width: 48, height: 48))
+            icon.image = NSImage(named: NSImage.cautionName)
+            contentView.addSubview(icon)
+
+            let titleLabel = NSTextField(labelWithString: "Upgrade \"\(vmName)\" Disk Format?")
+            titleLabel.font = .boldSystemFont(ofSize: 13)
+            titleLabel.frame = NSRect(x: 78, y: 158, width: 320, height: 20)
+            contentView.addSubview(titleLabel)
+
+            let infoLabel = NSTextField(wrappingLabelWithString:
+                "This VM uses an older disk format. Migrating to ASIF gives near-native SSD performance.\n\nThe original VM will not be modified.\n\n⚠ Snapshots and suspend state are not migrated.")
+            infoLabel.frame = NSRect(x: 78, y: 48, width: 320, height: 108)
+            infoLabel.font = .systemFont(ofSize: 11)
+            contentView.addSubview(infoLabel)
+
+            let migrateButton = NSButton(title: "Migrate\u{2026}", target: nil, action: nil)
+            migrateButton.bezelStyle = .rounded
+            migrateButton.keyEquivalent = "\r"
+            migrateButton.frame = NSRect(x: 310, y: 12, width: 95, height: 30)
+            contentView.addSubview(migrateButton)
+
+            let notNowButton = NSButton(title: "Not Now", target: nil, action: nil)
+            notNowButton.bezelStyle = .rounded
+            notNowButton.keyEquivalent = "\u{1b}" // Escape
+            notNowButton.frame = NSRect(x: 215, y: 12, width: 90, height: 30)
+            contentView.addSubview(notNowButton)
+
+            panel.contentView = contentView
+
+            // --- Actions ---
+            let handler = MigrationPromptHandler(
+                panel: panel,
+                bundleURL: bundleURL,
+                store: store,
+                vmID: vmID,
+                recovery: recovery
+            )
+            // Keep handler alive as long as the panel is visible
+            objc_setAssociatedObject(panel, "handler", handler, .OBJC_ASSOCIATION_RETAIN)
+
+            migrateButton.target = handler
+            migrateButton.action = #selector(MigrationPromptHandler.migrate)
+
+            notNowButton.target = handler
+            notNowButton.action = #selector(MigrationPromptHandler.notNow)
+
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    fileprivate static func runMigration(
+        source: URL,
+        destination: URL,
+        store: App2VMStore,
+        vmID: App2VM.ID,
+        recovery: Bool
+    ) {
+        let migrationService = VMMigrationService()
+
+        // Create progress window with terminal output
+        let progressWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        progressWindow.title = "Migrating VM…"
+        progressWindow.center()
+
+        let statusLabel = NSTextField(labelWithString: "Starting migration…")
+        statusLabel.frame = NSRect(x: 20, y: 288, width: 480, height: 20)
+        statusLabel.font = .systemFont(ofSize: 12)
+
+        let progressBar = NSProgressIndicator(frame: NSRect(x: 20, y: 265, width: 480, height: 20))
+        progressBar.style = .bar
+        progressBar.minValue = 0
+        progressBar.maxValue = 1
+        progressBar.isIndeterminate = false
+
+        // Terminal-style output view
+        let scrollView = NSScrollView(frame: NSRect(x: 20, y: 50, width: 480, height: 210))
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .bezelBorder
+
+        let textView = NSTextView(frame: scrollView.contentView.bounds)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.backgroundColor = NSColor.textBackgroundColor
+        textView.textColor = NSColor.labelColor
+        textView.autoresizingMask = [.width, .height]
+        scrollView.documentView = textView
+
+        let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
+        cancelButton.frame = NSRect(x: 420, y: 12, width: 80, height: 30)
+
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 520, height: 320))
+        contentView.addSubview(statusLabel)
+        contentView.addSubview(progressBar)
+        contentView.addSubview(scrollView)
+        contentView.addSubview(cancelButton)
+        progressWindow.contentView = contentView
+        progressWindow.makeKeyAndOrderFront(nil)
+
+        cancelButton.target = migrationService
+        cancelButton.action = #selector(VMMigrationService.cancel)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try migrationService.migrate(
+                    source: source,
+                    destination: destination,
+                    progressHandler: { fraction, message in
+                        DispatchQueue.main.async {
+                            progressBar.doubleValue = fraction
+                            statusLabel.stringValue = message
+                        }
+                    },
+                    outputHandler: { line in
+                        DispatchQueue.main.async {
+                            textView.textStorage?.append(NSAttributedString(
+                                string: line,
+                                attributes: [
+                                    .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                                    .foregroundColor: NSColor.labelColor,
+                                ]
+                            ))
+                            textView.scrollToEndOfDocument(nil)
+                        }
+                    }
+                )
+
+                DispatchQueue.main.async {
+                    // Swap VM in list
+                    store.replaceBundleURL(vmID: vmID, newBundleURL: destination)
+
+                    // Show success state with Boot button
+                    progressBar.doubleValue = 1.0
+                    statusLabel.stringValue = "Migration complete"
+                    progressWindow.title = "Migration Complete"
+                    cancelButton.isHidden = true
+
+                    let bootButton = NSButton(title: "Boot Now", target: nil, action: nil)
+                    bootButton.bezelStyle = .rounded
+                    bootButton.keyEquivalent = "\r"
+                    bootButton.frame = NSRect(x: 400, y: 12, width: 100, height: 30)
+                    contentView.addSubview(bootButton)
+
+                    // Boot action: hide window immediately, boot after animations settle
+                    let bootAction = MigrationBootAction(window: progressWindow) {
+                        App2VMSessionRegistry.shared.startVMSession(
+                            bundleURL: destination, store: store, vmID: vmID, recovery: recovery
+                        )
+                    }
+                    objc_setAssociatedObject(bootButton, "bootAction", bootAction, .OBJC_ASSOCIATION_RETAIN)
+                    bootButton.target = bootAction
+                    bootButton.action = #selector(MigrationBootAction.boot)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    statusLabel.stringValue = "Migration failed: \(error.localizedDescription)"
+                    progressWindow.title = "Migration Failed"
+                    let closeAction = MigrationBootAction(window: progressWindow) {}
+                    objc_setAssociatedObject(cancelButton, "closeAction", closeAction, .OBJC_ASSOCIATION_RETAIN)
+                    cancelButton.title = "Close"
+                    cancelButton.target = closeAction
+                    cancelButton.action = #selector(MigrationBootAction.boot)
+                }
+            }
+        }
+    }
+
+}
+
+/// Handles Migrate / Not Now buttons in the migration prompt panel.
+/// Stored as an associated object on the panel so it stays alive while visible.
+private final class MigrationPromptHandler: NSObject {
+    private let panel: NSPanel
+    private let bundleURL: URL
+    private let store: App2VMStore
+    private let vmID: App2VM.ID
+    private let recovery: Bool
+
+    init(panel: NSPanel, bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, recovery: Bool) {
+        self.panel = panel
+        self.bundleURL = bundleURL
+        self.store = store
+        self.vmID = vmID
+        self.recovery = recovery
+    }
+
+    private func dismissPanel() {
+        panel.orderOut(nil)
+        // Release the strong reference so the panel can be deallocated
+        App2VMSessionRegistry.migrationPanel = nil
+    }
+
+    @objc func migrate() {
+        dismissPanel()
+
+        let savePanel = NSSavePanel()
+        savePanel.title = "Save Migrated VM"
+        savePanel.nameFieldStringValue = bundleURL.lastPathComponent
+        savePanel.canCreateDirectories = true
+
+        savePanel.begin { [bundleURL, store, vmID, recovery] response in
+            if response == .OK, let destURL = savePanel.url {
+                App2VMSessionRegistry.runMigration(
+                    source: bundleURL,
+                    destination: destURL,
+                    store: store,
+                    vmID: vmID,
+                    recovery: recovery
+                )
+            }
+        }
+    }
+
+    @objc func notNow() {
+        dismissPanel()
+
+        App2VMSessionRegistry.shared.startVMSession(
+            bundleURL: bundleURL, store: store, vmID: vmID, recovery: recovery,
+            skipHelperCopy: true
+        )
+    }
+}
+
+/// Handles Boot Now button: hides window, waits for animations to flush, then boots.
+private final class MigrationBootAction: NSObject {
+    private weak var window: NSWindow?
+    private var onBoot: (() -> Void)?
+    init(window: NSWindow, onBoot: @escaping () -> Void) {
+        self.window = window
+        self.onBoot = onBoot
+    }
+    @objc func boot() {
+        window?.orderOut(nil)
+        let callback = onBoot
+        onBoot = nil // release captured references
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.window?.close()
+            callback?()
+        }
+    }
+}
+
+extension App2VMSessionRegistry {
     /// Starts a VM by launching its helper app, or reconnects to an existing helper.
     /// Creates a session if needed.
     /// - Parameters:
@@ -46,6 +328,20 @@ final class App2VMSessionRegistry {
     ///   - vmID: The VM's ID in the store for status updates
     ///   - runningPID: If non-nil, reconnect to an already-running helper instead of launching a new one
     func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil, recovery: Bool = false) {
+        // Check if disk needs ASIF migration (only for fresh launches, not reconnects)
+        if runningPID == nil {
+            let layout = VMFileLayout(bundleURL: bundleURL)
+            let format = DiskFormat.detect(at: layout.diskURL)
+            if !format.isASIF {
+                Self.promptMigration(bundleURL: bundleURL, store: store, vmID: vmID, recovery: recovery)
+                return
+            }
+        }
+
+        startVMSession(bundleURL: bundleURL, store: store, vmID: vmID, runningPID: runningPID, recovery: recovery)
+    }
+
+    fileprivate func startVMSession(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil, recovery: Bool = false, skipHelperCopy: Bool = false) {
         let path = bundleURL.standardizedFileURL.path
         lock.lock()
         var session = sessions[path]
@@ -84,6 +380,7 @@ final class App2VMSessionRegistry {
             session?.reconnectToRunningHelper(pid: pid)
         } else {
             session?.recoveryBoot = recovery
+            session?.skipHelperCopy = skipHelperCopy
             session?.startIfNeeded()
         }
     }
@@ -109,6 +406,10 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
 
     /// When true, the helper app will boot into macOS Recovery mode.
     var recoveryBoot: Bool = false
+
+    /// When true, skip copying the helper app/GhostTools into the VM bundle.
+    /// Used when launching a legacy VM that declined ASIF migration.
+    var skipHelperCopy: Bool = false
 
     /// The VM's dispatch queue, needed for vsock operations
     var vmQueue: DispatchQueue? { windowlessSession?.vmQueue }
@@ -310,62 +611,71 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     private func launchHelperApp() {
         guard helperProcess == nil else { return }
 
-        // Find the helper app in the main bundle
-        guard let sourceHelperURL = VMHelperBundleManager.findHelperInMainBundle() else {
-            print("[App2VMRunSession] GhostVMHelper.app not found in main bundle")
-            transition(to: .failed("Helper app not found"))
-            return
+        let helperAppURL: URL
+        if skipHelperCopy {
+            // Legacy VM — use existing helper in the VM bundle
+            guard let existingURL = helperBundleManager.helperAppURL(vmBundleURL: bundleURL) else {
+                print("[App2VMRunSession] No existing helper found in VM bundle")
+                transition(to: .failed("Helper app not found in VM bundle"))
+                return
+            }
+            helperAppURL = existingURL
+        } else {
+            // Normal path — copy latest helper into VM bundle
+            guard let sourceHelperURL = VMHelperBundleManager.findHelperInMainBundle() else {
+                print("[App2VMRunSession] GhostVMHelper.app not found in main bundle")
+                transition(to: .failed("Helper app not found"))
+                return
+            }
+            do {
+                helperAppURL = try helperBundleManager.copyHelperApp(
+                    vmBundleURL: bundleURL,
+                    sourceHelperAppURL: sourceHelperURL
+                )
+            } catch {
+                print("[App2VMRunSession] Failed to copy helper: \(error)")
+                transition(to: .failed("Failed to copy helper: \(error.localizedDescription)"))
+                return
+            }
         }
 
-        do {
-            // Copy helper to VM bundle (preserves signature)
-            let helperAppURL = try helperBundleManager.copyHelperApp(
-                vmBundleURL: bundleURL,
-                sourceHelperAppURL: sourceHelperURL
-            )
+        // Register for state change notifications from helper
+        // IMPORTANT: Use standardized path to match helper's path normalization
+        let standardizedPath = bundleURL.standardizedFileURL.path
+        let bundlePathHash = standardizedPath.stableHash
+        print("[App2VMRunSession] Registering for helper notifications: com.ghostvm.helper.state.\(bundlePathHash)")
+        print("[App2VMRunSession] Bundle path (standardized): \(standardizedPath)")
+        helperStateObserver = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            self?.handleHelperStateChange(notification)
+        }
 
-            // Register for state change notifications from helper
-            // IMPORTANT: Use standardized path to match helper's path normalization
-            let standardizedPath = bundleURL.standardizedFileURL.path
-            let bundlePathHash = standardizedPath.stableHash
-            print("[App2VMRunSession] Registering for helper notifications: com.ghostvm.helper.state.\(bundlePathHash)")
-            print("[App2VMRunSession] Bundle path (standardized): \(standardizedPath)")
-            helperStateObserver = DistributedNotificationCenter.default().addObserver(
-                forName: NSNotification.Name("com.ghostvm.helper.state.\(bundlePathHash)"),
-                object: nil,
-                queue: .main
-            ) { [weak self] notification in
-                self?.handleHelperStateChange(notification)
-            }
+        // Launch the helper app with VM bundle path (use standardized path)
+        let configuration = NSWorkspace.OpenConfiguration()
+        var args = ["--vm-bundle", standardizedPath]
+        if recoveryBoot {
+            args.append("--recovery")
+        }
+        configuration.arguments = args
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
 
-            // Launch the helper app with VM bundle path (use standardized path)
-            let configuration = NSWorkspace.OpenConfiguration()
-            var args = ["--vm-bundle", standardizedPath]
-            if recoveryBoot {
-                args.append("--recovery")
-            }
-            configuration.arguments = args
-            configuration.activates = true
-            configuration.createsNewApplicationInstance = true
-
-            NSWorkspace.shared.openApplication(
-                at: helperAppURL,
-                configuration: configuration
-            ) { [weak self] app, error in
-                DispatchQueue.main.async {
-                    if let error = error {
-                        print("[App2VMRunSession] Failed to launch helper: \(error)")
-                        self?.transition(to: .failed(error.localizedDescription))
-                    } else if let app = app {
-                        self?.helperProcess = app
-                        print("[App2VMRunSession] Helper launched for '\(self?.vmName ?? "unknown")' (PID \(app.processIdentifier))")
-                    }
+        NSWorkspace.shared.openApplication(
+            at: helperAppURL,
+            configuration: configuration
+        ) { [weak self] app, error in
+            DispatchQueue.main.async {
+                if let error = error {
+                    print("[App2VMRunSession] Failed to launch helper: \(error)")
+                    self?.transition(to: .failed(error.localizedDescription))
+                } else if let app = app {
+                    self?.helperProcess = app
+                    print("[App2VMRunSession] Helper launched for '\(self?.vmName ?? "unknown")' (PID \(app.processIdentifier))")
                 }
             }
-
-        } catch {
-            print("[App2VMRunSession] Failed to prepare helper: \(error)")
-            transition(to: .failed(error.localizedDescription))
         }
     }
 

@@ -68,11 +68,12 @@ public final class HealthCheckService: ObservableObject {
 
                 NSLog("HealthCheck: connected, reading version (fd=%d)...", fd)
 
-                // Read version line on a background queue
+                // Read version line on a background queue.
+                // Capture `connection` to keep the fd alive during the read.
                 let versionOK: Bool = await withCheckedContinuation { continuation in
                     DispatchQueue.global(qos: .utility).async {
                         var buffer = [UInt8](repeating: 0, count: 512)
-                        let n = Darwin.read(fd, &buffer, buffer.count - 1)
+                        let n = Darwin.read(connection.fileDescriptor, &buffer, buffer.count - 1)
                         NSLog("HealthCheck: version read n=%d", n)
                         continuation.resume(returning: n > 0)
                     }

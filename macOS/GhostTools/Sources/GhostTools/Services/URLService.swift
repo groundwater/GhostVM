@@ -2,7 +2,7 @@ import Foundation
 
 /// Service for managing URLs to be opened on the host
 final class URLService {
-    static let shared = URLService()
+    nonisolated(unsafe) static let shared = URLService()
 
     /// URLs queued for opening on host
     private var pendingURLs: [URL] = []

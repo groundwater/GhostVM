@@ -396,12 +396,20 @@ public final class VMController {
             throw VMError.message("Failed to create auxiliary storage: \(error.localizedDescription)")
         }
 
-        if !fileManager.createFile(atPath: layout.diskURL.path, contents: nil, attributes: nil) {
-            throw VMError.message("Failed to create disk image at \(layout.diskURL.path).")
+        // Create ASIF disk image for near-native SSD performance
+        let diskSizeGiB = max(1, requestedDiskBytes / (1024 * 1024 * 1024))
+        let diskutil = Process()
+        diskutil.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        diskutil.arguments = ["image", "create", "blank",
+                              "--fs", "none",
+                              "--format", "ASIF",
+                              "--size", "\(diskSizeGiB)GiB",
+                              layout.diskURL.path]
+        try diskutil.run()
+        diskutil.waitUntilExit()
+        guard diskutil.terminationStatus == 0 else {
+            throw VMError.message("Failed to create ASIF disk image (exit \(diskutil.terminationStatus)).")
         }
-        let handle = try FileHandle(forWritingTo: layout.diskURL)
-        try handle.truncate(atOffset: requestedDiskBytes)
-        try handle.close()
 
         // Handle legacy single shared folder
         var sharedFolderAbsolute: String?

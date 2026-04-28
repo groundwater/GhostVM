@@ -64,17 +64,19 @@ final class Router: @unchecked Sendable {
     private func handleClipboard(_ request: HTTPRequest) async -> HTTPResponse {
         switch request.method {
         case .GET:
-            return getClipboard()
+            return await getClipboard()
         case .POST:
-            return setClipboard(request)
+            return await setClipboard(request)
         default:
             return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
         }
     }
 
-    private func getClipboard() -> HTTPResponse {
+    private func getClipboard() async -> HTTPResponse {
         log("[Router] GET /clipboard")
-        guard let (data, type) = ClipboardService.shared.getClipboardData() else {
+        guard let (data, type) = await MainActor.run(body: {
+            ClipboardService.shared.getClipboardData()
+        }) else {
             log("[Router] No clipboard content")
             return HTTPResponse(status: .noContent)
         }
@@ -88,7 +90,7 @@ final class Router: @unchecked Sendable {
         return HTTPResponse(status: .ok, headers: headers, body: data)
     }
 
-    private func setClipboard(_ request: HTTPRequest) -> HTTPResponse {
+    private func setClipboard(_ request: HTTPRequest) async -> HTTPResponse {
         log("[Router] POST /clipboard")
         guard let body = request.body, !body.isEmpty else {
             log("[Router] No request body")
@@ -109,17 +111,40 @@ final class Router: @unchecked Sendable {
                 return (Data(content.utf8), parsedType)
             }
 
-            return (body, explicitType ?? "public.utf8-plain-text")
+            return (body, clipboardType(explicitType: explicitType, contentType: contentType))
         }()
 
         log("[Router] Setting clipboard: type=\(type), \(clipboardBody.count) bytes")
-        guard ClipboardService.shared.setClipboardData(clipboardBody, type: type) else {
+        let didSetClipboard = await MainActor.run {
+            ClipboardService.shared.setClipboardData(clipboardBody, type: type)
+        }
+        guard didSetClipboard else {
             log("[Router] Failed to set clipboard")
             return HTTPResponse.error(.internalServerError, message: "Failed to set clipboard")
         }
 
         log("[Router] Clipboard set successfully")
         return HTTPResponse(status: .ok)
+    }
+
+    private func clipboardType(explicitType: String?, contentType: String?) -> String {
+        if let explicitType, !explicitType.isEmpty {
+            return explicitType
+        }
+        guard let contentType else { return "public.utf8-plain-text" }
+
+        let mimeType = contentType.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+
+        switch mimeType {
+        case "image/png": return "public.png"
+        case "image/tiff": return "public.tiff"
+        case "image/jpeg": return "public.jpeg"
+        case "text/rtf", "application/rtf": return "public.rtf"
+        case "text/plain": return "public.utf8-plain-text"
+        default: return "public.utf8-plain-text"
+        }
     }
 
     // MARK: - Files
@@ -522,15 +547,20 @@ final class Router: @unchecked Sendable {
         }
 
         let timeout = payload.timeout ?? 30
-        let deadline = DispatchTime.now() + .seconds(timeout)
-        let group = DispatchGroup()
-        group.enter()
-        DispatchQueue.global().async {
-            process.waitUntilExit()
-            group.leave()
+
+        let timedOut = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let deadline = DispatchTime.now() + .seconds(timeout)
+            let group = DispatchGroup()
+            group.enter()
+            DispatchQueue.global().async {
+                process.waitUntilExit()
+                group.leave()
+            }
+            let result = group.wait(timeout: deadline) == .timedOut
+            continuation.resume(returning: result)
         }
 
-        if group.wait(timeout: deadline) == .timedOut {
+        if timedOut {
             process.terminate()
             return HTTPResponse.error(.requestTimeout, message: "Process timed out after \(timeout)s")
         }

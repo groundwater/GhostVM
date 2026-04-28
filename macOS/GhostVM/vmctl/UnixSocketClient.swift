@@ -34,6 +34,29 @@ struct UnixSocketClient {
         }
     }
 
+    @discardableResult
+    private func writeAll(fd: Int32, data: Data) throws -> Int {
+        if data.isEmpty { return 0 }
+
+        return try data.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return 0 }
+
+            var offset = 0
+            while offset < data.count {
+                let written = Darwin.write(fd, base + offset, data.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0 && (errno == EAGAIN || errno == EINTR) {
+                    usleep(1000)
+                } else {
+                    let err = written == 0 ? EPIPE : errno
+                    throw VMError.message("Socket write failed: errno \(err)")
+                }
+            }
+            return offset
+        }
+    }
+
     // MARK: - Core Request
 
     func request(method: String, path: String, body: Data? = nil, contentType: String? = nil) throws -> HTTPResponse {
@@ -85,19 +108,9 @@ struct UnixSocketClient {
 
         // Write request
         let headerData = Data(requestStr.utf8)
-        try headerData.withUnsafeBytes { ptr in
-            let written = Darwin.write(fd, ptr.baseAddress!, headerData.count)
-            guard written == headerData.count else {
-                throw VMError.message("Failed to write request headers")
-            }
-        }
+        try writeAll(fd: fd, data: headerData)
         if let body = body, !body.isEmpty {
-            try body.withUnsafeBytes { ptr in
-                let written = Darwin.write(fd, ptr.baseAddress!, body.count)
-                guard written == body.count else {
-                    throw VMError.message("Failed to write request body")
-                }
-            }
+            try writeAll(fd: fd, data: body)
         }
 
         // Signal we're done writing
