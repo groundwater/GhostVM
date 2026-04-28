@@ -1,4 +1,7 @@
 import Foundation
+import NIOCore
+import NIOPosix
+import os
 
 /// Event types pushed from guest to host over NDJSON.
 enum PushEvent {
@@ -51,21 +54,20 @@ enum PushEvent {
 /// 3. Host reads lines and dispatches events
 /// 4. Connection drops if either side disconnects
 final class EventPushServer: @unchecked Sendable {
-    static let shared = EventPushServer()
+    nonisolated(unsafe) static let shared = EventPushServer()
+
+    private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "EventPushServer")
 
     private let port: UInt32 = 5003
-    private var serverSocket: Int32 = -1
-    private var isRunning = false
+    private var serverChannel: Channel?
+    private var group: EventLoopGroup?
 
-    /// Current connected client fd (-1 if none)
-    private var clientFd: Int32 = -1
+    /// The currently connected client channel (only one at a time)
+    private var clientChannel: Channel?
     private let clientLock = NSLock()
 
-    /// Serial queue for writes (preserves NDJSON line ordering)
-    private let writeQueue = DispatchQueue(label: "\(Bundle.main.bundleIdentifier ?? "org.ghostvm.com.ghostvm.guest-tools").eventpush.write")
-
     /// Called on main thread when a new host client connects.
-    var onClientConnected: (() -> Void)?
+    var onClientConnected: (@Sendable () -> Void)?
 
     private init() {}
 
@@ -74,130 +76,123 @@ final class EventPushServer: @unchecked Sendable {
     }
 
     func start() async throws {
-        print("[EventPushServer] Creating socket on port \(port)")
-
-        serverSocket = socket(AF_VSOCK, SOCK_STREAM, 0)
-        guard serverSocket >= 0 else {
+        let listenFD = socket(AF_VSOCK, SOCK_STREAM, 0)
+        guard listenFD >= 0 else {
             throw VsockServerError.socketCreationFailed(errno)
         }
 
         var optval: Int32 = 1
-        setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &optval, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(listenFD, SOL_SOCKET, SO_REUSEADDR, &optval, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_vm(port: port)
-        let bindResult = withUnsafePointer(to: &addr) { addrPtr in
-            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                Darwin.bind(serverSocket, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_vm>.size))
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                Darwin.bind(listenFD, sockPtr, socklen_t(MemoryLayout<sockaddr_vm>.size))
             }
         }
 
         guard bindResult == 0 else {
-            close(serverSocket)
+            close(listenFD)
             throw VsockServerError.bindFailed(errno)
         }
 
-        guard listen(serverSocket, 1) == 0 else {
-            close(serverSocket)
+        guard listen(listenFD, 1) == 0 else {
+            close(listenFD)
             throw VsockServerError.listenFailed(errno)
         }
 
-        // Keep socket BLOCKING — kqueue/poll don't fire for AF_VSOCK on macOS guests
-        isRunning = true
-        print("[EventPushServer] Listening on vsock port \(port)")
+        Self.logger.info("Listening on vsock port \(self.port)")
 
-        // Blocking accept loop on dedicated thread
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            while self?.isRunning == true {
-                var clientAddr = sockaddr_vm(port: 0)
-                var addrLen = socklen_t(MemoryLayout<sockaddr_vm>.size)
+        let elg = MultiThreadedEventLoopGroup(numberOfThreads: 1)
+        self.group = elg
 
-                let newFd = withUnsafeMutablePointer(to: &clientAddr) { addrPtr in
-                    addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                        Darwin.accept(self?.serverSocket ?? -1, sockaddrPtr, &addrLen)
-                    }
-                }
-
-                if newFd < 0 {
-                    if errno == EINTR { continue }
-                    break // socket closed by stop()
-                }
-
-                // Close any existing client
-                self?.clientLock.lock()
-                let oldFd = self?.clientFd ?? -1
-                self?.clientFd = newFd
-                self?.clientLock.unlock()
-                if oldFd >= 0 {
-                    close(oldFd)
-                }
-
-                print("[EventPushServer] Client connected, fd=\(newFd)")
-
-                // Notify listeners on main thread
-                if let callback = self?.onClientConnected {
-                    DispatchQueue.main.async { callback() }
-                }
-
-                // Block on read until host disconnects (on background thread)
-                DispatchQueue.global(qos: .utility).async { [weak self] in
-                    var buf = [UInt8](repeating: 0, count: 1)
-                    while true {
-                        let n = Darwin.read(newFd, &buf, 1)
-                        if n <= 0 { break }
-                    }
-
-                    // Client disconnected — clear if still current
-                    self?.clientLock.lock()
-                    if self?.clientFd == newFd {
-                        self?.clientFd = -1
-                    }
-                    self?.clientLock.unlock()
-                    close(newFd)
-                    print("[EventPushServer] Client disconnected")
-                }
+        let server = self
+        let bootstrap = ServerBootstrap(group: elg)
+            .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
+            .childChannelOption(.allowRemoteHalfClosure, value: true)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandler(EventPushHandler(server: server))
             }
+
+        do {
+            let channel = try await bootstrap.withBoundSocket(listenFD).get()
+            self.serverChannel = channel
+        } catch {
+            close(listenFD)
+            try? await elg.shutdownGracefully()
+            self.group = nil
+            throw error
         }
     }
 
     /// Push an event to the connected host. No-op if no client connected.
-    /// Writes are dispatched asynchronously on a serial queue to avoid blocking the caller.
     func pushEvent(_ event: PushEvent) {
         clientLock.lock()
-        let fd = clientFd
+        let channel = clientChannel
         clientLock.unlock()
 
-        guard fd >= 0 else { return }
+        guard let channel = channel, channel.isActive else { return }
 
         let line = event.jsonLine + "\n"
-        writeQueue.async { [weak self] in
-            line.withCString { ptr in
-                let len = strlen(ptr)
-                let result = Darwin.write(fd, ptr, len)
-                if result < 0 {
-                    print("[EventPushServer] Write failed (fd=\(fd)): errno \(errno)")
-                    self?.clientLock.lock()
-                    if self?.clientFd == fd { self?.clientFd = -1 }
-                    self?.clientLock.unlock()
-                    close(fd)
-                } else {
-                    print("[EventPushServer] Wrote \(result)/\(len) bytes to fd=\(fd)")
-                }
+        var buffer = channel.allocator.buffer(capacity: line.utf8.count)
+        buffer.writeString(line)
+        channel.writeAndFlush(NIOAny(buffer), promise: nil)
+    }
+
+    fileprivate func setClient(_ channel: Channel?) {
+        clientLock.lock()
+        let oldChannel = clientChannel
+        clientChannel = channel
+        clientLock.unlock()
+
+        // Close previous client if replaced
+        if let old = oldChannel, old !== channel {
+            old.close(promise: nil)
+        }
+
+        if channel != nil {
+            Self.logger.info("Client connected")
+            if let callback = onClientConnected {
+                DispatchQueue.main.async { callback() }
             }
+        } else {
+            Self.logger.info("Client disconnected")
         }
     }
 
     func stop() {
-        isRunning = false
-
-        clientLock.lock()
-        let fd = clientFd
-        clientFd = -1
-        clientLock.unlock()
-        if fd >= 0 { close(fd) }
-
-        if serverSocket >= 0 {
-            close(serverSocket)
-            serverSocket = -1
+        setClient(nil)
+        if let channel = serverChannel {
+            try? channel.close().wait()
+            serverChannel = nil
         }
+        if let group = self.group {
+            try? group.syncShutdownGracefully()
+            self.group = nil
+        }
+    }
+}
+
+// MARK: - Handler
+
+private final class EventPushHandler: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+
+    private let server: EventPushServer
+
+    init(server: EventPushServer) {
+        self.server = server
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        server.setClient(context.channel)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        server.setClient(nil)
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        context.close(promise: nil)
     }
 }

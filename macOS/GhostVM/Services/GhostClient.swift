@@ -1,11 +1,13 @@
 import Foundation
 import Virtualization
 import GhostVMKit
+import os
 
 /// HTTP client for communicating with GhostTools running in the guest VM
 /// Supports both vsock (production) and TCP (development) connections
 @MainActor
 public final class GhostClient: GhostClientProtocol {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghostvm", category: "GhostClient")
     private nonisolated(unsafe) let virtualMachine: VZVirtualMachine?
     private nonisolated(unsafe) let vmQueue: DispatchQueue?
     private let vsockPort: UInt32 = 5000
@@ -649,31 +651,11 @@ public final class GhostClient: GhostClientProtocol {
     }
 
     private func checkHealthViaVsock(vm: VZVirtualMachine) async -> Bool {
-        guard let queue = self.vmQueue else {
-            return false
-        }
+        Self.logger.debug("checkHealth: connecting to port \(self.vsockPort)")
 
-        let port = self.vsockPort
-
-        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
         let connection: VZVirtioSocketConnection
         do {
-            connection = try await withCheckedThrowingContinuation { continuation in
-                queue.async {
-                    guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-                        continuation.resume(throwing: GhostClientError.connectionFailed("No socket device"))
-                        return
-                    }
-                    socketDevice.connect(toPort: port) { result in
-                        switch result {
-                        case .success(let conn):
-                            continuation.resume(returning: conn)
-                        case .failure(let error):
-                            continuation.resume(throwing: error)
-                        }
-                    }
-                }
-            }
+            connection = try await connectRaw(port: vsockPort)
         } catch {
             return false
         }
@@ -684,20 +666,25 @@ public final class GhostClient: GhostClientProtocol {
             DispatchQueue.global(qos: .userInitiated).async {
                 // Send HTTP health check using HTTPUtilities
                 let requestData = HTTPUtilities.buildRequest(method: "GET", path: "/health")
+                Self.logger.debug("checkHealth: writing \(requestData.count) bytes to fd=\(fd)")
                 requestData.withUnsafeBytes { ptr in
                     _ = Darwin.write(fd, ptr.baseAddress!, requestData.count)
                 }
                 Darwin.shutdown(fd, SHUT_WR)
 
                 // Read response
+                Self.logger.debug("checkHealth: reading response from fd=\(fd)")
                 var buffer = [CChar](repeating: 0, count: 1024)
                 let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
                 connection.close()
 
                 if bytesRead > 0 {
                     let response = String(cString: buffer)
-                    continuation.resume(returning: response.contains("200"))
+                    let ok = response.contains("200")
+                    Self.logger.info("checkHealth: got \(bytesRead) bytes, ok=\(ok)")
+                    continuation.resume(returning: ok)
                 } else {
+                    Self.logger.warning("checkHealth: read returned \(bytesRead), errno=\(errno)")
                     continuation.resume(returning: false)
                 }
             }
@@ -745,6 +732,21 @@ public final class GhostClient: GhostClientProtocol {
                         continuation.resume(throwing: error)
                     }
                 }
+            }
+        }
+
+        // VZVirtioSocketConnection may hand back a non-blocking fd.
+        // Callers use blocking read()/poll(), so ensure blocking mode.
+        let fd = connection.fileDescriptor
+        let flags = fcntl(fd, F_GETFL, 0)
+        guard flags >= 0 else {
+            NSLog("connectRaw: fcntl(F_GETFL) failed on fd=%d errno=%d", fd, errno)
+            throw GhostClientError.connectionFailed("Failed to get fd flags")
+        }
+        if (flags & O_NONBLOCK) != 0 {
+            guard fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) >= 0 else {
+                NSLog("connectRaw: fcntl(F_SETFL) failed to clear O_NONBLOCK on fd=%d errno=%d", fd, errno)
+                throw GhostClientError.connectionFailed("Failed to set blocking mode")
             }
         }
 
@@ -1023,29 +1025,7 @@ public final class GhostClient: GhostClientProtocol {
         }
         defer { try? fileHandle.close() }
 
-        guard let queue = self.vmQueue else {
-            throw GhostClientError.connectionFailed("VM queue not available")
-        }
-
-        // Connect - ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
-        let port = self.vsockPort
-        let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
-            queue.async {
-                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
-                    return
-                }
-                socketDevice.connect(toPort: port) { result in
-                    switch result {
-                    case .success(let conn):
-                        continuation.resume(returning: conn)
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
-        }
-
+        let connection = try await connectRaw(port: vsockPort)
         let fd = connection.fileDescriptor
 
         // Build HTTP headers using HTTPUtilities - use relativePath to preserve folder structure
@@ -1076,12 +1056,11 @@ public final class GhostClient: GhostClientProtocol {
         httpHeaders += "\r\n"
 
         let headerData = Data(httpHeaders.utf8)
-        let headerWritten = headerData.withUnsafeBytes { ptr in
-            Darwin.write(fd, ptr.baseAddress!, headerData.count)
-        }
-        if headerWritten < 0 {
+        do {
+            try writeAll(fd: fd, data: headerData)
+        } catch {
             connection.close()
-            throw GhostClientError.connectionFailed("Failed to write headers")
+            throw error
         }
 
         // Stream file in chunks
@@ -1094,16 +1073,11 @@ public final class GhostClient: GhostClientProtocol {
             let chunk = fileHandle.readData(ofLength: chunkSize)
             if chunk.isEmpty { break }
 
-            var offset = 0
-            while offset < chunk.count {
-                let written = chunk.withUnsafeBytes { ptr in
-                    Darwin.write(fd, ptr.baseAddress! + offset, chunk.count - offset)
-                }
-                if written < 0 {
-                    connection.close()
-                    throw GhostClientError.connectionFailed("Write failed: errno \(errno)")
-                }
-                offset += written
+            do {
+                try writeAll(fd: fd, data: chunk)
+            } catch {
+                connection.close()
+                throw error
             }
 
             bytesSent += Int64(chunk.count)
@@ -1263,30 +1237,9 @@ public final class GhostClient: GhostClientProtocol {
         contentType: String? = nil,
         extraHeaders: [String: String]? = nil
     ) async throws -> Data {
-        // Ensure we have the VM queue
-        guard let queue = self.vmQueue else {
-            throw GhostClientError.connectionFailed("VM queue not available")
-        }
+        Self.logger.info("sendHTTPRequest: \(method, privacy: .public) \(path, privacy: .public)")
 
-        // Connect to the guest on the vsock port
-        // ALL VZVirtualMachine access must happen on vmQueue per Apple's requirements
-        let port = self.vsockPort
-        let connection: VZVirtioSocketConnection = try await withCheckedThrowingContinuation { continuation in
-            queue.async {
-                guard let socketDevice = vm.socketDevices.first as? VZVirtioSocketDevice else {
-                    continuation.resume(throwing: GhostClientError.connectionFailed("No socket device available"))
-                    return
-                }
-                socketDevice.connect(toPort: port) { result in
-                    switch result {
-                    case .success(let conn):
-                        continuation.resume(returning: conn)
-                    case .failure(let error):
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
-        }
+        let connection = try await connectRaw(port: vsockPort)
 
         // Build HTTP request using HTTPUtilities
         var headers: [String: String] = [:]
@@ -1313,30 +1266,26 @@ public final class GhostClient: GhostClientProtocol {
         // Get file descriptor
         let fd = connection.fileDescriptor
 
+        Self.logger.debug("sendHTTPRequest: writing \(requestData.count) bytes to fd=\(fd)")
+
         // Do all blocking I/O on a background queue - NOT on main actor!
         let responseData: Data = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                // Send request in chunks to handle large files
-                let chunkSize = 65536 // 64KB chunks
-                var offset = 0
-                while offset < requestData.count {
-                    let end = min(offset + chunkSize, requestData.count)
-                    let chunk = requestData[offset..<end]
-                    let bytesWritten = chunk.withUnsafeBytes { ptr in
-                        Darwin.write(fd, ptr.baseAddress!, chunk.count)
-                    }
-                    if bytesWritten < 0 {
-                        connection.close()
-                        continuation.resume(throwing: GhostClientError.connectionFailed("Write failed: errno \(errno)"))
-                        return
-                    }
-                    offset += bytesWritten
+                do {
+                    try self.writeAll(fd: fd, data: requestData)
+                } catch {
+                    Self.logger.error("sendHTTPRequest: write failed: \(error.localizedDescription, privacy: .public)")
+                    connection.close()
+                    continuation.resume(throwing: error)
+                    return
                 }
 
+                Self.logger.debug("sendHTTPRequest: write done, shutting down write side")
                 // Shutdown write side to signal end of request
                 Darwin.shutdown(fd, SHUT_WR)
 
                 // Read response
+                Self.logger.debug("sendHTTPRequest: reading response from fd=\(fd)")
                 let fileHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
                 var result = Data()
                 while true {
@@ -1347,12 +1296,37 @@ public final class GhostClient: GhostClientProtocol {
                     result.append(chunk)
                 }
 
+                Self.logger.info("sendHTTPRequest: response \(result.count) bytes for \(path, privacy: .public)")
                 continuation.resume(returning: result)
             }
         }
 
         connection.close()
         return responseData
+    }
+
+    @discardableResult
+    private nonisolated func writeAll(fd: Int32, data: Data) throws -> Int {
+        if data.isEmpty { return 0 }
+
+        return try data.withUnsafeBytes { ptr in
+            guard let base = ptr.baseAddress else { return 0 }
+
+            var offset = 0
+            while offset < data.count {
+                let written = Darwin.write(fd, base + offset, data.count - offset)
+                if written > 0 {
+                    offset += written
+                } else if written < 0 && (errno == EAGAIN || errno == EINTR) {
+                    usleep(1000)
+                } else {
+                    let err = written == 0 ? EPIPE : errno
+                    throw GhostClientError.connectionFailed("Write failed: errno \(err)")
+                }
+            }
+
+            return offset
+        }
     }
 
     private nonisolated func readAllData(from handle: FileHandle) -> Data {
