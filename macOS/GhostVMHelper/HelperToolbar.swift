@@ -63,6 +63,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         static let clipboardSync = NSToolbarItem.Identifier("clipboardSync")
         static let iconChooser = NSToolbarItem.Identifier("iconChooser")
 
+        static let terminal = NSToolbarItem.Identifier("terminal")
         static let captureKeys = NSToolbarItem.Identifier("captureKeys")
         static let captureCommands = NSToolbarItem.Identifier("captureCommands")
         static let queuedFiles = NSToolbarItem.Identifier("queuedFiles")
@@ -74,6 +75,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     // MARK: - Properties
 
     weak var delegate: HelperToolbarDelegate?
+    var vmName: String = ""
 
     private let toolbar: NSToolbar
     private var guestToolsStatus: GuestToolsStatus = .connecting
@@ -99,6 +101,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private var portForwardsItem: NSToolbarItem?
     private var sharedFoldersItem: NSMenuToolbarItem?
     private var clipboardSyncItem: NSToolbarItem?
+    private var terminalItem: NSMenuToolbarItem?
     private var captureKeysItem: NSToolbarItem?
     private var captureCommandsItem: NSMenuToolbarItem?
     private var queuedFilesItem: NSToolbarItem?
@@ -325,6 +328,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             ItemID.portForwards,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
+            ItemID.terminal,
             ItemID.captureKeys,
             ItemID.captureCommands,
             ItemID.queuedFiles,
@@ -340,6 +344,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             ItemID.portForwards,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
+            ItemID.terminal,
             ItemID.captureKeys,
             ItemID.captureCommands,
             ItemID.queuedFiles,
@@ -360,6 +365,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             return makeSharedFoldersItem()
         case ItemID.clipboardSync:
             return makeClipboardSyncItem()
+        case ItemID.terminal:
+            return makeTerminalItem()
         case ItemID.captureKeys:
             return makeCaptureKeysItem()
         case ItemID.captureCommands:
@@ -487,6 +494,71 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         updateClipboardSyncButton()
 
         return item
+    }
+
+    private func makeTerminalItem() -> NSToolbarItem {
+        let item = NSMenuToolbarItem(itemIdentifier: ItemID.terminal)
+        item.label = "Terminal"
+        item.paletteLabel = "Terminal"
+        item.toolTip = "Open shell in guest VM"
+        item.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Terminal")?.withSymbolConfiguration(iconConfig)
+
+        let menu = NSMenu()
+        let openItem = NSMenuItem(title: "Open Terminal", action: #selector(openTerminal), keyEquivalent: "")
+        openItem.target = self
+        openItem.image = NSImage(systemSymbolName: "terminal", accessibilityDescription: nil)
+        menu.addItem(openItem)
+
+        menu.addItem(.separator())
+
+        let copyItem = NSMenuItem(title: "Copy vmctl Command", action: #selector(copyVmctlCommand), keyEquivalent: "")
+        copyItem.target = self
+        copyItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
+        menu.addItem(copyItem)
+
+        item.menu = menu
+        terminalItem = item
+        return item
+    }
+
+    /// Resolve the full path to the vmctl binary.
+    /// vmctl.app is copied as a sibling of the helper .app in the VM bundle's Helper/ directory.
+    private func vmctlPath() -> String {
+        let helperBundle = Bundle.main.bundlePath // .../Helper/<VMName>.app
+        let helperDir = (helperBundle as NSString).deletingLastPathComponent // .../Helper/
+        let vmctl = (helperDir as NSString).appendingPathComponent("vmctl.app/Contents/MacOS/vmctl")
+        if FileManager.default.fileExists(atPath: vmctl) {
+            return vmctl
+        }
+        NSLog("HelperToolbar: vmctl not found at \(vmctl)")
+        return "vmctl"
+    }
+
+    /// Shell-escape a string by wrapping in single quotes and escaping embedded single quotes.
+    private func shellEscape(_ s: String) -> String {
+        "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    /// Full vmctl shell command with properly escaped paths.
+    private func vmctlCommand() -> String {
+        "\(shellEscape(vmctlPath())) shell --name \(shellEscape(vmName))"
+    }
+
+    @objc private func openTerminal() {
+        let command = vmctlCommand()
+        // Write a temp script that runs vmctl then cleans itself up
+        let scriptPath = NSTemporaryDirectory() + "ghostvm-shell-\(ProcessInfo.processInfo.processIdentifier).sh"
+        let script = "#!/bin/sh\nrm -f \(shellEscape(scriptPath))\nexec \(command)\n"
+        FileManager.default.createFile(atPath: scriptPath, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-a", "Terminal", scriptPath]
+        try? process.run()
+    }
+
+    @objc private func copyVmctlCommand() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(vmctlCommand(), forType: .string)
     }
 
     private func makeCaptureKeysItem() -> NSToolbarItem {
