@@ -14,7 +14,7 @@ struct PortInfo {
 
 /// Scans for listening TCP ports using libproc.
 final class PortScanner {
-    static let shared = PortScanner()
+    nonisolated(unsafe) static let shared = PortScanner()
 
     /// Minimum port to report (skip well-known/system ports)
     var minimumPort: UInt16 = 1025

@@ -2,7 +2,7 @@ import Foundation
 
 /// Service for managing file transfer operations between host and guest
 final class FileService {
-    static let shared = FileService()
+    nonisolated(unsafe) static let shared = FileService()
 
     /// Base directory for received files
     private let receiveDirectory: URL

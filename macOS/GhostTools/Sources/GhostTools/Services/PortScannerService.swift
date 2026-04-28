@@ -3,7 +3,7 @@ import Foundation
 /// Periodically scans for listening TCP ports and pushes changes to the host
 /// via EventPushServer. Only sends updates when the set of ports changes.
 final class PortScannerService {
-    static let shared = PortScannerService()
+    nonisolated(unsafe) static let shared = PortScannerService()
 
     private var timer: Timer?
     private var previousPorts: Set<Int> = []

@@ -2,7 +2,7 @@ name: GhostVM
 options:
   bundleIdPrefix: org.ghostvm
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "26.0"
   xcodeVersion: "15.4"
 
 packages:
