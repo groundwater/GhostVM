@@ -11,7 +11,6 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
-        .package(url: "https://github.com/apple/swift-nio-http2.git", from: "1.34.0"),
     ],
     targets: [
         .target(
@@ -27,7 +26,6 @@ let package = Package(
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
                 .product(name: "NIOWebSocket", package: "swift-nio"),
-                .product(name: "NIOHTTP2", package: "swift-nio-http2"),
             ],
             exclude: ["Resources/Info.plist", "Resources/Info.template.plist", "Resources/entitlements.plist"],
             linkerSettings: [
@@ -36,7 +34,10 @@ let package = Package(
         ),
         .testTarget(
             name: "GhostToolsTests",
-            dependencies: ["GhostTools"]
+            dependencies: [
+                "GhostTools",
+                .product(name: "NIOEmbedded", package: "swift-nio"),
+            ]
         )
     ]
 )
