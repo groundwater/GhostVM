@@ -207,14 +207,23 @@ enum ShellCommand {
                 while let frame = wsParser.nextFrame() {
                     switch frame.opcode {
                     case 0x02: // Binary — PTY output
+                        // STDOUT inherits O_NONBLOCK from STDIN (same open file
+                        // description on a terminal), so writes can return
+                        // EAGAIN under TUI-redraw bursts. Retry with a tiny
+                        // sleep — bailing on EAGAIN drops bytes mid-frame and
+                        // garbles TUI output.
                         frame.payload.withUnsafeBufferPointer { ptr in
                             guard let base = ptr.baseAddress, ptr.count > 0 else { return }
                             var off = 0
                             while off < ptr.count {
                                 let n = Darwin.write(STDOUT_FILENO, base + off, ptr.count - off)
-                                if n > 0 { off += n }
-                                else if n < 0 && errno == EINTR { continue }
-                                else { break }
+                                if n > 0 {
+                                    off += n
+                                } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
+                                    usleep(1000)
+                                } else {
+                                    break
+                                }
                             }
                         }
                     case 0x01: // Text — control message
