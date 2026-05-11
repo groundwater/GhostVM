@@ -81,6 +81,12 @@ struct CLI {
             } catch {
                 fail(error)
             }
+        case "vsock":
+            do {
+                try VsockCommand.run(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
         case "socket":
             do {
                 try handleSocket(arguments: Array(arguments.dropFirst()))

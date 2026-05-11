@@ -260,6 +260,11 @@ final class HostAPIService {
             return
         }
 
+        if cleanPath == "/api/v1/vsock-connect" {
+            await handleVsockConnectProxy(vmctlFD: fd, headers: headers)
+            return
+        }
+
         // Normal request/response flow — read remaining body if needed
         let fullData: Data? = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -507,6 +512,131 @@ final class HostAPIService {
                 continuation.resume()
             }
         }
+    }
+
+    // MARK: - Generic Vsock Proxy
+    //
+    // Bridges vmctl's unix-socket connection to a raw vsock connection at a
+    // requested guest port. After the 101 response, both sides are pure bytes.
+    // Used by `vmctl vsock connect <port>` — netcat-style debugging tool.
+
+    private func handleVsockConnectProxy(vmctlFD: Int32, headers: [String: String]?) async {
+        guard let client = client else {
+            Self.writeShortError(fd: vmctlFD, status: 500, text: "Internal Server Error")
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        // Required: Vsock-Port header.
+        let portString = headers?["vsock-port"]
+            ?? headers?["Vsock-Port"]
+            ?? headers?["VSOCK-PORT"]
+        guard let portString = portString, let port = UInt32(portString) else {
+            Self.writeShortError(fd: vmctlFD, status: 400, text: "Missing or invalid Vsock-Port header")
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        NSLog("HostAPIService: vsock-connect proxy starting (port=\(port))")
+
+        let guestConnection: VZVirtioSocketConnection
+        do {
+            guestConnection = try await Self.withTimeout(10) {
+                try await client.connectRaw(port: port)
+            }
+        } catch {
+            NSLog("HostAPIService: vsock-connect failed to open port \(port): \(error)")
+            Self.writeShortError(fd: vmctlFD, status: 502, text: "Bad Gateway: \(error.localizedDescription)")
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        let guestFD = guestConnection.fileDescriptor
+        NSLog("HostAPIService: vsock-connect opened guest fd=\(guestFD) port=\(port)")
+
+        // Tell vmctl the bridge is up.
+        let switching = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: vsock\r\nConnection: Upgrade\r\n\r\n"
+        guard Self.writeAll(fd: vmctlFD, data: Data(switching.utf8)) else {
+            Self.logTransportFailure("vsock-connect failed to write 101 to vmctl")
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        await Self.bridgeBytes(fdA: vmctlFD, fdB: guestFD, label: "vsock-connect(\(port))")
+        guestConnection.close()
+        Darwin.close(vmctlFD)
+        NSLog("HostAPIService: vsock-connect(\(port)) session ended")
+    }
+
+    /// Bidirectional blocking byte bridge between two fds. Returns when both
+    /// directions have hit EOF/error. Uses SHUT_WR to propagate half-close so
+    /// the peer of each direction sees a proper EOF.
+    static func bridgeBytes(fdA: Int32, fdB: Int32, label: String) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let group = DispatchGroup()
+
+            // A → B
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                var shouldSignalEOF = true
+                while true {
+                    let n = Darwin.read(fdA, &buffer, buffer.count)
+                    if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return n == 0 }
+                        return Self.writeAll(fd: fdB, ptr: base, count: n)
+                    }
+                    if !ok {
+                        NSLog("HostAPIService: \(label) write A→B failed: errno \(errno)")
+                        Darwin.shutdown(fdA, SHUT_RD)
+                        shouldSignalEOF = false
+                        break
+                    }
+                }
+                if shouldSignalEOF {
+                    Darwin.shutdown(fdB, SHUT_WR)
+                }
+                group.leave()
+            }
+
+            // B → A
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                var shouldSignalEOF = true
+                while true {
+                    let n = Darwin.read(fdB, &buffer, buffer.count)
+                    if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return n == 0 }
+                        return Self.writeAll(fd: fdA, ptr: base, count: n)
+                    }
+                    if !ok {
+                        NSLog("HostAPIService: \(label) write B→A failed: errno \(errno)")
+                        Darwin.shutdown(fdB, SHUT_RD)
+                        shouldSignalEOF = false
+                        break
+                    }
+                }
+                if shouldSignalEOF {
+                    Darwin.shutdown(fdA, SHUT_WR)
+                }
+                group.leave()
+            }
+
+            group.notify(queue: .global()) {
+                continuation.resume()
+            }
+        }
+    }
+
+    private static func writeShortError(fd: Int32, status: Int, text: String) {
+        let resp = "HTTP/1.1 \(status) \(text)\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        _ = resp.withCString { Darwin.write(fd, $0, strlen($0)) }
     }
 
     // MARK: - HTTP Parsing
