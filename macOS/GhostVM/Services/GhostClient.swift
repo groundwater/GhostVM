@@ -88,14 +88,25 @@ public final class GhostClient: GhostClientProtocol {
         }
     }
 
-    /// Fetch a file from the guest VM
-    /// - Parameter path: The file path in the guest to fetch
-    /// - Returns: The file data and filename
-    public func fetchFile(at path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
-        if let tcpHost = tcpHost, let tcpPort = tcpPort {
-            return try await fetchFileViaTCP(host: tcpHost, port: tcpPort, path: path)
-        } else if let vm = virtualMachine {
-            return try await fetchFileViaVsock(vm: vm, path: path)
+    /// Fetch a file from the guest VM, streaming directly to disk.
+    /// - Parameters:
+    ///   - path: The file path in the guest to fetch
+    ///   - destinationURL: Local file URL to write to
+    ///   - progress: Called with 0.0–1.0 as bytes are received
+    /// - Returns: The filename and optional POSIX permissions
+    public func fetchFile(
+        at path: String,
+        to destinationURL: URL,
+        progress: @escaping (Double) -> Void
+    ) async throws -> (filename: String, permissions: Int?) {
+        if let vm = virtualMachine {
+            return try await fetchFileStreamingViaVsock(vm: vm, path: path, destinationURL: destinationURL, progress: progress)
+        } else if let tcpHost = tcpHost, let tcpPort = tcpPort {
+            // TCP fallback: use the old buffered path
+            let (data, filename, permissions) = try await fetchFileViaTCP(host: tcpHost, port: tcpPort, path: path)
+            try data.write(to: destinationURL)
+            progress(1.0)
+            return (filename, permissions)
         } else {
             throw GhostClientError.notConnected
         }
@@ -1117,32 +1128,131 @@ public final class GhostClient: GhostClientProtocol {
         return fileResponse.path
     }
 
-    private func fetchFileViaVsock(vm: VZVirtualMachine, path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
+    /// Stream a file from guest to a local file, reporting progress.
+    private func fetchFileStreamingViaVsock(
+        vm: VZVirtualMachine,
+        path: String,
+        destinationURL: URL,
+        progress: @escaping (Double) -> Void
+    ) async throws -> (filename: String, permissions: Int?) {
         let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
 
-        let responseData = try await sendHTTPRequest(
-            vm: vm,
+        let connection = try await connectRaw(port: vsockPort)
+        let fd = connection.fileDescriptor
+
+        // Build and send GET request
+        var headers: [String: String] = [:]
+        if let token = authToken {
+            headers["Authorization"] = "Bearer \(token)"
+        }
+        let requestData = HTTPUtilities.buildRequest(
             method: "GET",
             path: "/api/v1/files/\(encodedPath)",
+            headers: headers,
             body: nil
         )
 
-        let (statusCode, headers, body) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                do {
+                    try self.writeAll(fd: fd, data: requestData)
+                    // No SHUT_WR — the server knows the request is complete from
+                    // the HTTP framing. Shutting down the write side can cause the
+                    // vsock peer to tear down before the full response is sent.
 
-        guard statusCode == 200 else {
-            throw GhostClientError.invalidResponse(statusCode)
-        }
+                    // Read response headers (read until \r\n\r\n)
+                    let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
+                    var headerBytes = [UInt8]()
+                    var oneByte = [UInt8](repeating: 0, count: 1)
+                    while true {
+                        let n = Darwin.read(fd, &oneByte, 1)
+                        guard n == 1 else {
+                            throw GhostClientError.connectionFailed("Connection closed during headers")
+                        }
+                        headerBytes.append(oneByte[0])
+                        if headerBytes.count >= 4 && headerBytes.suffix(4).elementsEqual(separator) {
+                            break
+                        }
+                        if headerBytes.count > 16384 {
+                            throw GhostClientError.connectionFailed("Response headers too large")
+                        }
+                    }
 
-        guard let body = body else {
-            throw GhostClientError.noContent
-        }
+                    // Parse status and headers
+                    guard let headerString = String(bytes: headerBytes, encoding: .utf8) else {
+                        throw GhostClientError.decodingError
+                    }
+                    let headerLines = headerString.components(separatedBy: "\r\n")
+                    guard let statusLine = headerLines.first else {
+                        throw GhostClientError.decodingError
+                    }
+                    let statusParts = statusLine.components(separatedBy: " ")
+                    guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else {
+                        throw GhostClientError.decodingError
+                    }
+                    guard statusCode == 200 else {
+                        connection.close()
+                        throw GhostClientError.invalidResponse(statusCode)
+                    }
 
-        let filename = URL(fileURLWithPath: path).lastPathComponent
-        var permissions: Int? = nil
-        if let permStr = headers["X-Permissions"] {
-            permissions = Int(permStr, radix: 8)
+                    var responseHeaders: [String: String] = [:]
+                    for line in headerLines.dropFirst() {
+                        if let colonIndex = line.firstIndex(of: ":") {
+                            let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                            let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                            responseHeaders[key] = value
+                        }
+                    }
+
+                    let contentLength = Int(responseHeaders["content-length"] ?? responseHeaders["Content-Length"] ?? "0") ?? 0
+                    let filename: String
+                    if let disposition = responseHeaders["content-disposition"] ?? responseHeaders["Content-Disposition"],
+                       let range = disposition.range(of: "filename=\""),
+                       let endQuote = disposition[range.upperBound...].firstIndex(of: "\"") {
+                        filename = String(disposition[range.upperBound..<endQuote])
+                    } else {
+                        filename = URL(fileURLWithPath: path).lastPathComponent
+                    }
+
+                    var permissions: Int? = nil
+                    if let permStr = responseHeaders["x-permissions"] ?? responseHeaders["X-Permissions"] {
+                        permissions = Int(permStr, radix: 8)
+                    }
+
+                    // Stream body to disk in 64KB chunks, reading exactly Content-Length bytes
+                    FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
+                    let fileHandle = try FileHandle(forWritingTo: destinationURL)
+
+                    var bytesRemaining = contentLength
+                    var buf = [UInt8](repeating: 0, count: 65536)
+                    while bytesRemaining > 0 {
+                        let toRead = min(buf.count, bytesRemaining)
+                        let n = Darwin.read(fd, &buf, toRead)
+                        if n > 0 {
+                            fileHandle.write(Data(buf[0..<n]))
+                            bytesRemaining -= n
+                            if contentLength > 0 {
+                                progress(Double(contentLength - bytesRemaining) / Double(contentLength))
+                            }
+                        } else if n == 0 {
+                            break // unexpected EOF
+                        } else if errno == EINTR {
+                            continue
+                        } else {
+                            break
+                        }
+                    }
+
+                    fileHandle.closeFile()
+                    connection.close()
+
+                    continuation.resume(returning: (filename, permissions))
+                } catch {
+                    connection.close()
+                    continuation.resume(throwing: error)
+                }
+            }
         }
-        return (body, filename, permissions)
     }
 
     private func listFilesViaVsock(vm: VZVirtualMachine) async throws -> [String] {

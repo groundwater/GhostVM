@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import NIOPosix
 import NIOHTTP1
 import AppKit
 import os
@@ -39,6 +40,8 @@ final class StreamDispatcher: ChannelInboundHandler, RemovableChannelHandler {
             let newHandler: ChannelHandler & RemovableChannelHandler
             if head.method == .POST && head.uri == "/api/v1/files/receive" {
                 newHandler = StreamingFileReceiveHandler()
+            } else if head.method == .GET && head.uri.hasPrefix("/api/v1/files/") && head.uri != "/api/v1/files" {
+                newHandler = StreamingFileSendHandler()
             } else {
                 newHandler = RouterBridgeHandler(router: router)
             }
@@ -282,6 +285,124 @@ final class StreamingFileReceiveHandler: ChannelInboundHandler, RemovableChannel
             }
         }
         return topLevelNames.map { baseURL.appendingPathComponent($0) }
+    }
+}
+
+// MARK: - Streaming File Send
+
+/// Handles GET /api/v1/files/{path} by streaming the file from disk using
+/// NIO's NonBlockingFileIO — no threads, no blocking, proper backpressure.
+final class StreamingFileSendHandler: ChannelInboundHandler, RemovableChannelHandler {
+    typealias InboundIn = HTTPServerRequestPart
+    typealias OutboundOut = HTTPServerResponsePart
+
+    private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "StreamingFileSend")
+    private static let chunkSize = 65536
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let part = unwrapInboundIn(data)
+
+        switch part {
+        case .head(let head):
+            let prefix = "/api/v1/files/"
+            let encoded = String(head.uri.hasPrefix(prefix) ? head.uri.dropFirst(prefix.count) : head.uri[...])
+            let filePath = encoded.removingPercentEncoding ?? encoded
+
+            guard !filePath.isEmpty else {
+                writeError(.badRequest, message: "Path required", version: head.version, context: context)
+                return
+            }
+
+            let info: (url: URL, size: Int, filename: String, permissions: Int?)
+            do {
+                info = try FileService.shared.statFile(at: filePath)
+            } catch FileServiceError.accessDenied {
+                writeError(.forbidden, message: "Access denied", version: head.version, context: context)
+                return
+            } catch {
+                writeError(.notFound, message: "File not found", version: head.version, context: context)
+                return
+            }
+
+            // Send response head
+            var headers = HTTPHeaders()
+            headers.add(name: "content-type", value: "application/octet-stream")
+            headers.add(name: "content-length", value: "\(info.size)")
+            headers.add(name: "content-disposition", value: "attachment; filename=\"\(info.filename)\"")
+            if let perms = info.permissions {
+                headers.add(name: "x-permissions", value: String(perms, radix: 8))
+            }
+            if head.version.major == 1 {
+                headers.add(name: "connection", value: "close")
+            }
+
+            let responseHead = HTTPResponseHead(version: head.version, status: .ok, headers: headers)
+            context.write(wrapOutboundOut(.head(responseHead)), promise: nil)
+
+            Self.logger.info("streaming \(info.filename, privacy: .public) (\(info.size) bytes)")
+
+            // Stream file using NonBlockingFileIO
+            let fileIO = NonBlockingFileIO(threadPool: .singleton)
+            let fh: NIOFileHandle
+            do {
+                fh = try NIOFileHandle(path: info.url.path)
+            } catch {
+                writeError(.internalServerError, message: "Cannot open file", version: head.version, context: context)
+                return
+            }
+
+            let allocator = context.channel.allocator
+            fileIO.readChunked(
+                fileHandle: fh,
+                byteCount: info.size,
+                chunkSize: Self.chunkSize,
+                allocator: allocator,
+                eventLoop: context.eventLoop
+            ) { buffer in
+                context.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buffer))))
+            }.whenComplete { result in
+                try? fh.close()
+                switch result {
+                case .success:
+                    // Write .end but don't close — let the host close after reading all data.
+                    // Closing here can discard buffered outbound data.
+                    context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                case .failure(let error):
+                    Self.logger.error("streaming failed: \(error.localizedDescription, privacy: .public)")
+                    context.close(promise: nil)
+                }
+            }
+
+        case .body:
+            break
+
+        case .end:
+            break
+        }
+    }
+
+    private func writeError(_ status: HTTPResponseStatus, message: String, version: HTTPVersion, context: ChannelHandlerContext) {
+        Self.logger.error("error: \(status.code) \(message, privacy: .public)")
+        let body = "{\"error\":\"\(message)\"}".utf8
+        var headers = HTTPHeaders()
+        headers.add(name: "content-type", value: "application/json")
+        headers.add(name: "content-length", value: "\(body.count)")
+        if version.major == 1 {
+            headers.add(name: "connection", value: "close")
+        }
+        let head = HTTPResponseHead(version: version, status: status, headers: headers)
+        context.write(wrapOutboundOut(.head(head)), promise: nil)
+        var buf = context.channel.allocator.buffer(capacity: body.count)
+        buf.writeBytes(body)
+        context.write(wrapOutboundOut(.body(.byteBuffer(buf))), promise: nil)
+        context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+            context.close(promise: nil)
+        }
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        Self.logger.error("errorCaught: \(error.localizedDescription, privacy: .public)")
+        context.close(promise: nil)
     }
 }
 

@@ -51,25 +51,25 @@ final class FileService {
     /// - Parameter path: The file path to read (relative paths are resolved from home directory)
     /// - Returns: The file data and filename
     func readFile(at path: String) throws -> (data: Data, filename: String, permissions: Int?) {
+        let info = try statFile(at: path)
+        let data = try Data(contentsOf: info.url)
+        return (data, info.filename, info.permissions)
+    }
+
+    /// Returns file metadata without reading contents.
+    /// Validates path security (outgoing queue or allowed path).
+    func statFile(at path: String) throws -> (url: URL, size: Int, filename: String, permissions: Int?) {
         let url = resolveFilePath(path)
 
-        // Security check: allow files the user explicitly queued for sending,
-        // otherwise block sensitive system directories
         guard isOutgoingFile(url.path) || isPathAllowed(url) else {
             throw FileServiceError.accessDenied
         }
 
-        let data = try Data(contentsOf: url)
-        let filename = url.lastPathComponent
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs[.size] as? Int) ?? 0
+        let permissions = attrs[.posixPermissions] as? Int
 
-        // Read POSIX permissions
-        var permissions: Int? = nil
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let posix = attrs[.posixPermissions] as? Int {
-            permissions = posix
-        }
-
-        return (data, filename, permissions)
+        return (url, size, url.lastPathComponent, permissions)
     }
 
     /// Lists files in the receive directory

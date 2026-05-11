@@ -26,8 +26,6 @@ final class Router: @unchecked Sendable {
             return handleFileList(request)
         } else if path == "/api/v1/files/receive" {
             return handleFileReceive(request)
-        } else if path.hasPrefix("/api/v1/files/") {
-            return handleFileGet(request)
         } else if path == "/api/v1/urls" {
             return handleURLs(request)
         } else if path == "/api/v1/ports" {
@@ -206,43 +204,6 @@ final class Router: @unchecked Sendable {
         } catch {
             log("[Router] Failed to save file: \(error)")
             return HTTPResponse.error(.internalServerError, message: "Failed to save file: \(error.localizedDescription)")
-        }
-    }
-
-    private func handleFileGet(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.method == .GET else {
-            return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
-        }
-
-        // Extract path after /api/v1/files/
-        let prefix = "/api/v1/files/"
-        guard request.path.hasPrefix(prefix) else {
-            return HTTPResponse.error(.badRequest, message: "Invalid path")
-        }
-
-        let filePath = String(request.path.dropFirst(prefix.count))
-        guard !filePath.isEmpty else {
-            return HTTPResponse.error(.badRequest, message: "Path required")
-        }
-
-        // URL decode the path
-        let decodedPath = filePath.removingPercentEncoding ?? filePath
-
-        do {
-            let (data, filename, permissions) = try FileService.shared.readFile(at: decodedPath)
-            var headers: [String: String] = [
-                "Content-Type": "application/octet-stream",
-                "Content-Disposition": "attachment; filename=\"\(filename)\"",
-                "Content-Length": "\(data.count)"
-            ]
-            if let permissions = permissions {
-                headers["X-Permissions"] = String(permissions, radix: 8)
-            }
-            return HTTPResponse(status: .ok, headers: headers, body: data)
-        } catch FileServiceError.accessDenied {
-            return HTTPResponse.error(.forbidden, message: "Access denied")
-        } catch {
-            return HTTPResponse.error(.notFound, message: "File not found")
         }
     }
 

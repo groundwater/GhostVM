@@ -198,7 +198,7 @@ public final class FileTransferService: ObservableObject {
         }
     }
 
-    /// Fetch a file from the guest VM and save to host
+    /// Fetch a file from the guest VM and save to host (streamed to disk with progress)
     /// - Parameter guestPath: Path in the guest to fetch
     /// - Parameter savePanel: Whether to show a save panel (true) or save to Downloads (false)
     public func fetchFile(at guestPath: String, showSavePanel: Bool = true) {
@@ -217,39 +217,56 @@ public final class FileTransferService: ObservableObject {
 
         Task {
             do {
-                updateTransferState(id: transferId, state: .transferring(progress: 0.5))
-
-                let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
-
-                // Determine save location
+                // Determine save location before starting the transfer
+                let suggestedName = filename
                 let saveURL: URL
                 if showSavePanel {
-                    guard let url = await showSavePanelAsync(suggestedFilename: fetchedFilename) else {
+                    guard let url = await showSavePanelAsync(suggestedFilename: suggestedName) else {
                         updateTransferState(id: transferId, state: .failed(error: "Save cancelled"))
                         updateIsTransferring()
                         return
                     }
                     saveURL = url
                 } else {
-                    // Save to Downloads
                     let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-                    saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
+                    saveURL = downloadsURL.appendingPathComponent(suggestedName)
                 }
 
-                // Write file
-                try data.write(to: saveURL)
-                Self.applyQuarantine(to: saveURL)
+                // Stream directly to a temp file, then move to final location
+                let tempURL = saveURL.appendingPathExtension("ghostvm-partial")
 
-                // Apply permissions if provided
+                updateTransferState(id: transferId, state: .transferring(progress: 0.0))
+
+                let (fetchedFilename, permissions) = try await client.fetchFile(
+                    at: guestPath,
+                    to: tempURL
+                ) { [weak self] progress in
+                    Task { @MainActor in
+                        self?.updateTransferState(id: transferId, state: .transferring(progress: progress))
+                    }
+                }
+
+                // Move temp file to final location (use fetched filename if save panel wasn't shown)
+                var finalURL = saveURL
+                if !showSavePanel {
+                    let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+                    finalURL = downloadsURL.appendingPathComponent(fetchedFilename)
+                }
+                if FileManager.default.fileExists(atPath: finalURL.path) {
+                    try FileManager.default.removeItem(at: finalURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: finalURL)
+
+                Self.applyQuarantine(to: finalURL)
+
                 if let permissions = permissions {
-                    try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: saveURL.path)
+                    try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: finalURL.path)
                 }
 
-                updateTransferState(id: transferId, state: .completed(path: saveURL.path))
+                updateTransferState(id: transferId, state: .completed(path: finalURL.path))
 
-                // Reveal in Finder (only for single-file fetch with save panel)
                 if showSavePanel {
-                    NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+                    NSWorkspace.shared.activateFileViewerSelecting([finalURL])
                 }
 
             } catch {
@@ -299,9 +316,17 @@ public final class FileTransferService: ObservableObject {
             for guestPath in files {
                 do {
                     NSLog("[FileTransfer] Fetching: %@", guestPath)
-                    let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
+                    let tempURL = downloadsURL.appendingPathComponent(UUID().uuidString + ".ghostvm-partial")
+                    let (fetchedFilename, permissions) = try await client.fetchFile(
+                        at: guestPath,
+                        to: tempURL
+                    ) { _ in /* batch fetch — no per-file progress UI */ }
+
                     let saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
-                    try data.write(to: saveURL)
+                    if FileManager.default.fileExists(atPath: saveURL.path) {
+                        try FileManager.default.removeItem(at: saveURL)
+                    }
+                    try FileManager.default.moveItem(at: tempURL, to: saveURL)
                     Self.applyQuarantine(to: saveURL)
 
                     if let permissions = permissions {
