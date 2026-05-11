@@ -1220,6 +1220,7 @@ public final class GhostClient: GhostClientProtocol {
                     }
 
                     // Stream body to disk in 64KB chunks, reading exactly Content-Length bytes
+                    Self.logger.info("fetchFile: start body read, contentLength=\(contentLength), filename=\(filename, privacy: .public), dest=\(destinationURL.path, privacy: .public)")
                     FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
                     let fileHandle = try FileHandle(forWritingTo: destinationURL)
 
@@ -1238,7 +1239,7 @@ public final class GhostClient: GhostClientProtocol {
                         } else if n == 0 {
                             // Server closed before sending all bytes — partial download.
                             let received = contentLength - bytesRemaining
-                            NSLog("[fetchFile] EOF after %d/%d bytes for %@", received, contentLength, path)
+                            Self.logger.error("fetchFile: EOF after \(received)/\(contentLength) bytes for \(path, privacy: .public)")
                             readError = GhostClientError.connectionFailed(
                                 "Server closed connection after \(received)/\(contentLength) bytes"
                             )
@@ -1248,7 +1249,7 @@ public final class GhostClient: GhostClientProtocol {
                         } else {
                             let savedErrno = errno
                             let received = contentLength - bytesRemaining
-                            NSLog("[fetchFile] read() errno=%d after %d/%d bytes for %@", savedErrno, received, contentLength, path)
+                            Self.logger.error("fetchFile: read() errno=\(savedErrno) after \(received)/\(contentLength) bytes for \(path, privacy: .public)")
                             readError = GhostClientError.connectionFailed(
                                 "read() failed with errno \(savedErrno) after \(received)/\(contentLength) bytes"
                             )
@@ -1260,8 +1261,10 @@ public final class GhostClient: GhostClientProtocol {
                     connection.close()
 
                     if let readError = readError {
+                        Self.logger.error("fetchFile: throwing readError for \(path, privacy: .public)")
                         continuation.resume(throwing: readError)
                     } else {
+                        Self.logger.info("fetchFile: complete \(contentLength) bytes for \(path, privacy: .public)")
                         continuation.resume(returning: (filename, permissions))
                     }
                 } catch {
