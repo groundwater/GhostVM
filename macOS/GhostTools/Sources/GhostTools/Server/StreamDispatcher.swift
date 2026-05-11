@@ -352,23 +352,52 @@ final class StreamingFileSendHandler: ChannelInboundHandler, RemovableChannelHan
             }
 
             let allocator = context.channel.allocator
+            let totalSize = info.size
+            // bytesSent only mutated on the channel's event loop (writeAndFlush
+            // callbacks all run there), so a plain captured Int is safe here.
+            final class SendProgress { var bytesSent = 0 }
+            let progress = SendProgress()
             fileIO.readChunked(
                 fileHandle: fh,
-                byteCount: info.size,
+                byteCount: totalSize,
                 chunkSize: Self.chunkSize,
                 allocator: allocator,
                 eventLoop: context.eventLoop
             ) { buffer in
-                context.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buffer))))
+                let chunkSize = buffer.readableBytes
+                let writeFuture = context.writeAndFlush(self.wrapOutboundOut(.body(.byteBuffer(buffer))))
+                writeFuture.whenComplete { result in
+                    switch result {
+                    case .success:
+                        progress.bytesSent += chunkSize
+                    case .failure(let error):
+                        Self.logger.error("chunk writeAndFlush failed at \(progress.bytesSent)/\(totalSize): \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+                return writeFuture
             }.whenComplete { result in
                 try? fh.close()
                 switch result {
                 case .success:
-                    // Write .end but don't close — let the host close after reading all data.
-                    // Closing here can discard buffered outbound data.
-                    context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: nil)
+                    Self.logger.info("readChunked completed; sent=\(progress.bytesSent)/\(totalSize) — writing .end and closing")
+                    let endPromise = context.eventLoop.makePromise(of: Void.self)
+                    context.writeAndFlush(self.wrapOutboundOut(.end(nil)), promise: endPromise)
+                    endPromise.futureResult.whenComplete { endResult in
+                        switch endResult {
+                        case .success:
+                            Self.logger.info(".end flushed for \(totalSize)-byte response; closing channel")
+                        case .failure(let error):
+                            Self.logger.error(".end flush FAILED for \(totalSize)-byte response: \(error.localizedDescription, privacy: .public)")
+                        }
+                        // Always close — graceful close drains the outbound buffer
+                        // (including any body chunks still sitting in NIO's pipeline
+                        // waiting for kernel buffer space) before closing the fd.
+                        // Without this, the host blocks indefinitely on read() because
+                        // bytes never drain and Connection: close doesn't auto-close.
+                        context.close(promise: nil)
+                    }
                 case .failure(let error):
-                    Self.logger.error("streaming failed: \(error.localizedDescription, privacy: .public)")
+                    Self.logger.error("readChunked failed at \(progress.bytesSent)/\(totalSize): \(error.localizedDescription, privacy: .public)")
                     context.close(promise: nil)
                 }
             }
@@ -403,6 +432,11 @@ final class StreamingFileSendHandler: ChannelInboundHandler, RemovableChannelHan
     func errorCaught(context: ChannelHandlerContext, error: Error) {
         Self.logger.error("errorCaught: \(error.localizedDescription, privacy: .public)")
         context.close(promise: nil)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        Self.logger.info("channelInactive (channel closed by peer or our side)")
+        context.fireChannelInactive()
     }
 }
 
