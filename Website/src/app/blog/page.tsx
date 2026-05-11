@@ -9,6 +9,14 @@ export const metadata: Metadata = {
 
 const posts = [
   {
+    slug: "ghostvm-v3-beta",
+    title: "GhostVM v3 Beta: Interactive Terminal, ASIF Disks, SwiftNIO",
+    date: "2026-04-28",
+    readingTime: "4 min read",
+    summary:
+      "Shell into VMs without SSH, near-native disk performance, non-blocking guest communication. A rewrite on macOS 26 and Swift 6.",
+  },
+  {
     slug: "why-you-cant-clone-your-mac",
     title: "Why You Can't Clone Your Mac Into a VM",
     date: "2025-01-24",
