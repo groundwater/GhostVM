@@ -1225,6 +1225,7 @@ public final class GhostClient: GhostClientProtocol {
 
                     var bytesRemaining = contentLength
                     var buf = [UInt8](repeating: 0, count: 65536)
+                    var readError: Error?
                     while bytesRemaining > 0 {
                         let toRead = min(buf.count, bytesRemaining)
                         let n = Darwin.read(fd, &buf, toRead)
@@ -1235,10 +1236,22 @@ public final class GhostClient: GhostClientProtocol {
                                 progress(Double(contentLength - bytesRemaining) / Double(contentLength))
                             }
                         } else if n == 0 {
-                            break // unexpected EOF
-                        } else if errno == EINTR {
+                            // Server closed before sending all bytes — partial download.
+                            let received = contentLength - bytesRemaining
+                            NSLog("[fetchFile] EOF after %d/%d bytes for %@", received, contentLength, path)
+                            readError = GhostClientError.connectionFailed(
+                                "Server closed connection after \(received)/\(contentLength) bytes"
+                            )
+                            break
+                        } else if errno == EINTR || errno == EAGAIN {
                             continue
                         } else {
+                            let savedErrno = errno
+                            let received = contentLength - bytesRemaining
+                            NSLog("[fetchFile] read() errno=%d after %d/%d bytes for %@", savedErrno, received, contentLength, path)
+                            readError = GhostClientError.connectionFailed(
+                                "read() failed with errno \(savedErrno) after \(received)/\(contentLength) bytes"
+                            )
                             break
                         }
                     }
@@ -1246,7 +1259,11 @@ public final class GhostClient: GhostClientProtocol {
                     fileHandle.closeFile()
                     connection.close()
 
-                    continuation.resume(returning: (filename, permissions))
+                    if let readError = readError {
+                        continuation.resume(throwing: readError)
+                    } else {
+                        continuation.resume(returning: (filename, permissions))
+                    }
                 } catch {
                     connection.close()
                     continuation.resume(throwing: error)

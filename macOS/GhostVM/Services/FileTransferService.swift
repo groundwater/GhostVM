@@ -270,6 +270,15 @@ public final class FileTransferService: ObservableObject {
                 }
 
             } catch {
+                // Clean up any partial download from a failed/interrupted fetch.
+                // tempURL is constructed deterministically as saveURL+".ghostvm-partial"
+                // but at this point saveURL may not have been computed yet on the
+                // early-cancel path; we best-effort scan the candidate locations.
+                let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                if let downloadsURL {
+                    let candidate = downloadsURL.appendingPathComponent(filename).appendingPathExtension("ghostvm-partial")
+                    try? FileManager.default.removeItem(at: candidate)
+                }
                 updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
                 lastError = "Fetch failed: \(error.localizedDescription)"
             }
@@ -314,9 +323,9 @@ public final class FileTransferService: ObservableObject {
             let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
 
             for guestPath in files {
+                let tempURL = downloadsURL.appendingPathComponent(UUID().uuidString + ".ghostvm-partial")
                 do {
                     NSLog("[FileTransfer] Fetching: %@", guestPath)
-                    let tempURL = downloadsURL.appendingPathComponent(UUID().uuidString + ".ghostvm-partial")
                     let (fetchedFilename, permissions) = try await client.fetchFile(
                         at: guestPath,
                         to: tempURL
@@ -337,6 +346,7 @@ public final class FileTransferService: ObservableObject {
                     NSLog("[FileTransfer] Fetched: %@", fetchedFilename)
                 } catch {
                     NSLog("[FileTransfer] Failed to fetch %@: %@", guestPath, error.localizedDescription)
+                    try? FileManager.default.removeItem(at: tempURL)
                     failedPaths.append(URL(fileURLWithPath: guestPath).lastPathComponent)
                 }
             }
