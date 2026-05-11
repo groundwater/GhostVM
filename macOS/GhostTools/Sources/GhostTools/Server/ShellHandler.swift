@@ -23,12 +23,17 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
     private var masterFD: Int32 = -1
     private var shellPID: pid_t = 0
     private var readSource: DispatchSourceRead?
+    private var writeSource: DispatchSourceWrite?
+    private var writeSourceResumed = false
+    private var writeBuffer = [UInt8]()
     private var waitSource: DispatchSourceProcess?
     private weak var channelRef: Channel?
     private var isCleaningUp = false
     private var processExited = false
-    /// Serial queue for PTY I/O and process exit — prevents read/drain races.
+    /// Serial queue for PTY reads and process exit — prevents read/drain races.
     private let ptyQueue = DispatchQueue(label: "ghosttools.shell.pty")
+    /// Separate queue for PTY writes so reads are never blocked by write backpressure.
+    private let ptyWriteQueue = DispatchQueue(label: "ghosttools.shell.pty-write")
 
     private let initialCols: UInt16
     private let initialRows: UInt16
@@ -62,15 +67,16 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
 
         switch frame.opcode {
         case .binary:
-            // Stdin data → PTY (off the event loop to avoid blocking on backpressure)
+            // Stdin data → PTY write buffer (drained by DispatchSourceWrite)
             guard masterFD >= 0 else { return }
             var frameData = frame.unmaskedData
             guard let bytes = frameData.readBytes(length: frameData.readableBytes) else { return }
-            let fd = masterFD
-            ptyQueue.async { [weak self] in
-                guard let self = self, self.masterFD == fd else { return }
-                if !self.writeAll(fd: fd, bytes: bytes) {
-                    self.failSession("PTY write failed: errno \(errno)")
+            ptyWriteQueue.async { [weak self] in
+                guard let self = self, self.masterFD >= 0 else { return }
+                self.writeBuffer.append(contentsOf: bytes)
+                if !self.writeSourceResumed, let ws = self.writeSource {
+                    self.writeSourceResumed = true
+                    ws.resume()
                 }
             }
 
@@ -200,6 +206,7 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
             "pid": pid,
         ])
 
+        startWritingPTY()
         startReadingPTY(context: context)
         startWatchingProcess(context: context)
     }
@@ -348,6 +355,17 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
     // MARK: - Cleanup
 
     private func cleanup() {
+        // Cancel write source on its own queue first
+        ptyWriteQueue.async { [weak self] in
+            guard let self = self else { return }
+            if let ws = self.writeSource {
+                if !self.writeSourceResumed { ws.resume() } // must be resumed to cancel
+                ws.cancel()
+                self.writeSource = nil
+            }
+            self.writeBuffer.removeAll()
+        }
+
         ptyQueue.async { [weak self] in
             guard let self = self, !self.isCleaningUp else { return }
             self.isCleaningUp = true
@@ -370,25 +388,34 @@ final class ShellWebSocketHandler: ChannelInboundHandler, @unchecked Sendable {
         }
     }
 
-    /// Write all bytes to fd, retrying on short writes and EAGAIN.
-    /// Bails out if masterFD is invalidated (cleanup in progress).
-    @discardableResult
-    private func writeAll(fd: Int32, bytes: [UInt8]) -> Bool {
-        bytes.withUnsafeBufferPointer { ptr in
-            guard let base = ptr.baseAddress else { return true }
-            var offset = 0
-            while offset < ptr.count {
-                let n = Darwin.write(fd, base + offset, ptr.count - offset)
-                if n > 0 {
-                    offset += n
-                } else if n < 0 && errno == EAGAIN {
-                    if self.masterFD < 0 { return false } // cleanup invalidated the fd
-                    usleep(1000)
-                } else {
-                    return false // real error or fd closed
-                }
+    /// Non-blocking PTY write source — drains writeBuffer when the PTY master fd is writable.
+    private func startWritingPTY() {
+        let fd = masterFD
+        let source = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: ptyWriteQueue)
+
+        source.setEventHandler { [weak self] in
+            guard let self = self, self.masterFD >= 0 else { return }
+            guard !self.writeBuffer.isEmpty else {
+                self.writeSourceResumed = false
+                source.suspend()
+                return
             }
-            return true
+            let n = self.writeBuffer.withUnsafeBufferPointer { ptr -> Int in
+                guard let base = ptr.baseAddress else { return 0 }
+                return Darwin.write(fd, base, ptr.count)
+            }
+            if n > 0 {
+                self.writeBuffer.removeFirst(n)
+                if self.writeBuffer.isEmpty {
+                    self.writeSourceResumed = false
+                    source.suspend()
+                }
+            } else if n < 0 && errno != EAGAIN && errno != EINTR {
+                self.failSession("PTY write failed: errno \(errno)")
+            }
         }
+
+        // Starts suspended — resumed when data is enqueued in channelRead
+        self.writeSource = source
     }
 }

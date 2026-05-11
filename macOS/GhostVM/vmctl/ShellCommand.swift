@@ -81,8 +81,13 @@ enum ShellCommand {
 
         try upgradeRequest.withCString { ptr in
             let len = strlen(ptr)
-            guard writeAll(fd: fd, ptr: ptr, count: len) else {
-                throw VMError.message("Failed to send WebSocket upgrade request")
+            var offset = 0
+            while offset < len {
+                let n = Darwin.write(fd, ptr + offset, len - offset)
+                guard n > 0 else {
+                    throw VMError.message("Failed to send WebSocket upgrade request")
+                }
+                offset += n
             }
         }
 
@@ -108,41 +113,7 @@ enum ShellCommand {
         raw.c_oflag |= tcflag_t(OPOST)
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
 
-        defer {
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &originalTermios)
-            Darwin.close(fd)
-        }
-
-        let socketWriteQueue = DispatchQueue(label: "vmctl.shell.socket-write")
-
-        // Handle SIGWINCH — send resize as WebSocket text frame
-        signal(SIGWINCH, SIG_IGN)
-        let winchSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: .global())
-        winchSource.setEventHandler {
-            var ws = winsize()
-            _ = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws)
-            if ws.ws_col > 0 && ws.ws_row > 0 {
-                let json = "{\"type\":\"resize\",\"cols\":\(ws.ws_col),\"rows\":\(ws.ws_row)}"
-                socketWriteQueue.sync {
-                    sendWebSocketTextFrame(fd: fd, text: json)
-                }
-            }
-        }
-        winchSource.resume()
-        defer { winchSource.cancel() }
-
-        // Handle SIGINT — forward as Ctrl-C to shell
-        signal(SIGINT, SIG_IGN)
-        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .global())
-        intSource.setEventHandler {
-            socketWriteQueue.sync {
-                sendWebSocketBinaryFrame(fd: fd, data: [3]) // Ctrl-C
-            }
-        }
-        intSource.resume()
-        defer { intSource.cancel() }
-
-        // Bidirectional I/O loop
+        // Set non-blocking before entering the I/O loop
         let stdinFlags = fcntl(STDIN_FILENO, F_GETFL, 0)
         _ = fcntl(STDIN_FILENO, F_SETFL, stdinFlags | O_NONBLOCK)
         let sockFlags = fcntl(fd, F_GETFL, 0)
@@ -150,75 +121,148 @@ enum ShellCommand {
 
         defer {
             _ = fcntl(STDIN_FILENO, F_SETFL, stdinFlags)
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &originalTermios)
         }
 
-        var running = true
+        // All I/O dispatch sources share a single serial queue
+        let ioQueue = DispatchQueue(label: "vmctl.shell.io")
         var wsParser = WebSocketFrameParser()
+        var socketWriteBuffer = [UInt8]()
+        var writeSourceResumed = false
+        var hasShutdown = false
+        let exitGroup = DispatchGroup()
+        exitGroup.enter()
 
-        while running {
-            var readSet = fd_set()
-            fdZero(&readSet)
-            fdSet(STDIN_FILENO, set: &readSet)
-            fdSet(fd, set: &readSet)
+        // Create all sources up front (all start suspended)
+        let socketWriteSource = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: ioQueue)
+        let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: ioQueue)
+        let socketReadSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: ioQueue)
+        signal(SIGWINCH, SIG_IGN)
+        let winchSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: ioQueue)
+        signal(SIGINT, SIG_IGN)
+        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: ioQueue)
 
-            let maxFD = max(STDIN_FILENO, fd) + 1
-            var timeout = timeval(tv_sec: 1, tv_usec: 0)
-
-            let ready = select(maxFD, &readSet, nil, nil, &timeout)
-            if ready < 0 {
-                if errno == EINTR { continue }
-                break
-            }
-            if ready == 0 { continue }
-
-            // Socket → stdout (WebSocket frames from server)
-            if fdIsSet(fd, set: &readSet) {
-                var buf = [UInt8](repeating: 0, count: 16384)
-                let n = Darwin.read(fd, &buf, buf.count)
-                if n > 0 {
-                    wsParser.feed(Array(buf[0..<n]))
-                    while let frame = wsParser.nextFrame() {
-                        switch frame.opcode {
-                        case 0x02: // Binary — PTY output
-                            frame.payload.withUnsafeBufferPointer { ptr in
-                                if let base = ptr.baseAddress, ptr.count > 0 {
-                                    _ = writeAll(fd: STDOUT_FILENO, ptr: base, count: ptr.count)
-                                }
-                            }
-                        case 0x01: // Text — control message
-                            if let text = String(bytes: frame.payload, encoding: .utf8) {
-                                handleControlMessage(text)
-                            }
-                        case 0x08: // Close
-                            running = false
-                        case 0x09: // Ping
-                            socketWriteQueue.sync {
-                                sendWebSocketPong(fd: fd, data: frame.payload)
-                            }
-                        default:
-                            break
-                        }
-                    }
-                } else if n == 0 {
-                    running = false
-                } else if errno != EAGAIN && errno != EINTR {
-                    running = false
-                }
-            }
-
-            // stdin → socket (user input as WebSocket binary frames)
-            if fdIsSet(STDIN_FILENO, set: &readSet) {
-                var buf = [UInt8](repeating: 0, count: 4096)
-                let n = Darwin.read(STDIN_FILENO, &buf, buf.count)
-                if n > 0 {
-                    socketWriteQueue.sync {
-                        sendWebSocketBinaryFrame(fd: fd, data: Array(buf[0..<n]))
-                    }
-                } else if n == 0 {
-                    running = false
-                }
+        /// Enqueue WebSocket frame bytes for non-blocking write. Must be called on ioQueue.
+        func enqueueWrite(_ bytes: [UInt8]) {
+            socketWriteBuffer.append(contentsOf: bytes)
+            if !writeSourceResumed {
+                writeSourceResumed = true
+                socketWriteSource.resume()
             }
         }
+
+        func shutdown() {
+            guard !hasShutdown else { return }
+            hasShutdown = true
+            stdinSource.cancel()
+            socketReadSource.cancel()
+            if !writeSourceResumed {
+                socketWriteSource.resume() // must be resumed to cancel
+            }
+            socketWriteSource.cancel()
+            winchSource.cancel()
+            intSource.cancel()
+            exitGroup.leave()
+        }
+
+        // Socket write source — drains socketWriteBuffer when fd is writable
+        socketWriteSource.setEventHandler {
+            guard !socketWriteBuffer.isEmpty else {
+                writeSourceResumed = false
+                socketWriteSource.suspend()
+                return
+            }
+            let n = socketWriteBuffer.withUnsafeBufferPointer { ptr -> Int in
+                guard let base = ptr.baseAddress else { return 0 }
+                return Darwin.write(fd, base, ptr.count)
+            }
+            if n > 0 {
+                socketWriteBuffer.removeFirst(n)
+                if socketWriteBuffer.isEmpty {
+                    writeSourceResumed = false
+                    socketWriteSource.suspend()
+                }
+            } else if n < 0 && errno != EAGAIN && errno != EINTR {
+                shutdown()
+            }
+        }
+
+        // stdin → socket (user input as WebSocket binary frames)
+        stdinSource.setEventHandler {
+            var buf = [UInt8](repeating: 0, count: 4096)
+            let n = Darwin.read(STDIN_FILENO, &buf, buf.count)
+            if n > 0 {
+                enqueueWrite(buildWebSocketFrame(opcode: 0x02, payload: Array(buf[0..<n])))
+            } else if n == 0 {
+                shutdown()
+            }
+        }
+
+        // Socket → stdout (WebSocket frames from server)
+        socketReadSource.setEventHandler {
+            var buf = [UInt8](repeating: 0, count: 16384)
+            let n = Darwin.read(fd, &buf, buf.count)
+            if n > 0 {
+                wsParser.feed(Array(buf[0..<n]))
+                while let frame = wsParser.nextFrame() {
+                    switch frame.opcode {
+                    case 0x02: // Binary — PTY output
+                        frame.payload.withUnsafeBufferPointer { ptr in
+                            guard let base = ptr.baseAddress, ptr.count > 0 else { return }
+                            var off = 0
+                            while off < ptr.count {
+                                let n = Darwin.write(STDOUT_FILENO, base + off, ptr.count - off)
+                                if n > 0 { off += n }
+                                else if n < 0 && errno == EINTR { continue }
+                                else { break }
+                            }
+                        }
+                    case 0x01: // Text — control message
+                        if let text = String(bytes: frame.payload, encoding: .utf8) {
+                            handleControlMessage(text)
+                        }
+                    case 0x08: // Close
+                        shutdown()
+                    case 0x09: // Ping
+                        enqueueWrite(buildWebSocketFrame(opcode: 0x0A, payload: frame.payload))
+                    default:
+                        break
+                    }
+                }
+            } else if n == 0 {
+                shutdown()
+            } else if errno != EAGAIN && errno != EINTR {
+                shutdown()
+            }
+        }
+
+        // SIGWINCH — send resize as WebSocket text frame
+        winchSource.setEventHandler {
+            var ws = winsize()
+            _ = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws)
+            if ws.ws_col > 0 && ws.ws_row > 0 {
+                let json = "{\"type\":\"resize\",\"cols\":\(ws.ws_col),\"rows\":\(ws.ws_row)}"
+                enqueueWrite(buildWebSocketFrame(opcode: 0x01, payload: Array(json.utf8)))
+            }
+        }
+
+        // SIGINT — forward as Ctrl-C to shell
+        intSource.setEventHandler {
+            enqueueWrite(buildWebSocketFrame(opcode: 0x02, payload: [3]))
+        }
+
+        // Start all sources (write source starts suspended — resumed by enqueueWrite)
+        stdinSource.resume()
+        socketReadSource.resume()
+        winchSource.resume()
+        intSource.resume()
+
+        // Block main thread until the session ends
+        exitGroup.wait()
+
+        // Drain any remaining ioQueue work before closing fd
+        ioQueue.sync {}
+        Darwin.close(fd)
 
         print("") // newline after shell exits
     }
@@ -240,19 +284,8 @@ enum ShellCommand {
 
     // MARK: - WebSocket Frame Encoding (client → server, masked)
 
-    private static func sendWebSocketBinaryFrame(fd: Int32, data: [UInt8]) {
-        sendWebSocketFrame(fd: fd, opcode: 0x02, payload: data)
-    }
-
-    private static func sendWebSocketTextFrame(fd: Int32, text: String) {
-        sendWebSocketFrame(fd: fd, opcode: 0x01, payload: Array(text.utf8))
-    }
-
-    private static func sendWebSocketPong(fd: Int32, data: [UInt8]) {
-        sendWebSocketFrame(fd: fd, opcode: 0x0A, payload: data)
-    }
-
-    private static func sendWebSocketFrame(fd: Int32, opcode: UInt8, payload: [UInt8]) {
+    /// Build a masked WebSocket frame as raw bytes (does not write to any fd).
+    private static func buildWebSocketFrame(opcode: UInt8, payload: [UInt8]) -> [UInt8] {
         var frame = [UInt8]()
 
         // FIN + opcode
@@ -283,32 +316,7 @@ enum ShellCommand {
             frame.append(byte ^ maskKey[i % 4])
         }
 
-        frame.withUnsafeBufferPointer { ptr in
-            guard let base = ptr.baseAddress else {
-                fatalShellTransportError("Failed to build WebSocket frame")
-            }
-            let deadline = Date().addingTimeInterval(30)
-            var offset = 0
-            while offset < ptr.count {
-                let n = Darwin.write(fd, base + offset, ptr.count - offset)
-                if n > 0 {
-                    offset += n
-                } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
-                    if Date() >= deadline {
-                        fatalShellTransportError("Timed out writing WebSocket frame")
-                    }
-                    usleep(1000)
-                } else {
-                    fatalShellTransportError("WebSocket frame write failed: errno \(errno)")
-                }
-            }
-        }
-    }
-
-    private static func fatalShellTransportError(_ message: String) -> Never {
-        let trace = Thread.callStackSymbols.joined(separator: "\n")
-        FileHandle.standardError.write(Data("vmctl shell FATAL: \(message)\n\(trace)\n".utf8))
-        Darwin.exit(1)
+        return frame
     }
 
     // MARK: - WebSocket Frame Parsing (server → client, unmasked)
@@ -368,23 +376,6 @@ enum ShellCommand {
     }
 
     // MARK: - Socket Helpers
-
-    /// Write all bytes, retrying on short writes and EAGAIN/EINTR.
-    @discardableResult
-    private static func writeAll(fd: Int32, ptr: UnsafeRawPointer, count: Int) -> Bool {
-        var offset = 0
-        while offset < count {
-            let n = Darwin.write(fd, ptr + offset, count - offset)
-            if n > 0 {
-                offset += n
-            } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
-                usleep(1000)
-            } else {
-                return false
-            }
-        }
-        return true
-    }
 
     private static func connectUnixSocket(path: String) throws -> Int32 {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
@@ -463,34 +454,6 @@ enum ShellCommand {
             }
         }
         return nil
-    }
-
-    // MARK: - fd_set helpers
-
-    private static func fdZero(_ set: inout fd_set) {
-        withUnsafeMutablePointer(to: &set) { ptr in
-            memset(ptr, 0, MemoryLayout<fd_set>.size)
-        }
-    }
-
-    private static func fdSet(_ fd: Int32, set: inout fd_set) {
-        let intOffset = Int(fd) / (MemoryLayout<Int32>.size * 8)
-        let bitOffset = Int(fd) % (MemoryLayout<Int32>.size * 8)
-        withUnsafeMutablePointer(to: &set) { ptr in
-            let raw = UnsafeMutableRawPointer(ptr)
-            let intPtr = raw.bindMemory(to: Int32.self, capacity: intOffset + 1)
-            intPtr[intOffset] |= Int32(1 << bitOffset)
-        }
-    }
-
-    private static func fdIsSet(_ fd: Int32, set: inout fd_set) -> Bool {
-        let intOffset = Int(fd) / (MemoryLayout<Int32>.size * 8)
-        let bitOffset = Int(fd) % (MemoryLayout<Int32>.size * 8)
-        return withUnsafePointer(to: &set) { ptr in
-            let raw = UnsafeRawPointer(ptr)
-            let intPtr = raw.bindMemory(to: Int32.self, capacity: intOffset + 1)
-            return (intPtr[intOffset] & Int32(1 << bitOffset)) != 0
-        }
     }
 
     private static func showHelp() {
