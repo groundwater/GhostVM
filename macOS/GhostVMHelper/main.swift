@@ -428,6 +428,31 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         appMenu.addItem(quitItem)
         self.quitMenuItem = quitItem
 
+        // Edit menu (clipboard cross-boundary ops)
+        let editMenuItem = NSMenuItem()
+        editMenuItem.title = "Edit"
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenuItem.submenu = editMenu
+
+        let copyToGuestItem = NSMenuItem(title: "Copy to Guest", action: #selector(copyClipboardToGuest), keyEquivalent: "")
+        copyToGuestItem.target = self
+        editMenu.addItem(copyToGuestItem)
+
+        let copyToHostItem = NSMenuItem(title: "Copy to Host", action: #selector(copyClipboardToHost), keyEquivalent: "")
+        copyToHostItem.target = self
+        editMenu.addItem(copyToHostItem)
+
+        editMenu.addItem(NSMenuItem.separator())
+
+        let syncItem = NSMenuItem(title: "Automatically Sync", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
+        syncItem.target = self
+        editMenu.addItem(syncItem)
+
+        let alwaysAllowItem = NSMenuItem(title: "Always Allow", action: #selector(toggleAlwaysAllowClipboard), keyEquivalent: "")
+        alwaysAllowItem.target = self
+        editMenu.addItem(alwaysAllowItem)
+
         // VM menu
         let vmMenuItem = NSMenuItem()
         vmMenuItem.title = "VM"
@@ -438,34 +463,6 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let startItem = NSMenuItem(title: "Start", action: #selector(startVMAction), keyEquivalent: "r")
         startItem.target = self
         vmMenu.addItem(startItem)
-
-        vmMenu.addItem(NSMenuItem.separator())
-
-        // Clipboard submenu
-        let clipboardMenuItem = NSMenuItem()
-        clipboardMenuItem.title = "Clipboard"
-        let clipboardMenu = NSMenu(title: "Clipboard")
-        clipboardMenuItem.submenu = clipboardMenu
-
-        let copyToGuestItem = NSMenuItem(title: "Copy to Guest", action: #selector(copyClipboardToGuest), keyEquivalent: "")
-        copyToGuestItem.target = self
-        clipboardMenu.addItem(copyToGuestItem)
-
-        let copyToHostItem = NSMenuItem(title: "Copy to Host", action: #selector(copyClipboardToHost), keyEquivalent: "")
-        copyToHostItem.target = self
-        clipboardMenu.addItem(copyToHostItem)
-
-        clipboardMenu.addItem(NSMenuItem.separator())
-
-        let syncItem = NSMenuItem(title: "Automatically Sync", action: #selector(toggleClipboardSyncMenu), keyEquivalent: "")
-        syncItem.target = self
-        clipboardMenu.addItem(syncItem)
-
-        let alwaysAllowItem = NSMenuItem(title: "Always Allow", action: #selector(toggleAlwaysAllowClipboard), keyEquivalent: "")
-        alwaysAllowItem.target = self
-        clipboardMenu.addItem(alwaysAllowItem)
-
-        vmMenu.addItem(clipboardMenuItem)
 
         vmMenu.addItem(NSMenuItem.separator())
 
@@ -481,6 +478,21 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         terminateItem.action = #selector(terminateVMAction)
         terminateItem.target = self
         vmMenu.addItem(terminateItem)
+
+        // Terminal menu
+        let terminalMenuItem = NSMenuItem()
+        terminalMenuItem.title = "Terminal"
+        mainMenu.addItem(terminalMenuItem)
+        let terminalMenu = NSMenu(title: "Terminal")
+        terminalMenuItem.submenu = terminalMenu
+
+        let openTerminalItem = NSMenuItem(title: "Open Terminal", action: #selector(openTerminalAction), keyEquivalent: "")
+        openTerminalItem.target = self
+        terminalMenu.addItem(openTerminalItem)
+
+        let copyVmctlItem = NSMenuItem(title: "Copy vmctl Command", action: #selector(copyVmctlCommandAction), keyEquivalent: "")
+        copyVmctlItem.target = self
+        terminalMenu.addItem(copyVmctlItem)
 
         // Window menu
         let windowMenuItem = NSMenuItem()
@@ -560,6 +572,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.terminateVM()
             }
         }
+    }
+
+    @objc private func openTerminalAction() {
+        helperToolbar?.openTerminal()
+    }
+
+    @objc private func copyVmctlCommandAction() {
+        helperToolbar?.copyVmctlCommand()
     }
 
     @objc private func toggleClipboardSyncMenu() {
