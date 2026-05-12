@@ -482,6 +482,21 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         terminateItem.target = self
         vmMenu.addItem(terminateItem)
 
+        // Terminal menu
+        let terminalMenuItem = NSMenuItem()
+        terminalMenuItem.title = "Terminal"
+        mainMenu.addItem(terminalMenuItem)
+        let terminalMenu = NSMenu(title: "Terminal")
+        terminalMenuItem.submenu = terminalMenu
+
+        let openTerminalItem = NSMenuItem(title: "Open Terminal", action: #selector(openTerminalAction), keyEquivalent: "")
+        openTerminalItem.target = self
+        terminalMenu.addItem(openTerminalItem)
+
+        let copyVmctlItem = NSMenuItem(title: "Copy vmctl Command", action: #selector(copyVmctlCommandAction), keyEquivalent: "")
+        copyVmctlItem.target = self
+        terminalMenu.addItem(copyVmctlItem)
+
         // Window menu
         let windowMenuItem = NSMenuItem()
         windowMenuItem.title = "Window"
@@ -560,6 +575,14 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 self?.terminateVM()
             }
         }
+    }
+
+    @objc private func openTerminalAction() {
+        helperToolbar?.openTerminal()
+    }
+
+    @objc private func copyVmctlCommandAction() {
+        helperToolbar?.copyVmctlCommand()
     }
 
     @objc private func toggleClipboardSyncMenu() {
