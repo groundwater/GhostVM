@@ -1,6 +1,8 @@
 *.app
 *.dmg
 .env
+.DS_Store
+.build/
 build/
 build/generated-plists/
 tools/
