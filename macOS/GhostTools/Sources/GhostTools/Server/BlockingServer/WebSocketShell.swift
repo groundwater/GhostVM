@@ -297,33 +297,80 @@ struct WSFrame {
 struct WSFrameParser {
     private static let maxPayloadBytes = 16 * 1024 * 1024
     private var buffer: [UInt8] = []
+    private var fragmentOpcode: WSOpcode?
+    private var fragmentPayload: [UInt8] = []
 
     mutating func feed(_ data: [UInt8]) {
         buffer.append(contentsOf: data)
     }
 
     mutating func nextFrame() -> WSFrame? {
-        guard buffer.count >= 2 else { return nil }
+        while true {
+            switch parseRawFrame() {
+            case .needMoreData:
+                return nil
+            case .protocolError:
+                return protocolFailure()
+            case .frame(let raw):
+                if raw.opcode.isControl {
+                    // RFC 6455 §5.5: control frames MUST NOT be fragmented.
+                    if !raw.fin { return protocolFailure() }
+                    return WSFrame(opcode: raw.opcode, payload: raw.payload)
+                }
+
+                if raw.opcode == .continuation {
+                    guard let baseOpcode = fragmentOpcode else { return protocolFailure() }
+                    fragmentPayload.append(contentsOf: raw.payload)
+                    if fragmentPayload.count > Self.maxPayloadBytes { return protocolFailure() }
+                    if raw.fin {
+                        let payload = fragmentPayload
+                        fragmentOpcode = nil
+                        fragmentPayload = []
+                        return WSFrame(opcode: baseOpcode, payload: payload)
+                    }
+                    continue
+                }
+
+                // Data frame (text/binary).
+                if fragmentOpcode != nil { return protocolFailure() }
+                if raw.fin {
+                    return WSFrame(opcode: raw.opcode, payload: raw.payload)
+                }
+                fragmentOpcode = raw.opcode
+                fragmentPayload = raw.payload
+            }
+        }
+    }
+
+    private mutating func protocolFailure() -> WSFrame {
+        buffer.removeAll()
+        fragmentOpcode = nil
+        fragmentPayload = []
+        return WSFrame(opcode: .close, payload: [])
+    }
+
+    private enum RawFrameResult {
+        case frame(RawFrame)
+        case needMoreData
+        case protocolError
+    }
+
+    private mutating func parseRawFrame() -> RawFrameResult {
+        guard buffer.count >= 2 else { return .needMoreData }
 
         let fin = (buffer[0] & 0x80) != 0
         let opcodeByte = buffer[0] & 0x0F
-        guard let opcode = WSOpcode(rawValue: opcodeByte) else {
-            buffer.removeAll()
-            return nil
-        }
-        guard fin else {
-            return WSFrame(opcode: .close, payload: [])
-        }
+        guard let opcode = WSOpcode(rawValue: opcodeByte) else { return .protocolError }
         let masked = (buffer[1] & 0x80) != 0
         var payloadLen = Int(buffer[1] & 0x7F)
         var offset = 2
 
         if payloadLen == 126 {
-            guard buffer.count >= offset + 2 else { return nil }
+            guard buffer.count >= offset + 2 else { return .needMoreData }
             payloadLen = (Int(buffer[offset]) << 8) | Int(buffer[offset + 1])
             offset += 2
         } else if payloadLen == 127 {
-            guard buffer.count >= offset + 8 else { return nil }
+            guard buffer.count >= offset + 8 else { return .needMoreData }
             payloadLen = 0
             for i in 0..<8 {
                 payloadLen = (payloadLen << 8) | Int(buffer[offset + i])
@@ -331,19 +378,16 @@ struct WSFrameParser {
             offset += 8
         }
 
-        guard payloadLen <= Self.maxPayloadBytes else {
-            buffer.removeAll()
-            return nil
-        }
+        guard payloadLen <= Self.maxPayloadBytes else { return .protocolError }
 
         var maskKey = [UInt8]()
         if masked {
-            guard buffer.count >= offset + 4 else { return nil }
+            guard buffer.count >= offset + 4 else { return .needMoreData }
             maskKey = Array(buffer[offset..<offset + 4])
             offset += 4
         }
 
-        guard buffer.count >= offset + payloadLen else { return nil }
+        guard buffer.count >= offset + payloadLen else { return .needMoreData }
         var payload = Array(buffer[offset..<offset + payloadLen])
         if masked {
             for i in 0..<payload.count {
@@ -351,16 +395,32 @@ struct WSFrameParser {
             }
         }
         buffer.removeFirst(offset + payloadLen)
-        return WSFrame(opcode: opcode, payload: payload)
+        return .frame(RawFrame(fin: fin, opcode: opcode, payload: payload))
+    }
+}
+
+private struct RawFrame {
+    let fin: Bool
+    let opcode: WSOpcode
+    let payload: [UInt8]
+}
+
+extension WSOpcode {
+    var isControl: Bool {
+        switch self {
+        case .close, .ping, .pong: return true
+        case .continuation, .text, .binary: return false
+        }
     }
 }
 
 enum WSFrameEncoder {
-    /// Encodes a single FIN=1 frame. Server frames are unmasked; client
-    /// frames are masked (caller picks `mask`).
-    static func encode(opcode: WSOpcode, payload: [UInt8], mask: Bool) -> [UInt8] {
+    /// Encodes a single frame. `fin` defaults to true (single-frame message);
+    /// pass false plus continuation frames to send a fragmented message.
+    /// Server frames are unmasked; client frames are masked.
+    static func encode(opcode: WSOpcode, payload: [UInt8], mask: Bool, fin: Bool = true) -> [UInt8] {
         var frame: [UInt8] = []
-        frame.append(0x80 | opcode.rawValue) // FIN=1
+        frame.append((fin ? 0x80 : 0x00) | opcode.rawValue)
         let maskBit: UInt8 = mask ? 0x80 : 0x00
         if payload.count <= 125 {
             frame.append(maskBit | UInt8(payload.count))
