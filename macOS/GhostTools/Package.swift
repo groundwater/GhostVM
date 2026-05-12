@@ -10,7 +10,7 @@ let package = Package(
         .executable(name: "GhostTools", targets: ["GhostTools"])
     ],
     dependencies: [
-        .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
+        .package(path: "../../Packages/GhostHTTP")
     ],
     targets: [
         .target(
@@ -22,10 +22,7 @@ let package = Package(
             name: "GhostTools",
             dependencies: [
                 "CPty",
-                .product(name: "NIOCore", package: "swift-nio"),
-                .product(name: "NIOPosix", package: "swift-nio"),
-                .product(name: "NIOHTTP1", package: "swift-nio"),
-                .product(name: "NIOWebSocket", package: "swift-nio"),
+                .product(name: "GhostHTTP", package: "GhostHTTP"),
             ],
             exclude: ["Resources/Info.plist", "Resources/Info.template.plist", "Resources/entitlements.plist"],
             linkerSettings: [
@@ -36,7 +33,6 @@ let package = Package(
             name: "GhostToolsTests",
             dependencies: [
                 "GhostTools",
-                .product(name: "NIOEmbedded", package: "swift-nio"),
             ]
         )
     ]

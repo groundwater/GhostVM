@@ -1,4 +1,5 @@
 import Foundation
+import GhostHTTP
 import GhostVMKit
 #if canImport(Darwin)
 import Darwin
@@ -82,26 +83,29 @@ enum VsockCommand {
 
         // Tell helper which vsock port we want. The endpoint takes a header,
         // not a query, so the body is empty.
-        let request = "GET /api/v1/vsock-connect HTTP/1.1\r\n" +
-            "Host: localhost\r\n" +
-            "Vsock-Port: \(port)\r\n" +
-            "Connection: Upgrade\r\n" +
-            "Upgrade: vsock\r\n" +
-            "\r\n"
-
-        try blockingWriteAll(fd: fd, string: request)
-
-        // Read response status line (and headers) — expect 101.
-        let responseHeaders = try readHTTPHeaders(fd: fd)
-        guard let statusLine = responseHeaders.split(separator: "\r\n").first else {
-            throw VMError.message("Helper returned empty response")
-        }
-        guard statusLine.contains(" 101 ") else {
-            // Drain whatever body the helper sent (small) and surface it.
-            let body = drainSocket(fd: fd, maxBytes: 8 * 1024)
+        let upgraded = try HTTPClient.performUpgradeRequest(
+            fd: fd,
+            path: "/api/v1/vsock-connect",
+            headers: [
+                "Host": "localhost",
+                "Vsock-Port": "\(port)",
+                "Connection": "Upgrade",
+                "Upgrade": "vsock",
+            ]
+        )
+        guard upgraded.responseHead.status == .switchingProtocols else {
             Darwin.close(fd)
-            let bodyText = String(data: body, encoding: .utf8) ?? ""
-            throw VMError.message("Helper rejected vsock-connect: \(statusLine)\n\(bodyText)")
+            throw VMError.message("Helper rejected vsock-connect with status \(upgraded.responseHead.status.rawValue)")
+        }
+        if !upgraded.prelude.isEmpty {
+            let ok = upgraded.prelude.withUnsafeBytes { ptr -> Bool in
+                guard let base = ptr.baseAddress else { return true }
+                return writeAllRaw(fd: STDOUT_FILENO, ptr: base, count: upgraded.prelude.count)
+            }
+            if !ok {
+                Darwin.close(fd)
+                throw VMError.message("Failed to write initial vsock payload to stdout")
+            }
         }
 
         // Bidirectional blocking byte bridge.
@@ -202,19 +206,6 @@ enum VsockCommand {
         return fd
     }
 
-    private static func blockingWriteAll(fd: Int32, string: String) throws {
-        try string.withCString { ptr in
-            let len = strlen(ptr)
-            var offset = 0
-            while offset < len {
-                let n = Darwin.write(fd, ptr + offset, len - offset)
-                if n > 0 { offset += n }
-                else if n < 0 && (errno == EAGAIN || errno == EINTR) { usleep(1000) }
-                else { throw VMError.message("write to helper failed: errno \(errno)") }
-            }
-        }
-    }
-
     private static func writeAllRaw(fd: Int32, ptr: UnsafeRawPointer, count: Int) -> Bool {
         var offset = 0
         while offset < count {
@@ -224,43 +215,6 @@ enum VsockCommand {
             else { return false }
         }
         return true
-    }
-
-    private static func readHTTPHeaders(fd: Int32) throws -> String {
-        // Read one byte at a time until \r\n\r\n. Headers are tiny.
-        var buffer = [UInt8]()
-        let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
-        var one: UInt8 = 0
-        while true {
-            let n = Darwin.read(fd, &one, 1)
-            if n == 1 {
-                buffer.append(one)
-                if buffer.count >= 4 && Array(buffer.suffix(4)) == separator {
-                    break
-                }
-                if buffer.count > 16384 {
-                    throw VMError.message("Helper response headers exceeded 16 KiB")
-                }
-            } else if n == 0 {
-                throw VMError.message("Helper closed connection before sending response headers")
-            } else if errno == EINTR {
-                continue
-            } else {
-                throw VMError.message("read failed waiting for helper headers: errno \(errno)")
-            }
-        }
-        return String(bytes: buffer, encoding: .utf8) ?? ""
-    }
-
-    private static func drainSocket(fd: Int32, maxBytes: Int) -> Data {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while data.count < maxBytes {
-            let n = Darwin.read(fd, &buffer, min(buffer.count, maxBytes - data.count))
-            if n > 0 { data.append(contentsOf: buffer[0..<n]) }
-            else { break }
-        }
-        return data
     }
 
     // MARK: - Help

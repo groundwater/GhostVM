@@ -25,12 +25,6 @@ final class ForegroundAppService: @unchecked Sendable {
             self?.pushCurrentApp()
         }
 
-        // Re-push when a new host client connects (they missed the initial push)
-        EventPushServer.shared.onClientConnected = { [weak self] in
-            print("[ForegroundAppService] Client connected, pushing current app")
-            self?.pushCurrentApp()
-        }
-
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -42,7 +36,6 @@ final class ForegroundAppService: @unchecked Sendable {
     }
 
     func stop() {
-        EventPushServer.shared.onClientConnected = nil
         if let obs = observer {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
             observer = nil
@@ -50,6 +43,10 @@ final class ForegroundAppService: @unchecked Sendable {
         debounceTimer?.invalidate()
         debounceTimer = nil
         previousBundleId = nil
+    }
+
+    func pushCurrentAppToConnectedClient() {
+        pushCurrentApp()
     }
 
     private func pushCurrentApp() {
@@ -122,6 +119,6 @@ final class ForegroundAppService: @unchecked Sendable {
             }
         }
 
-        EventPushServer.shared.pushEvent(.app(name: name, bundleId: bundleId, iconBase64: iconBase64))
+        EventPushService.shared.pushEvent(.app(name: name, bundleId: bundleId, iconBase64: iconBase64))
     }
 }

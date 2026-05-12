@@ -1633,7 +1633,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         apiService.start(client: client, vmWindow: self.window)
         self.hostAPIService = apiService
 
-        // 2. Persistent health check (vsock port 5002)
+        // 2. Guest health polling via the unified HTTP server on vsock port 5000
         let hcService = HealthCheckService()
         hcService.start(client: client)
         self.healthCheckService = hcService

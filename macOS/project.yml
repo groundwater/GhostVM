@@ -9,6 +9,8 @@ packages:
   Sparkle:
     url: https://github.com/sparkle-project/Sparkle.git
     from: "2.6.0"
+  GhostHTTP:
+    path: ../Packages/GhostHTTP
 
 settings:
   base:
@@ -23,6 +25,13 @@ schemes:
     build:
       targets:
         GhostVM: all
+  GhostVMTests:
+    build:
+      targets:
+        GhostVMTests: test
+    test:
+      targets:
+        - GhostVMTests
 
 targets:
   GhostVMKit:
@@ -30,6 +39,8 @@ targets:
     platform: macOS
     sources:
       - path: GhostVMKit
+    dependencies:
+      - package: GhostHTTP
     settings:
       base:
         PRODUCT_NAME: GhostVMKit
@@ -58,6 +69,7 @@ targets:
       - target: GhostVMKit
         link: true
         embed: true
+      - package: GhostHTTP
     settings:
       base:
         PRODUCT_NAME: vmctl
@@ -94,6 +106,7 @@ targets:
     dependencies:
       - target: GhostVMKit
         embed: true
+      - package: GhostHTTP
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
@@ -124,6 +137,7 @@ targets:
     dependencies:
       - target: GhostVMKit
         embed: true
+      - package: GhostHTTP
       - target: vmctl
         embed: true
         codeSign: true

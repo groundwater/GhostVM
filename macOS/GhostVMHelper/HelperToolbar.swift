@@ -545,14 +545,22 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     }
 
     @objc private func openTerminal() {
+        // AppleScript's `do script` opens a new Terminal window and runs the
+        // command in it directly. Cleaner than writing a self-deleting temp
+        // script to disk and `open -a Terminal`-ing it.
         let command = vmctlCommand()
-        // Write a temp script that runs vmctl then cleans itself up
-        let scriptPath = NSTemporaryDirectory() + "ghostvm-shell-\(ProcessInfo.processInfo.processIdentifier).sh"
-        let script = "#!/bin/sh\nrm -f \(shellEscape(scriptPath))\nexec \(command)\n"
-        FileManager.default.createFile(atPath: scriptPath, contents: Data(script.utf8), attributes: [.posixPermissions: 0o755])
+        let escaped = command
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        let appleScript = """
+        tell application "Terminal"
+            activate
+            do script "\(escaped)"
+        end tell
+        """
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", "Terminal", scriptPath]
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", appleScript]
         try? process.run()
     }
 

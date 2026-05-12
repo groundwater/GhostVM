@@ -1,6 +1,7 @@
 import Foundation
 import Virtualization
 import GhostVMKit
+import GhostHTTP
 import os
 
 /// HTTP client for communicating with GhostTools running in the guest VM
@@ -179,14 +180,14 @@ public final class GhostClient: GhostClientProtocol {
     }
 
     private func openPathViaVsock(vm: VZVirtualMachine, body: Data) async throws {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "POST",
             path: "/api/v1/open",
             body: body,
             contentType: "application/json"
         )
-        let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+        let statusCode = response.head.status.rawValue
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
         }
@@ -197,8 +198,9 @@ public final class GhostClient: GhostClientProtocol {
     /// List running GUI apps in the guest
     public func listApps() async throws -> AppListResponse {
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/apps", body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/apps", body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw GhostClientError.invalidResponse(statusCode)
             }
@@ -211,8 +213,8 @@ public final class GhostClient: GhostClientProtocol {
     public func launchApp(bundleId: String) async throws {
         let body = try JSONEncoder().encode(["bundleId": bundleId])
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/launch", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/launch", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -223,8 +225,8 @@ public final class GhostClient: GhostClientProtocol {
     public func activateApp(bundleId: String) async throws {
         let body = try JSONEncoder().encode(["bundleId": bundleId])
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/activate", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/activate", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -235,8 +237,8 @@ public final class GhostClient: GhostClientProtocol {
     public func quitApp(bundleId: String) async throws {
         let body = try JSONEncoder().encode(["bundleId": bundleId])
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/quit", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/apps/quit", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -249,8 +251,9 @@ public final class GhostClient: GhostClientProtocol {
     public func listDirectory(path: String) async throws -> FSListResponse {
         let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? path
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/fs?path=\(encodedPath)", body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/fs?path=\(encodedPath)", body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw GhostClientError.invalidResponse(statusCode)
             }
@@ -263,8 +266,8 @@ public final class GhostClient: GhostClientProtocol {
     public func mkdir(path: String) async throws {
         let body = try JSONEncoder().encode(["path": path])
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/mkdir", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/mkdir", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -275,8 +278,8 @@ public final class GhostClient: GhostClientProtocol {
     public func deleteFile(path: String) async throws {
         let body = try JSONEncoder().encode(["path": path])
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/delete", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/delete", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -287,8 +290,8 @@ public final class GhostClient: GhostClientProtocol {
     public func moveFile(from: String, to: String) async throws {
         let body = try JSONEncoder().encode(["from": from, "to": to])
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/move", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/fs/move", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -313,8 +316,9 @@ public final class GhostClient: GhostClientProtocol {
     public func getAccessibilityTree(depth: Int = 5, target: AXTarget = .front) async throws -> AXTreeResponse {
         if let vm = virtualMachine {
             let path = a11yPath("/api/v1/accessibility", depth: depth, target: target)
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw guestError(body, statusCode: statusCode)
             }
@@ -327,8 +331,9 @@ public final class GhostClient: GhostClientProtocol {
     public func getAccessibilityTrees(depth: Int = 5, target: AXTarget = .front) async throws -> [AXTreeResponse] {
         if let vm = virtualMachine {
             let path = a11yPath("/api/v1/accessibility", depth: depth, target: target)
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw guestError(body, statusCode: statusCode)
             }
@@ -364,8 +369,9 @@ public final class GhostClient: GhostClientProtocol {
 
         if let vm = virtualMachine {
             let path = a11yPath("/api/v1/accessibility/action", target: target)
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: path, body: body, contentType: "application/json")
-            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: path, body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
+            let respBody = responseBody(response)
             guard statusCode == 200 else { throw guestError(respBody, statusCode: statusCode) }
             return
         }
@@ -380,8 +386,9 @@ public final class GhostClient: GhostClientProtocol {
 
         if let vm = virtualMachine {
             let urlPath = a11yPath("/api/v1/accessibility/menu", target: target)
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: urlPath, body: body, contentType: "application/json")
-            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: urlPath, body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
+            let respBody = responseBody(response)
             guard statusCode == 200 else { throw guestError(respBody, statusCode: statusCode) }
             return
         }
@@ -397,8 +404,9 @@ public final class GhostClient: GhostClientProtocol {
 
         if let vm = virtualMachine {
             let path = a11yPath("/api/v1/accessibility/type", target: target)
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: path, body: body, contentType: "application/json")
-            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: path, body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
+            let respBody = responseBody(response)
             guard statusCode == 200 else { throw guestError(respBody, statusCode: statusCode) }
             return
         }
@@ -409,8 +417,9 @@ public final class GhostClient: GhostClientProtocol {
     public func getFocusedElement(target: AXTarget = .front) async throws -> [String: Any] {
         if let vm = virtualMachine {
             let path = a11yPath("/api/v1/accessibility/focused", target: target)
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw GhostClientError.invalidResponse(statusCode)
             }
@@ -437,8 +446,9 @@ public final class GhostClient: GhostClientProtocol {
         let body = try JSONSerialization.data(withJSONObject: payload)
 
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/pointer", body: body, contentType: "application/json")
-            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/pointer", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
+            let respBody = responseBody(response)
             guard statusCode == 200 else {
                 if statusCode == 403 {
                     throw GhostClientError.connectionFailed("Accessibility permission required in guest")
@@ -463,8 +473,8 @@ public final class GhostClient: GhostClientProtocol {
         let body = try JSONSerialization.data(withJSONObject: payload)
 
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/input", body: body, contentType: "application/json")
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/input", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else {
                 if statusCode == 403 {
                     throw GhostClientError.connectionFailed("Accessibility permission required in guest")
@@ -486,8 +496,9 @@ public final class GhostClient: GhostClientProtocol {
         let body = try JSONSerialization.data(withJSONObject: payload)
 
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/exec", body: body, contentType: "application/json")
-            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/exec", body: body, contentType: "application/json")
+            let statusCode = response.head.status.rawValue
+            let respBody = responseBody(response)
             guard statusCode == 200, let respBody = respBody else {
                 throw GhostClientError.invalidResponse(statusCode)
             }
@@ -501,8 +512,9 @@ public final class GhostClient: GhostClientProtocol {
     /// Get interactive elements from guest (shows overlays in guest, returns element JSON)
     public func getElements() async throws -> Data {
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/elements", body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/elements", body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw guestError(body, statusCode: statusCode)
             }
@@ -517,12 +529,13 @@ public final class GhostClient: GhostClientProtocol {
     public func captureGuestScreenshot(format: String = "png", scale: Double = 1.0) async throws -> (data: Data, contentType: String) {
         if let vm = virtualMachine {
             let path = "/vm/screenshot?format=\(format)&scale=\(scale)"
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
-            let (statusCode, headers, body) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw guestError(body, statusCode: statusCode)
             }
-            let contentType = headers["Content-Type"] ?? "application/octet-stream"
+            let contentType = response.head.headers["Content-Type"] ?? "application/octet-stream"
             return (body, contentType)
         }
         throw GhostClientError.notConnected
@@ -532,8 +545,9 @@ public final class GhostClient: GhostClientProtocol {
     public func captureGuestAnnotatedScreenshot(scale: Double = 0.5) async throws -> Data {
         if let vm = virtualMachine {
             let path = "/vm/screenshot/annotated?scale=\(scale)"
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: path, body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw guestError(body, statusCode: statusCode)
             }
@@ -546,14 +560,15 @@ public final class GhostClient: GhostClientProtocol {
     public func executeGuestBatch(_ request: BatchRequest) async throws -> Data {
         let body = try JSONEncoder().encode(request)
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(
+            let response = try await sendHTTPRequest(
                 vm: vm,
                 method: "POST",
                 path: "/api/v1/batch",
                 body: body,
                 contentType: "application/json"
             )
-            let (statusCode, respBody) = try HTTPResponseParser.parse(responseData)
+            let statusCode = response.head.status.rawValue
+            let respBody = responseBody(response)
             guard statusCode == 200, let respBody = respBody else {
                 throw guestError(respBody, statusCode: statusCode)
             }
@@ -565,8 +580,8 @@ public final class GhostClient: GhostClientProtocol {
     /// Show wait indicator overlay in guest
     public func showWaitIndicator() async throws {
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/overlay/wait-show", body: nil)
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/overlay/wait-show", body: nil)
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -576,8 +591,8 @@ public final class GhostClient: GhostClientProtocol {
     /// Hide wait indicator overlay in guest
     public func hideWaitIndicator() async throws {
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/overlay/wait-hide", body: nil)
-            let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "POST", path: "/api/v1/overlay/wait-hide", body: nil)
+            let statusCode = response.head.status.rawValue
             guard statusCode == 200 else { throw GhostClientError.invalidResponse(statusCode) }
             return
         }
@@ -587,8 +602,9 @@ public final class GhostClient: GhostClientProtocol {
     /// Get frontmost app bundle ID from guest
     public func getFrontmostApp() async throws -> String? {
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/apps/frontmost", body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: "GET", path: "/api/v1/apps/frontmost", body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw GhostClientError.invalidResponse(statusCode)
             }
@@ -609,8 +625,9 @@ public final class GhostClient: GhostClientProtocol {
     public func checkPermissions(prompt: Bool = false) async throws -> Data {
         let method = prompt ? "POST" : "GET"
         if let vm = virtualMachine {
-            let responseData = try await sendHTTPRequest(vm: vm, method: method, path: "/api/v1/permissions", body: nil)
-            let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+            let response = try await sendHTTPRequest(vm: vm, method: method, path: "/api/v1/permissions", body: nil)
+            let statusCode = response.head.status.rawValue
+            let body = responseBody(response)
             guard statusCode == 200, let body = body else {
                 throw GhostClientError.invalidResponse(statusCode)
             }
@@ -675,27 +692,20 @@ public final class GhostClient: GhostClientProtocol {
         let fd = connection.fileDescriptor
         let result: Bool = await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                // Send HTTP health check using HTTPUtilities
-                let requestData = HTTPUtilities.buildRequest(method: "GET", path: "/health")
-                Self.logger.debug("checkHealth: writing \(requestData.count) bytes to fd=\(fd)")
-                requestData.withUnsafeBytes { ptr in
-                    _ = Darwin.write(fd, ptr.baseAddress!, requestData.count)
-                }
-                Darwin.shutdown(fd, SHUT_WR)
-
-                // Read response
-                Self.logger.debug("checkHealth: reading response from fd=\(fd)")
-                var buffer = [CChar](repeating: 0, count: 1024)
-                let bytesRead = Darwin.read(fd, &buffer, buffer.count - 1)
-                connection.close()
-
-                if bytesRead > 0 {
-                    let response = String(cString: buffer)
-                    let ok = response.contains("200")
-                    Self.logger.info("checkHealth: got \(bytesRead) bytes, ok=\(ok)")
+                do {
+                    let response = try HTTPClient.performRequest(
+                        fd: fd,
+                        method: "GET",
+                        path: "/health",
+                        shutdownWrite: false
+                    )
+                    connection.close()
+                    let ok = response.head.status == .ok
+                    Self.logger.info("checkHealth: status \(response.head.status.rawValue), ok=\(ok)")
                     continuation.resume(returning: ok)
-                } else {
-                    Self.logger.warning("checkHealth: read returned \(bytesRead), errno=\(errno)")
+                } catch {
+                    connection.close()
+                    Self.logger.warning("checkHealth: request failed: \(error.localizedDescription, privacy: .public)")
                     continuation.resume(returning: false)
                 }
             }
@@ -759,6 +769,15 @@ public final class GhostClient: GhostClientProtocol {
                 NSLog("connectRaw: fcntl(F_SETFL) failed to clear O_NONBLOCK on fd=%d errno=%d", fd, errno)
                 throw GhostClientError.connectionFailed("Failed to set blocking mode")
             }
+        }
+
+        var timeout = timeval(tv_sec: 30, tv_usec: 0)
+        let timeoutLen = socklen_t(MemoryLayout<timeval>.size)
+        if setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutLen) != 0 {
+            NSLog("connectRaw: failed to set SO_RCVTIMEO on fd=%d errno=%d", fd, errno)
+        }
+        if setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, timeoutLen) != 0 {
+            NSLog("connectRaw: failed to set SO_SNDTIMEO on fd=%d errno=%d", fd, errno)
         }
 
         return connection
@@ -981,14 +1000,14 @@ public final class GhostClient: GhostClientProtocol {
     // MARK: - Vsock Implementation (Production)
 
     private func getClipboardViaVsock(vm: VZVirtualMachine) async throws -> ClipboardGetResponse {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "GET",
             path: "/api/v1/clipboard",
             body: nil
         )
-
-        let (statusCode, headers, body) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
+        let statusCode = response.head.status.rawValue
+        let body = responseBody(response)
 
         if statusCode == 204 {
             throw GhostClientError.noContent
@@ -1002,12 +1021,12 @@ public final class GhostClient: GhostClientProtocol {
             throw GhostClientError.noContent
         }
 
-        let clipType = headers["X-Clipboard-Type"] ?? "public.utf8-plain-text"
+        let clipType = response.head.headers["X-Clipboard-Type"] ?? "public.utf8-plain-text"
         return ClipboardGetResponse(data: body, type: clipType)
     }
 
     private func setClipboardViaVsock(vm: VZVirtualMachine, data: Data, type: String) async throws {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "POST",
             path: "/api/v1/clipboard",
@@ -1015,8 +1034,7 @@ public final class GhostClient: GhostClientProtocol {
             contentType: "application/octet-stream",
             extraHeaders: ["X-Clipboard-Type": type]
         )
-
-        let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+        let statusCode = response.head.status.rawValue
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -1040,10 +1058,14 @@ public final class GhostClient: GhostClientProtocol {
         let fd = connection.fileDescriptor
 
         // Build HTTP headers using HTTPUtilities - use relativePath to preserve folder structure
-        var headers: [String: String] = [
+        var headers = HTTPHeaders([
             "Content-Type": "application/octet-stream",
             "X-Filename": relativePath
-        ]
+        ])
+
+        if let token = authToken {
+            headers["Authorization"] = "Bearer \(token)"
+        }
 
         if let batchID = batchID {
             headers["X-Batch-ID"] = batchID
@@ -1054,21 +1076,16 @@ public final class GhostClient: GhostClientProtocol {
         if let permissions = permissions {
             headers["X-Permissions"] = String(permissions, radix: 8)
         }
+        headers["Content-Length"] = "\(fileSize)"
 
-        // Note: We manually construct this since HTTPUtilities.buildRequest includes Content-Length
-        // but we need to stream the body separately in chunks below
-        var httpHeaders = "POST /api/v1/files/receive HTTP/1.1\r\n"
-        httpHeaders += "Host: localhost\r\n"
-        httpHeaders += "Connection: close\r\n"
-        for (key, value) in headers {
-            httpHeaders += "\(key): \(value)\r\n"
-        }
-        httpHeaders += "Content-Length: \(fileSize)\r\n"
-        httpHeaders += "\r\n"
-
-        let headerData = Data(httpHeaders.utf8)
+        let headerData = HTTPCodec.requestData(
+            method: "POST",
+            path: "/api/v1/files/receive",
+            headers: headers,
+            body: nil
+        )
         do {
-            try writeAll(fd: fd, data: headerData)
+            try HTTPCodec.writeAll(fd: fd, data: headerData)
         } catch {
             connection.close()
             throw error
@@ -1085,7 +1102,7 @@ public final class GhostClient: GhostClientProtocol {
             if chunk.isEmpty { break }
 
             do {
-                try writeAll(fd: fd, data: chunk)
+                try HTTPCodec.writeAll(fd: fd, data: chunk)
             } catch {
                 connection.close()
                 throw error
@@ -1099,29 +1116,25 @@ public final class GhostClient: GhostClientProtocol {
         // Signal end of request
         Darwin.shutdown(fd, SHUT_WR)
 
-        // Read response
-        var responseData = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while true {
-            let bytesRead = Darwin.read(fd, &buffer, buffer.count)
-            if bytesRead <= 0 { break }
-            responseData.append(contentsOf: buffer[0..<bytesRead])
+        let response: HTTPBufferedResponse
+        do {
+            response = try HTTPClient.readBufferedResponse(fd: fd)
+        } catch {
+            connection.close()
+            throw error
         }
 
         connection.close()
 
-        let (statusCode, responseBody) = try HTTPResponseParser.parse(responseData)
-
-        guard statusCode == 200 else {
-            throw GhostClientError.invalidResponse(statusCode)
+        guard response.head.status == .ok else {
+            throw GhostClientError.invalidResponse(response.head.status.rawValue)
         }
-
-        guard let responseBody = responseBody else {
+        guard !response.body.isEmpty else {
             throw GhostClientError.noContent
         }
 
         let decoder = JSONDecoder()
-        let fileResponse = try decoder.decode(FileReceiveResponse.self, from: responseBody)
+        let fileResponse = try decoder.decode(FileReceiveResponse.self, from: response.body)
 
         progressHandler?(1.0)
 
@@ -1141,72 +1154,34 @@ public final class GhostClient: GhostClientProtocol {
         let fd = connection.fileDescriptor
 
         // Build and send GET request
-        var headers: [String: String] = [:]
+        var headers = HTTPHeaders()
         if let token = authToken {
             headers["Authorization"] = "Bearer \(token)"
         }
-        let requestData = HTTPUtilities.buildRequest(
-            method: "GET",
-            path: "/api/v1/files/\(encodedPath)",
-            headers: headers,
-            body: nil
-        )
 
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async { [self] in
                 do {
-                    try self.writeAll(fd: fd, data: requestData)
+                    try HTTPCodec.writeRequest(
+                        fd: fd,
+                        method: "GET",
+                        path: "/api/v1/files/\(encodedPath)",
+                        headers: headers,
+                        body: nil
+                    )
                     // No SHUT_WR — the server knows the request is complete from
                     // the HTTP framing. Shutting down the write side can cause the
                     // vsock peer to tear down before the full response is sent.
 
-                    // Read response headers (read until \r\n\r\n)
-                    let separator: [UInt8] = [0x0D, 0x0A, 0x0D, 0x0A]
-                    var headerBytes = [UInt8]()
-                    var oneByte = [UInt8](repeating: 0, count: 1)
-                    while true {
-                        let n = Darwin.read(fd, &oneByte, 1)
-                        guard n == 1 else {
-                            throw GhostClientError.connectionFailed("Connection closed during headers")
-                        }
-                        headerBytes.append(oneByte[0])
-                        if headerBytes.count >= 4 && headerBytes.suffix(4).elementsEqual(separator) {
-                            break
-                        }
-                        if headerBytes.count > 16384 {
-                            throw GhostClientError.connectionFailed("Response headers too large")
-                        }
-                    }
-
-                    // Parse status and headers
-                    guard let headerString = String(bytes: headerBytes, encoding: .utf8) else {
-                        throw GhostClientError.decodingError
-                    }
-                    let headerLines = headerString.components(separatedBy: "\r\n")
-                    guard let statusLine = headerLines.first else {
-                        throw GhostClientError.decodingError
-                    }
-                    let statusParts = statusLine.components(separatedBy: " ")
-                    guard statusParts.count >= 2, let statusCode = Int(statusParts[1]) else {
-                        throw GhostClientError.decodingError
-                    }
-                    guard statusCode == 200 else {
+                    let (responseHead, bodyReader) = try HTTPClient.readResponseHead(fd: fd)
+                    guard responseHead.status == .ok else {
                         connection.close()
-                        throw GhostClientError.invalidResponse(statusCode)
+                        throw GhostClientError.invalidResponse(responseHead.status.rawValue)
                     }
 
-                    var responseHeaders: [String: String] = [:]
-                    for line in headerLines.dropFirst() {
-                        if let colonIndex = line.firstIndex(of: ":") {
-                            let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
-                            let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
-                            responseHeaders[key] = value
-                        }
-                    }
-
-                    let contentLength = Int(responseHeaders["content-length"] ?? responseHeaders["Content-Length"] ?? "0") ?? 0
+                    let contentLength = responseHead.contentLength ?? 0
                     let filename: String
-                    if let disposition = responseHeaders["content-disposition"] ?? responseHeaders["Content-Disposition"],
+                    if let disposition = responseHead.header("Content-Disposition"),
                        let range = disposition.range(of: "filename=\""),
                        let endQuote = disposition[range.upperBound...].firstIndex(of: "\"") {
                         filename = String(disposition[range.upperBound..<endQuote])
@@ -1215,7 +1190,7 @@ public final class GhostClient: GhostClientProtocol {
                     }
 
                     var permissions: Int? = nil
-                    if let permStr = responseHeaders["x-permissions"] ?? responseHeaders["X-Permissions"] {
+                    if let permStr = responseHead.header("X-Permissions") {
                         permissions = Int(permStr, radix: 8)
                     }
 
@@ -1224,37 +1199,25 @@ public final class GhostClient: GhostClientProtocol {
                     FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
                     let fileHandle = try FileHandle(forWritingTo: destinationURL)
 
-                    var bytesRemaining = contentLength
+                    var bytesReceived = 0
                     var buf = [UInt8](repeating: 0, count: 65536)
                     var readError: Error?
-                    while bytesRemaining > 0 {
-                        let toRead = min(buf.count, bytesRemaining)
-                        let n = Darwin.read(fd, &buf, toRead)
-                        if n > 0 {
-                            fileHandle.write(Data(buf[0..<n]))
-                            bytesRemaining -= n
+                    try buf.withUnsafeMutableBytes { rawPtr in
+                        while true {
+                            let n = try bodyReader.read(into: rawPtr)
+                            if n == 0 { break }
+                            fileHandle.write(Data(bytes: rawPtr.baseAddress!, count: n))
+                            bytesReceived += n
                             if contentLength > 0 {
-                                progress(Double(contentLength - bytesRemaining) / Double(contentLength))
+                                progress(Double(bytesReceived) / Double(contentLength))
                             }
-                        } else if n == 0 {
-                            // Server closed before sending all bytes — partial download.
-                            let received = contentLength - bytesRemaining
-                            Self.logger.error("fetchFile: EOF after \(received)/\(contentLength) bytes for \(path, privacy: .public)")
-                            readError = GhostClientError.connectionFailed(
-                                "Server closed connection after \(received)/\(contentLength) bytes"
-                            )
-                            break
-                        } else if errno == EINTR || errno == EAGAIN {
-                            continue
-                        } else {
-                            let savedErrno = errno
-                            let received = contentLength - bytesRemaining
-                            Self.logger.error("fetchFile: read() errno=\(savedErrno) after \(received)/\(contentLength) bytes for \(path, privacy: .public)")
-                            readError = GhostClientError.connectionFailed(
-                                "read() failed with errno \(savedErrno) after \(received)/\(contentLength) bytes"
-                            )
-                            break
                         }
+                    }
+                    if contentLength > 0 && bytesReceived != contentLength {
+                        Self.logger.error("fetchFile: EOF after \(bytesReceived)/\(contentLength) bytes for \(path, privacy: .public)")
+                        readError = GhostClientError.connectionFailed(
+                            "Server closed connection after \(bytesReceived)/\(contentLength) bytes"
+                        )
                     }
 
                     fileHandle.closeFile()
@@ -1276,14 +1239,14 @@ public final class GhostClient: GhostClientProtocol {
     }
 
     private func listFilesViaVsock(vm: VZVirtualMachine) async throws -> [String] {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "GET",
             path: "/api/v1/files",
             body: nil
         )
-
-        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+        let statusCode = response.head.status.rawValue
+        let body = responseBody(response)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -1299,14 +1262,13 @@ public final class GhostClient: GhostClientProtocol {
     }
 
     private func clearFileQueueViaVsock(vm: VZVirtualMachine) async throws {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "DELETE",
             path: "/api/v1/files",
             body: nil
         )
-
-        let (statusCode, _) = try HTTPResponseParser.parse(responseData)
+        let statusCode = response.head.status.rawValue
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -1314,14 +1276,14 @@ public final class GhostClient: GhostClientProtocol {
     }
 
     private func fetchURLsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "GET",
             path: "/api/v1/urls",
             body: nil
         )
-
-        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+        let statusCode = response.head.status.rawValue
+        let body = responseBody(response)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -1337,14 +1299,14 @@ public final class GhostClient: GhostClientProtocol {
     }
 
     private func fetchLogsViaVsock(vm: VZVirtualMachine) async throws -> [String] {
-        let responseData = try await sendHTTPRequest(
+        let response = try await sendHTTPRequest(
             vm: vm,
             method: "GET",
             path: "/api/v1/logs",
             body: nil
         )
-
-        let (statusCode, body) = try HTTPResponseParser.parse(responseData)
+        let statusCode = response.head.status.rawValue
+        let body = responseBody(response)
 
         guard statusCode == 200 else {
             throw GhostClientError.invalidResponse(statusCode)
@@ -1366,13 +1328,12 @@ public final class GhostClient: GhostClientProtocol {
         body: Data?,
         contentType: String? = nil,
         extraHeaders: [String: String]? = nil
-    ) async throws -> Data {
+    ) async throws -> HTTPBufferedResponse {
         Self.logger.info("sendHTTPRequest: \(method, privacy: .public) \(path, privacy: .public)")
 
         let connection = try await connectRaw(port: vsockPort)
 
-        // Build HTTP request using HTTPUtilities
-        var headers: [String: String] = [:]
+        var headers = HTTPHeaders()
 
         if let token = authToken {
             headers["Authorization"] = "Bearer \(token)"
@@ -1383,51 +1344,33 @@ public final class GhostClient: GhostClientProtocol {
         }
 
         if let extraHeaders = extraHeaders {
-            headers.merge(extraHeaders) { _, new in new }
+            for (key, value) in extraHeaders {
+                headers[key] = value
+            }
         }
-
-        let requestData = HTTPUtilities.buildRequest(
-            method: method,
-            path: path,
-            headers: headers,
-            body: body
-        )
 
         // Get file descriptor
         let fd = connection.fileDescriptor
 
-        Self.logger.debug("sendHTTPRequest: writing \(requestData.count) bytes to fd=\(fd)")
-
         // Do all blocking I/O on a background queue - NOT on main actor!
-        let responseData: Data = try await withCheckedThrowingContinuation { continuation in
+        let responseData: HTTPBufferedResponse = try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
-                    try self.writeAll(fd: fd, data: requestData)
+                    let response = try HTTPClient.performRequest(
+                        fd: fd,
+                        method: method,
+                        path: path,
+                        headers: headers,
+                        body: body,
+                        shutdownWrite: false
+                    )
+                    Self.logger.info("sendHTTPRequest: response status \(response.head.status.rawValue) for \(path, privacy: .public)")
+                    continuation.resume(returning: response)
                 } catch {
-                    Self.logger.error("sendHTTPRequest: write failed: \(error.localizedDescription, privacy: .public)")
+                    Self.logger.error("sendHTTPRequest failed: \(error.localizedDescription, privacy: .public)")
                     connection.close()
                     continuation.resume(throwing: error)
-                    return
                 }
-
-                Self.logger.debug("sendHTTPRequest: write done, shutting down write side")
-                // Shutdown write side to signal end of request
-                Darwin.shutdown(fd, SHUT_WR)
-
-                // Read response
-                Self.logger.debug("sendHTTPRequest: reading response from fd=\(fd)")
-                let fileHandle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
-                var result = Data()
-                while true {
-                    let chunk = fileHandle.availableData
-                    if chunk.isEmpty {
-                        break
-                    }
-                    result.append(chunk)
-                }
-
-                Self.logger.info("sendHTTPRequest: response \(result.count) bytes for \(path, privacy: .public)")
-                continuation.resume(returning: result)
             }
         }
 
@@ -1435,40 +1378,8 @@ public final class GhostClient: GhostClientProtocol {
         return responseData
     }
 
-    @discardableResult
-    private nonisolated func writeAll(fd: Int32, data: Data) throws -> Int {
-        if data.isEmpty { return 0 }
-
-        return try data.withUnsafeBytes { ptr in
-            guard let base = ptr.baseAddress else { return 0 }
-
-            var offset = 0
-            while offset < data.count {
-                let written = Darwin.write(fd, base + offset, data.count - offset)
-                if written > 0 {
-                    offset += written
-                } else if written < 0 && (errno == EAGAIN || errno == EINTR) {
-                    usleep(1000)
-                } else {
-                    let err = written == 0 ? EPIPE : errno
-                    throw GhostClientError.connectionFailed("Write failed: errno \(err)")
-                }
-            }
-
-            return offset
-        }
-    }
-
-    private nonisolated func readAllData(from handle: FileHandle) -> Data {
-        var result = Data()
-        while true {
-            let chunk = handle.availableData
-            if chunk.isEmpty {
-                break
-            }
-            result.append(chunk)
-        }
-        return result
+    private func responseBody(_ response: HTTPBufferedResponse) -> Data? {
+        response.body.isEmpty ? nil : response.body
     }
 
     private func withTimeout<T>(seconds: Double, operation: @escaping () -> T) async throws -> T {

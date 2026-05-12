@@ -1,4 +1,5 @@
 import Foundation
+import GhostHTTP
 import GhostVMKit
 import CryptoKit
 #if canImport(Darwin)
@@ -67,38 +68,30 @@ enum ShellCommand {
         // Connect
         let fd = try connectUnixSocket(path: resolvedPath)
 
-        // WebSocket upgrade handshake
+        // WebSocket upgrade handshake. Forward our TERM so the in-VM shell
+        // can emit color/clear escapes that this terminal can interpret.
         let wsKey = generateWebSocketKey()
-        let path = "/api/v1/shell?cols=\(cols)&rows=\(rows)"
+        let term = ProcessInfo.processInfo.environment["TERM"] ?? "xterm-256color"
+        let termEncoded = term.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "xterm-256color"
+        let path = "/api/v1/shell?cols=\(cols)&rows=\(rows)&term=\(termEncoded)"
 
-        let upgradeRequest = "GET \(path) HTTP/1.1\r\n" +
-            "Host: localhost\r\n" +
-            "Upgrade: websocket\r\n" +
-            "Connection: Upgrade\r\n" +
-            "Sec-WebSocket-Key: \(wsKey)\r\n" +
-            "Sec-WebSocket-Version: 13\r\n" +
-            "\r\n"
-
-        try upgradeRequest.withCString { ptr in
-            let len = strlen(ptr)
-            var offset = 0
-            while offset < len {
-                let n = Darwin.write(fd, ptr + offset, len - offset)
-                guard n > 0 else {
-                    throw VMError.message("Failed to send WebSocket upgrade request")
-                }
-                offset += n
-            }
-        }
-
-        // Read upgrade response
-        let response = try readHTTPResponseHeader(fd: fd)
-        guard response.contains("101") else {
+        let upgraded = try HTTPClient.performUpgradeRequest(
+            fd: fd,
+            path: path,
+            headers: [
+                "Host": "localhost",
+                "Upgrade": "websocket",
+                "Connection": "Upgrade",
+                "Sec-WebSocket-Key": wsKey,
+                "Sec-WebSocket-Version": "13",
+            ]
+        )
+        guard upgraded.responseHead.status == .switchingProtocols else {
             Darwin.close(fd)
-            throw VMError.message("WebSocket upgrade failed: \(response.prefix(200))")
+            throw VMError.message("WebSocket upgrade failed with status \(upgraded.responseHead.status.rawValue)")
         }
         let expectedAccept = webSocketAccept(for: wsKey)
-        let actualAccept = httpHeaderValue("Sec-WebSocket-Accept", in: response)
+        let actualAccept = upgraded.responseHead.headers["Sec-WebSocket-Accept"]
         guard actualAccept == expectedAccept else {
             Darwin.close(fd)
             throw VMError.message("WebSocket upgrade failed: invalid Sec-WebSocket-Accept")
@@ -110,168 +103,41 @@ enum ShellCommand {
 
         var raw = originalTermios
         cfmakeraw(&raw)
-        raw.c_oflag |= tcflag_t(OPOST)
+        // Keep the local tty fully raw. The guest PTY's slave-side termios is
+        // responsible for newline translation; re-enabling local `OPOST` or
+        // `ONLCR` here causes double CR/LF mapping and subtle TUI drift.
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw)
 
-        // Set non-blocking before entering the I/O loop
-        let stdinFlags = fcntl(STDIN_FILENO, F_GETFL, 0)
-        _ = fcntl(STDIN_FILENO, F_SETFL, stdinFlags | O_NONBLOCK)
+        // Only the SOCKET goes non-blocking — that's what DispatchSource's
+        // writability semantics need.
+        //
+        // We deliberately leave STDIN alone. STDIN and STDOUT share the
+        // open file description on a TTY, so flipping O_NONBLOCK on STDIN
+        // also flips it on STDOUT. With non-blocking STDOUT, TUI-redraw
+        // bursts return EAGAIN mid-write, the inner retry loop silently
+        // dropped bytes on edge cases, and the rendered output came out
+        // slightly mis-aligned (lines offset, digits in wrong columns).
+        // DispatchSource.makeReadSource works fine on a blocking fd —
+        // it only invokes the handler when data is available — and a
+        // blocking STDOUT write just back-pressures naturally.
         let sockFlags = fcntl(fd, F_GETFL, 0)
         _ = fcntl(fd, F_SETFL, sockFlags | O_NONBLOCK)
 
         defer {
-            _ = fcntl(STDIN_FILENO, F_SETFL, stdinFlags)
             tcsetattr(STDIN_FILENO, TCSAFLUSH, &originalTermios)
         }
 
-        // All I/O dispatch sources share a single serial queue
-        let ioQueue = DispatchQueue(label: "vmctl.shell.io")
-        var wsParser = WebSocketFrameParser()
-        var socketWriteBuffer = [UInt8]()
-        var writeSourceResumed = false
-        var hasShutdown = false
-        let exitGroup = DispatchGroup()
-        exitGroup.enter()
-
-        // Create all sources up front (all start suspended)
-        let socketWriteSource = DispatchSource.makeWriteSource(fileDescriptor: fd, queue: ioQueue)
-        let stdinSource = DispatchSource.makeReadSource(fileDescriptor: STDIN_FILENO, queue: ioQueue)
-        let socketReadSource = DispatchSource.makeReadSource(fileDescriptor: fd, queue: ioQueue)
-        signal(SIGWINCH, SIG_IGN)
-        let winchSource = DispatchSource.makeSignalSource(signal: SIGWINCH, queue: ioQueue)
-        signal(SIGINT, SIG_IGN)
-        let intSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: ioQueue)
-
-        /// Enqueue WebSocket frame bytes for non-blocking write. Must be called on ioQueue.
-        func enqueueWrite(_ bytes: [UInt8]) {
-            socketWriteBuffer.append(contentsOf: bytes)
-            if !writeSourceResumed {
-                writeSourceResumed = true
-                socketWriteSource.resume()
-            }
-        }
-
-        func shutdown() {
-            guard !hasShutdown else { return }
-            hasShutdown = true
-            stdinSource.cancel()
-            socketReadSource.cancel()
-            if !writeSourceResumed {
-                socketWriteSource.resume() // must be resumed to cancel
-            }
-            socketWriteSource.cancel()
-            winchSource.cancel()
-            intSource.cancel()
-            exitGroup.leave()
-        }
-
-        // Socket write source — drains socketWriteBuffer when fd is writable
-        socketWriteSource.setEventHandler {
-            guard !socketWriteBuffer.isEmpty else {
-                writeSourceResumed = false
-                socketWriteSource.suspend()
-                return
-            }
-            let n = socketWriteBuffer.withUnsafeBufferPointer { ptr -> Int in
-                guard let base = ptr.baseAddress else { return 0 }
-                return Darwin.write(fd, base, ptr.count)
-            }
-            if n > 0 {
-                socketWriteBuffer.removeFirst(n)
-                if socketWriteBuffer.isEmpty {
-                    writeSourceResumed = false
-                    socketWriteSource.suspend()
-                }
-            } else if n < 0 && errno != EAGAIN && errno != EINTR {
-                shutdown()
-            }
-        }
-
-        // stdin → socket (user input as WebSocket binary frames)
-        stdinSource.setEventHandler {
-            var buf = [UInt8](repeating: 0, count: 4096)
-            let n = Darwin.read(STDIN_FILENO, &buf, buf.count)
-            if n > 0 {
-                enqueueWrite(buildWebSocketFrame(opcode: 0x02, payload: Array(buf[0..<n])))
-            } else if n == 0 {
-                shutdown()
-            }
-        }
-
-        // Socket → stdout (WebSocket frames from server)
-        socketReadSource.setEventHandler {
-            var buf = [UInt8](repeating: 0, count: 16384)
-            let n = Darwin.read(fd, &buf, buf.count)
-            if n > 0 {
-                wsParser.feed(Array(buf[0..<n]))
-                while let frame = wsParser.nextFrame() {
-                    switch frame.opcode {
-                    case 0x02: // Binary — PTY output
-                        // STDOUT inherits O_NONBLOCK from STDIN (same open file
-                        // description on a terminal), so writes can return
-                        // EAGAIN under TUI-redraw bursts. Retry with a tiny
-                        // sleep — bailing on EAGAIN drops bytes mid-frame and
-                        // garbles TUI output.
-                        frame.payload.withUnsafeBufferPointer { ptr in
-                            guard let base = ptr.baseAddress, ptr.count > 0 else { return }
-                            var off = 0
-                            while off < ptr.count {
-                                let n = Darwin.write(STDOUT_FILENO, base + off, ptr.count - off)
-                                if n > 0 {
-                                    off += n
-                                } else if n < 0 && (errno == EAGAIN || errno == EINTR) {
-                                    usleep(1000)
-                                } else {
-                                    break
-                                }
-                            }
-                        }
-                    case 0x01: // Text — control message
-                        if let text = String(bytes: frame.payload, encoding: .utf8) {
-                            handleControlMessage(text)
-                        }
-                    case 0x08: // Close
-                        shutdown()
-                    case 0x09: // Ping
-                        enqueueWrite(buildWebSocketFrame(opcode: 0x0A, payload: frame.payload))
-                    default:
-                        break
-                    }
-                }
-            } else if n == 0 {
-                shutdown()
-            } else if errno != EAGAIN && errno != EINTR {
-                shutdown()
-            }
-        }
-
-        // SIGWINCH — send resize as WebSocket text frame
-        winchSource.setEventHandler {
-            var ws = winsize()
-            _ = ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws)
-            if ws.ws_col > 0 && ws.ws_row > 0 {
-                let json = "{\"type\":\"resize\",\"cols\":\(ws.ws_col),\"rows\":\(ws.ws_row)}"
-                enqueueWrite(buildWebSocketFrame(opcode: 0x01, payload: Array(json.utf8)))
-            }
-        }
-
-        // SIGINT — forward as Ctrl-C to shell
-        intSource.setEventHandler {
-            enqueueWrite(buildWebSocketFrame(opcode: 0x02, payload: [3]))
-        }
-
-        // Start all sources (write source starts suspended — resumed by enqueueWrite)
-        stdinSource.resume()
-        socketReadSource.resume()
-        winchSource.resume()
-        intSource.resume()
-
-        // Block main thread until the session ends
-        exitGroup.wait()
-
-        // Drain any remaining ioQueue work before closing fd
-        ioQueue.sync {}
-        Darwin.close(fd)
+        WebSocketShellClient.run(
+            configuration: .init(
+                socketFD: fd,
+                inputFD: STDIN_FILENO,
+                outputFD: STDOUT_FILENO,
+                prelude: upgraded.prelude,
+                installWindowResizeHandler: true,
+                installInterruptHandler: true,
+                onControlMessage: handleControlMessage
+            )
+        )
 
         print("") // newline after shell exits
     }
@@ -288,99 +154,6 @@ enum ShellCommand {
             if code != 0 {
                 FileHandle.standardError.write(Data("Shell exited with code \(code)\n".utf8))
             }
-        }
-    }
-
-    // MARK: - WebSocket Frame Encoding (client → server, masked)
-
-    /// Build a masked WebSocket frame as raw bytes (does not write to any fd).
-    private static func buildWebSocketFrame(opcode: UInt8, payload: [UInt8]) -> [UInt8] {
-        var frame = [UInt8]()
-
-        // FIN + opcode
-        frame.append(0x80 | opcode)
-
-        // Mask bit (client MUST mask) + payload length
-        let len = payload.count
-        if len < 126 {
-            frame.append(0x80 | UInt8(len))
-        } else if len < 65536 {
-            frame.append(0x80 | 126)
-            frame.append(UInt8((len >> 8) & 0xFF))
-            frame.append(UInt8(len & 0xFF))
-        } else {
-            frame.append(0x80 | 127)
-            for i in (0..<8).reversed() {
-                frame.append(UInt8((len >> (i * 8)) & 0xFF))
-            }
-        }
-
-        // Masking key (random)
-        var maskKey = [UInt8](repeating: 0, count: 4)
-        arc4random_buf(&maskKey, 4)
-        frame.append(contentsOf: maskKey)
-
-        // Masked payload
-        for (i, byte) in payload.enumerated() {
-            frame.append(byte ^ maskKey[i % 4])
-        }
-
-        return frame
-    }
-
-    // MARK: - WebSocket Frame Parsing (server → client, unmasked)
-
-    private struct WSFrame {
-        let opcode: UInt8
-        let payload: [UInt8]
-    }
-
-    private struct WebSocketFrameParser {
-        private var buffer = [UInt8]()
-
-        mutating func feed(_ data: [UInt8]) {
-            buffer.append(contentsOf: data)
-        }
-
-        mutating func nextFrame() -> WSFrame? {
-            guard buffer.count >= 2 else { return nil }
-
-            let opcode = buffer[0] & 0x0F
-            let masked = (buffer[1] & 0x80) != 0
-            var payloadLen = Int(buffer[1] & 0x7F)
-            var offset = 2
-
-            if payloadLen == 126 {
-                guard buffer.count >= offset + 2 else { return nil }
-                payloadLen = Int(buffer[offset]) << 8 | Int(buffer[offset + 1])
-                offset += 2
-            } else if payloadLen == 127 {
-                guard buffer.count >= offset + 8 else { return nil }
-                payloadLen = 0
-                for i in 0..<8 {
-                    payloadLen = (payloadLen << 8) | Int(buffer[offset + i])
-                }
-                offset += 8
-            }
-
-            var maskKey = [UInt8]()
-            if masked {
-                guard buffer.count >= offset + 4 else { return nil }
-                maskKey = Array(buffer[offset..<offset + 4])
-                offset += 4
-            }
-
-            guard buffer.count >= offset + payloadLen else { return nil }
-
-            var payload = Array(buffer[offset..<offset + payloadLen])
-            if masked {
-                for i in 0..<payload.count {
-                    payload[i] ^= maskKey[i % 4]
-                }
-            }
-
-            buffer.removeFirst(offset + payloadLen)
-            return WSFrame(opcode: opcode, payload: payload)
         }
     }
 
@@ -420,28 +193,6 @@ enum ShellCommand {
         return fd
     }
 
-    private static func readHTTPResponseHeader(fd: Int32) throws -> String {
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 1)
-        let endMarker = Data("\r\n\r\n".utf8)
-
-        while true {
-            let n = Darwin.read(fd, &buffer, 1)
-            if n <= 0 {
-                if n == 0 { throw VMError.message("Connection closed during handshake") }
-                if errno == EINTR { continue }
-                throw VMError.message("Read error: errno \(errno)")
-            }
-            data.append(contentsOf: buffer[0..<1])
-            if data.count >= 4 && data.suffix(4) == endMarker {
-                return String(data: data, encoding: .utf8) ?? ""
-            }
-            if data.count > 8192 {
-                throw VMError.message("Response headers too large")
-            }
-        }
-    }
-
     private static func generateWebSocketKey() -> String {
         var bytes = [UInt8](repeating: 0, count: 16)
         arc4random_buf(&bytes, 16)
@@ -452,17 +203,6 @@ enum ShellCommand {
         let magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
         let digest = Insecure.SHA1.hash(data: Data(magic.utf8))
         return Data(digest).base64EncodedString()
-    }
-
-    private static func httpHeaderValue(_ name: String, in response: String) -> String? {
-        for line in response.components(separatedBy: "\r\n").dropFirst() {
-            guard let colonIndex = line.firstIndex(of: ":") else { continue }
-            let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
-            if key.caseInsensitiveCompare(name) == .orderedSame {
-                return String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
-            }
-        }
-        return nil
     }
 
     private static func showHelp() {

@@ -15,7 +15,7 @@ final class URLService {
         lock.lock()
         pendingURLs.append(url)
         lock.unlock()
-        EventPushServer.shared.pushEvent(.urls([url.absoluteString]))
+        EventPushService.shared.pushEvent(.urls([url.absoluteString]))
         log("[URLService] Queued URL: \(url.absoluteString)")
     }
 

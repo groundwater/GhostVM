@@ -98,7 +98,7 @@ final class FileService {
         }
         outgoingLock.unlock()
         if added {
-            EventPushServer.shared.pushEvent(.files(listOutgoingFiles()))
+            EventPushService.shared.pushEvent(.files(listOutgoingFiles()))
         }
     }
 
@@ -114,7 +114,7 @@ final class FileService {
         }
         outgoingLock.unlock()
         if changed {
-            EventPushServer.shared.pushEvent(.files(listOutgoingFiles()))
+            EventPushService.shared.pushEvent(.files(listOutgoingFiles()))
         }
     }
 
@@ -130,7 +130,7 @@ final class FileService {
         outgoingLock.lock()
         outgoingFiles.removeAll()
         outgoingLock.unlock()
-        EventPushServer.shared.pushEvent(.files([]))
+        EventPushService.shared.pushEvent(.files([]))
         NotificationCenter.default.post(name: .outgoingFilesChanged, object: nil)
     }
 
