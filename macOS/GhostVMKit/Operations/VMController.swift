@@ -576,6 +576,27 @@ public final class VMController {
                 }
             }
 
+            // Clone the Helper directory (per-VM helper app + GhostTools.dmg) so the
+            // clone is self-contained when launched directly via its Dock icon, which
+            // does not re-provision the helper. clonefile() copies directories
+            // recursively on APFS. The helper app bundle is named after the source VM,
+            // so rename it to match the clone (mirrors renameVM()).
+            let sourceHelperDir = sourceLayout.helperDirectoryURL
+            if fileManager.fileExists(atPath: sourceHelperDir.path) {
+                let destHelperDir = newLayout.helperDirectoryURL
+                if Darwin.clonefile(sourceHelperDir.path, destHelperDir.path, 0) == -1 {
+                    let err = String(cString: strerror(errno))
+                    throw VMError.message("Clone failed for Helper directory: \(err). This volume may not support copy-on-write. Move your VMs to an APFS volume.")
+                }
+                let clonedHelperApp = destHelperDir.appendingPathComponent(
+                    sourceLayout.helperAppURL(vmName: sourceName).lastPathComponent)
+                let destHelperApp = newLayout.helperAppURL(vmName: trimmed)
+                if clonedHelperApp.path != destHelperApp.path,
+                   fileManager.fileExists(atPath: clonedHelperApp.path) {
+                    try fileManager.moveItem(at: clonedHelperApp, to: destHelperApp)
+                }
+            }
+
             // Generate fresh identifiers
             let machineIdentifier = VZMacMachineIdentifier()
             try writeData(machineIdentifier.dataRepresentation, to: newLayout.machineIdentifierURL)
