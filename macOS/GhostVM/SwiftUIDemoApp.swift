@@ -2072,7 +2072,7 @@ struct VMContextMenu: View {
         Button("Clone…") {
             requestClone()
         }
-        .disabled(isRunning || !vm.installed)
+        .disabled(!vm.installed)
 
         Divider()
 
