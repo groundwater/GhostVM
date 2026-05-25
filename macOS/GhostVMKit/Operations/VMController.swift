@@ -541,10 +541,11 @@ public final class VMController {
             throw VMError.message("VM '\(sourceName)' is not installed. Only installed VMs can be cloned.")
         }
 
-        // Source must not be running
-        guard !isVMProcessRunning(layout: sourceLayout) else {
-            throw VMError.message("VM '\(sourceName)' is running. Stop it before cloning.")
-        }
+        // Cloning a running VM is allowed. clonefile() produces a crash-consistent
+        // copy of the disk (equivalent to sudden power loss), which macOS recovers
+        // from on boot via its journaled filesystem. The clone also gets a fresh
+        // machine identifier, MAC address, and cleared per-instance state below, so
+        // there is no identity collision or state leakage with the running source.
 
         // Create new bundle in the same parent directory
         let parentDir = bundleURL.deletingLastPathComponent()
