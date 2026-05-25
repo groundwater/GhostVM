@@ -1069,6 +1069,51 @@ public final class VMController {
         try discardSuspend(bundleURL: bundleURL(for: name))
     }
 
+    /// Suspend a running helper-backed VM by asking its helper process to save state.
+    /// Reuses the existing `com.ghostvm.helper.suspend.<hash>` notification that the
+    /// helper already listens for, then blocks until the helper exits and the saved
+    /// suspend state is verified on disk.
+    public func suspendVM(bundleURL: URL, timeout: TimeInterval = 300) throws {
+        let standardized = bundleURL.standardizedFileURL
+        let layout = try layoutForExistingBundle(at: standardized)
+        let entry = try loadEntry(for: standardized)
+        let vmName = displayName(for: standardized)
+
+        guard let pid = entry.runningPID else {
+            print(entry.isSuspended ? "VM '\(vmName)' is already suspended." : "VM '\(vmName)' does not appear to be running.")
+            return
+        }
+
+        let bundlePathHash = standardized.path.stableHash
+        print("Sending suspend request to VM '\(vmName)' (PID \(pid)).")
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.ghostvm.helper.suspend.\(bundlePathHash)"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 {
+                let config = try VMConfigStore(layout: layout).load()
+                guard config.isSuspended, fileManager.fileExists(atPath: layout.suspendStateURL.path) else {
+                    throw VMError.message("VM '\(vmName)' exited before saving suspended state.")
+                }
+                removeVMLock(at: layout.pidFileURL)
+                print("VM '\(vmName)' suspended.")
+                return
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+
+        throw VMError.message("Timed out waiting for VM '\(vmName)' to suspend.")
+    }
+
+    public func suspendVM(name: String, timeout: TimeInterval = 300) throws {
+        try suspendVM(bundleURL: bundleURL(for: name), timeout: timeout)
+    }
+
     // MARK: - CLI Start/Resume (blocking)
 
     /// Start a VM from the CLI. Blocks until the VM terminates.
