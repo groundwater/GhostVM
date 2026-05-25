@@ -1,12 +1,14 @@
 import AppKit
 import Foundation
+import GhostHTTP
 import GhostVMKit
+@preconcurrency import Virtualization
 
 /// Host-side HTTP API served over a Unix domain socket.
 /// vmctl connects here. Requests are proxied to GhostTools in the guest
 /// (including screenshot and batch automation paths).
-@MainActor
 final class HostAPIService {
+    private let connectionSlots = DispatchSemaphore(value: 64)
     private weak var client: GhostClient?
     private var vmName: String
     private var socketPath: String
@@ -82,9 +84,12 @@ final class HostAPIService {
                     if errno == EBADF || errno == EINVAL {
                         break // Socket closed
                     }
+                    usleep(10_000)
                     continue
                 }
-                Task { @MainActor [weak self] in
+                self?.connectionSlots.wait()
+                Task { [weak self] in
+                    defer { self?.connectionSlots.signal() }
                     await self?.handleConnection(clientFD)
                 }
             }
@@ -101,208 +106,394 @@ final class HostAPIService {
         NSLog("HostAPIService: Stopped")
     }
 
-    // MARK: - Connection Handler
+    nonisolated private static func setReceiveTimeout(fd: Int32, seconds: Int) {
+        var timeout = timeval(tv_sec: seconds, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+    }
 
-    private func handleConnection(_ fd: Int32) async {
-        // Read HTTP request from the socket on a background queue
-        let requestData: Data = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                var data = Data()
-                var buffer = [UInt8](repeating: 0, count: 65536)
-                // Read until we have the full request (headers + body)
-                var headerEnd = -1
-                var contentLength = 0
+    nonisolated private static func logTransportFailure(_ message: String) {
+        NSLog("HostAPIService FATAL: \(message)\n\(Thread.callStackSymbols.joined(separator: "\n"))")
+    }
 
-                while true {
-                    let n = Darwin.read(fd, &buffer, buffer.count)
-                    if n <= 0 { break }
-                    data.append(contentsOf: buffer[0..<n])
+    nonisolated private static func connectRawWithTimeout(
+        client: GhostClient,
+        port: UInt32,
+        seconds: TimeInterval
+    ) async throws -> VZVirtioSocketConnection {
+        final class ConnectState: @unchecked Sendable {
+            private let lock = NSLock()
+            let semaphore = DispatchSemaphore(value: 0)
+            var completed = false
+            var timedOut = false
+            var connection: VZVirtioSocketConnection?
+            var error: Error?
 
-                    // Check if we've received all headers
-                    if headerEnd < 0, let str = String(data: data, encoding: .utf8),
-                       let range = str.range(of: "\r\n\r\n") {
-                        headerEnd = str.distance(from: str.startIndex, to: range.upperBound)
-                        // Parse Content-Length
-                        let headerStr = String(str[str.startIndex..<range.lowerBound])
-                        for line in headerStr.components(separatedBy: "\r\n") {
-                            if line.lowercased().hasPrefix("content-length:") {
-                                contentLength = Int(line.dropFirst(15).trimmingCharacters(in: .whitespaces)) ?? 0
-                            }
-                        }
-                    }
-
-                    // Check if we have the full body
-                    if headerEnd >= 0 && data.count >= headerEnd + contentLength {
-                        break
-                    }
+            func finish(connection: VZVirtioSocketConnection) {
+                lock.lock()
+                completed = true
+                if timedOut {
+                    lock.unlock()
+                    connection.close()
+                    semaphore.signal()
+                    return
                 }
-                continuation.resume(returning: data)
+                self.connection = connection
+                lock.unlock()
+                semaphore.signal()
+            }
+
+            func finish(error: Error) {
+                lock.lock()
+                completed = true
+                self.error = error
+                lock.unlock()
+                semaphore.signal()
+            }
+
+            func markTimedOut() {
+                lock.lock()
+                timedOut = true
+                lock.unlock()
             }
         }
 
-        guard !requestData.isEmpty,
-              let requestStr = String(data: requestData, encoding: .utf8) else {
-            Darwin.close(fd)
+        let state = ConnectState()
+        Task {
+            do {
+                let connection = try await client.connectRaw(port: port)
+                state.finish(connection: connection)
+            } catch {
+                state.finish(error: error)
+            }
+        }
+
+        let completed = try await runBlocking {
+            state.semaphore.wait(timeout: .now() + seconds) == .success
+        }
+        guard completed else {
+            state.markTimedOut()
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(ETIMEDOUT),
+                userInfo: [NSLocalizedDescriptionKey: "Operation timed out after \(seconds) seconds"]
+            )
+        }
+        if let error = state.error {
+            throw error
+        }
+        if let connection = state.connection {
+            return connection
+        }
+        throw GhostClientError.connectionFailed("Connection attempt completed without a result")
+    }
+
+    // MARK: - Connection Handler
+
+    private func handleConnection(_ fd: Int32) async {
+        Self.setReceiveTimeout(fd: fd, seconds: 30)
+        var responseStarted = false
+
+        do {
+            let (request, prelude) = try await Self.runBlocking {
+                try HTTPCodec.readRequest(fd: fd)
+            }
+
+            let cleanPath = request.path.components(separatedBy: "?").first ?? request.path
+            if cleanPath == "/api/v1/shell" {
+                await handleShellProxy(vmctlFD: fd, request: request)
+                return
+            }
+            if cleanPath == "/api/v1/vsock-connect" {
+                await handleVsockConnectProxy(vmctlFD: fd, headers: request.headers)
+                return
+            }
+
+            let body = try await Self.readRequestBody(fd: fd, request: request, prelude: prelude)
+            let response = await route(request: request, body: body)
+            responseStarted = true
+            try await Self.writeResponse(fd: fd, response: response)
+        } catch {
+            Self.logTransportFailure("Failed to handle request: \(error)")
+            if !responseStarted {
+                try? await Self.writeResponse(fd: fd, response: Self.errorResponse(for: error))
+            }
+        }
+
+        Darwin.close(fd)
+    }
+
+    // MARK: - Shell Proxy
+
+    /// Proxies a shell session: vmctl ↔ HostAPIService ↔ GhostTools (vsock).
+    /// Instead of request/response, switches to bidirectional byte bridging.
+    private func handleShellProxy(vmctlFD: Int32, request: HTTPRequestHead) async {
+        guard let client = client else {
+            try? Self.writeResponseSync(fd: vmctlFD, response: .error(.internalServerError, message: "Guest client not available"))
+            Darwin.close(vmctlFD)
             return
         }
 
-        // Parse method, path, body
-        let (method, path, headers, body) = parseHTTPRequest(requestStr, rawData: requestData)
+        NSLog("HostAPIService: Shell proxy starting")
 
-        // Route and get response
-        let response = await route(method: method, path: path, headers: headers, body: body)
+        // Open a raw vsock connection to GhostTools on port 5000
+        let guestConnection: VZVirtioSocketConnection
+        do {
+            guestConnection = try await Self.connectRawWithTimeout(client: client, port: 5000, seconds: 10)
+        } catch {
+            NSLog("HostAPIService: Shell proxy failed to connect to guest: \(error)")
+            try? Self.writeResponseSync(fd: vmctlFD, response: .error(.internalServerError, message: "Failed to connect shell proxy"))
+            Darwin.close(vmctlFD)
+            return
+        }
 
-        // Write response on background queue
+        let guestFD = guestConnection.fileDescriptor
+        NSLog("HostAPIService: Shell proxy connected to guest (fd=\(guestFD))")
+
+        let upgraded: HTTPUpgradedConnection
+        do {
+            Self.setReceiveTimeout(fd: guestFD, seconds: 30)
+            upgraded = try await Self.runBlocking {
+                try HTTPClient.performUpgradeRequest(
+                    fd: guestFD,
+                    method: request.method.rawValue,
+                    path: request.path,
+                    headers: request.headers
+                )
+            }
+        } catch {
+            NSLog("HostAPIService: Shell proxy failed to forward upgrade request to guest")
+            Self.logTransportFailure("Shell proxy upgrade failed: \(error)")
+            try? Self.writeResponseSync(fd: vmctlFD, response: .error(.internalServerError, message: "Shell upgrade failed"))
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        Self.setReceiveTimeout(fd: guestFD, seconds: 0)
+
+        do {
+            try await Self.runBlocking {
+                try HTTPCodec.writeResponseHead(
+                    fd: vmctlFD,
+                    status: upgraded.responseHead.status,
+                    headers: upgraded.responseHead.headers
+                )
+                if !upgraded.prelude.isEmpty {
+                    try HTTPCodec.writeAll(fd: vmctlFD, data: upgraded.prelude)
+                }
+            }
+        } catch {
+            Self.logTransportFailure("Shell proxy failed to relay guest upgrade response to client: \(error)")
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        // Now bridge bidirectionally: vmctlFD ↔ guestFD
+        // Both sides are raw byte streams from this point on.
+        await Self.bridgeBytes(fdA: vmctlFD, fdB: guestFD, label: "shell")
+        guestConnection.close()
+        Darwin.close(vmctlFD)
+        NSLog("HostAPIService: Shell proxy session ended")
+    }
+
+    // MARK: - Generic Vsock Proxy
+    //
+    // Bridges vmctl's unix-socket connection to a raw vsock connection at a
+    // requested guest port. After the 101 response, both sides are pure bytes.
+    // Used by `vmctl vsock connect <port>` — netcat-style debugging tool.
+
+    private func handleVsockConnectProxy(vmctlFD: Int32, headers: HTTPHeaders) async {
+        guard let client = client else {
+            Self.writeShortError(fd: vmctlFD, status: 500, text: "Internal Server Error")
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        // Required: Vsock-Port header.
+        let portString = headers["Vsock-Port"]
+        guard let portString = portString, let port = UInt32(portString) else {
+            Self.writeShortError(fd: vmctlFD, status: 400, text: "Missing or invalid Vsock-Port header")
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        NSLog("HostAPIService: vsock-connect proxy starting (port=\(port))")
+
+        let guestConnection: VZVirtioSocketConnection
+        do {
+            guestConnection = try await Self.connectRawWithTimeout(client: client, port: port, seconds: 10)
+        } catch {
+            NSLog("HostAPIService: vsock-connect failed to open port \(port): \(error)")
+            Self.writeShortError(fd: vmctlFD, status: 502, text: "Bad Gateway: \(error.localizedDescription)")
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        let guestFD = guestConnection.fileDescriptor
+        NSLog("HostAPIService: vsock-connect opened guest fd=\(guestFD) port=\(port)")
+
+        // Tell vmctl the bridge is up.
+        do {
+            try Self.writeResponseSync(
+                fd: vmctlFD,
+                response: HTTPResponse(
+                    status: .switchingProtocols,
+                    headers: [
+                        "Upgrade": "vsock",
+                        "Connection": "Upgrade",
+                    ]
+                ),
+                headOnly: true
+            )
+        } catch {
+            Self.logTransportFailure("vsock-connect failed to write 101 to vmctl: \(error)")
+            guestConnection.close()
+            Darwin.close(vmctlFD)
+            return
+        }
+
+        await Self.bridgeBytes(fdA: vmctlFD, fdB: guestFD, label: "vsock-connect(\(port))")
+        guestConnection.close()
+        Darwin.close(vmctlFD)
+        NSLog("HostAPIService: vsock-connect(\(port)) session ended")
+    }
+
+    /// Bidirectional blocking byte bridge between two fds. Returns when both
+    /// directions have hit EOF/error. Uses SHUT_WR to propagate half-close so
+    /// the peer of each direction sees a proper EOF.
+    nonisolated static func bridgeBytes(fdA: Int32, fdB: Int32, label: String) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let group = DispatchGroup()
+
+            setReceiveTimeout(fd: fdA, seconds: 0)
+            setReceiveTimeout(fd: fdB, seconds: 0)
+
+            // A → B
+            group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
-                var headerStr = "HTTP/1.1 \(response.statusCode) \(response.statusText)\r\nContent-Type: \(response.contentType)\r\nContent-Length: \(response.body.count)\r\nConnection: close\r\n"
-                for (key, value) in response.extraHeaders {
-                    headerStr += "\(key): \(value)\r\n"
-                }
-                headerStr += "\r\n"
-                let headerData = Data(headerStr.utf8)
-                headerData.withUnsafeBytes { ptr in
-                    _ = Darwin.write(fd, ptr.baseAddress!, headerData.count)
-                }
-                if !response.body.isEmpty {
-                    response.body.withUnsafeBytes { ptr in
-                        _ = Darwin.write(fd, ptr.baseAddress!, response.body.count)
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                var shouldSignalEOF = true
+                while true {
+                    let n = Darwin.read(fdA, &buffer, buffer.count)
+                    if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return n == 0 }
+                        do {
+                            try HTTPCodec.writeAll(fd: fdB, ptr: base, count: n)
+                            return true
+                        } catch {
+                            return false
+                        }
+                    }
+                    if !ok {
+                        NSLog("HostAPIService: \(label) write A→B failed: errno \(errno)")
+                        Darwin.shutdown(fdA, SHUT_RD)
+                        Darwin.shutdown(fdB, SHUT_WR)
+                        shouldSignalEOF = false
+                        break
                     }
                 }
-                Darwin.close(fd)
+                if shouldSignalEOF {
+                    Darwin.shutdown(fdB, SHUT_WR)
+                }
+                group.leave()
+            }
+
+            // B → A
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = [UInt8](repeating: 0, count: 16384)
+                var shouldSignalEOF = true
+                while true {
+                    let n = Darwin.read(fdB, &buffer, buffer.count)
+                    if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }
+                    if n <= 0 { break }
+                    let ok = buffer.withUnsafeBufferPointer { ptr in
+                        guard let base = ptr.baseAddress else { return n == 0 }
+                        do {
+                            try HTTPCodec.writeAll(fd: fdA, ptr: base, count: n)
+                            return true
+                        } catch {
+                            return false
+                        }
+                    }
+                    if !ok {
+                        NSLog("HostAPIService: \(label) write B→A failed: errno \(errno)")
+                        Darwin.shutdown(fdB, SHUT_RD)
+                        Darwin.shutdown(fdA, SHUT_WR)
+                        shouldSignalEOF = false
+                        break
+                    }
+                }
+                if shouldSignalEOF {
+                    Darwin.shutdown(fdA, SHUT_WR)
+                }
+                group.leave()
+            }
+
+            group.notify(queue: .global()) {
                 continuation.resume()
             }
         }
     }
 
-    // MARK: - HTTP Parsing
-
-    private func parseHTTPRequest(_ str: String, rawData: Data) -> (method: String, path: String, headers: [String: String]?, body: Data?) {
-        let lines = str.components(separatedBy: "\r\n")
-        guard let requestLine = lines.first else { return ("GET", "/", nil, nil) }
-        let parts = requestLine.components(separatedBy: " ")
-        let method = parts.count > 0 ? parts[0] : "GET"
-        let path = parts.count > 1 ? parts[1] : "/"
-
-        // Parse headers
-        var headers: [String: String] = [:]
-        for line in lines.dropFirst() {
-            if line.isEmpty { break }
-            if let colonIndex = line.firstIndex(of: ":") {
-                let key = String(line[line.startIndex..<colonIndex]).trimmingCharacters(in: .whitespaces)
-                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
-                headers[key] = value
-            }
-        }
-
-        // Extract body after \r\n\r\n
-        // IMPORTANT: Search in raw bytes, not the UTF-8 string, to avoid character/byte offset misalignment
-        let delimiter = Data([0x0d, 0x0a, 0x0d, 0x0a]) // \r\n\r\n
-        if let delimiterRange = rawData.range(of: delimiter) {
-            let headerEndIndex = delimiterRange.upperBound
-            if rawData.count > headerEndIndex {
-                return (method, path, headers, Data(rawData[headerEndIndex...]))
-            }
-        }
-        return (method, path, headers.isEmpty ? nil : headers, nil)
+    nonisolated private static func writeShortError(fd: Int32, status: Int, text: String) {
+        try? writeResponseSync(fd: fd, response: .error(.from(code: status), message: text))
     }
 
-    // MARK: - Response Type
-
-    private struct Response {
-        let statusCode: Int
-        let statusText: String
-        let contentType: String
-        let body: Data
-        let extraHeaders: [String: String]
-
-        init(statusCode: Int, statusText: String, contentType: String, body: Data, extraHeaders: [String: String] = [:]) {
-            self.statusCode = statusCode
-            self.statusText = statusText
-            self.contentType = contentType
-            self.body = body
-            self.extraHeaders = extraHeaders
+    private func clipboardType(explicitType: String?, contentType: String?) -> String {
+        if let explicitType, !explicitType.isEmpty {
+            return explicitType
         }
+        guard let contentType else { return "public.utf8-plain-text" }
 
-        static func json(_ data: Data, status: Int = 200) -> Response {
-            let httpStatus = HTTPUtilities.HTTPStatus.from(code: status)
-            return Response(
-                statusCode: httpStatus.rawValue,
-                statusText: httpStatus.reasonPhrase,
-                contentType: "application/json",
-                body: data
-            )
-        }
+        let mimeType = contentType.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
 
-        static func png(_ data: Data) -> Response {
-            Response(statusCode: 200, statusText: "OK", contentType: "image/png", body: data)
-        }
-
-        static func jpeg(_ data: Data) -> Response {
-            Response(statusCode: 200, statusText: "OK", contentType: "image/jpeg", body: data)
-        }
-
-        static func binary(_ data: Data, headers: [String: String] = [:]) -> Response {
-            Response(statusCode: 200, statusText: "OK", contentType: "application/octet-stream", body: data, extraHeaders: headers)
-        }
-
-        static func noContent() -> Response {
-            Response(statusCode: 204, statusText: "No Content", contentType: "application/json", body: Data())
-        }
-
-        static func error(_ status: Int, message: String) -> Response {
-            let httpStatus = HTTPUtilities.HTTPStatus.from(code: status)
-            let body = try! JSONSerialization.data(withJSONObject: ["error": message])
-            return Response(
-                statusCode: httpStatus.rawValue,
-                statusText: httpStatus.reasonPhrase,
-                contentType: "application/json",
-                body: body
-            )
-        }
-
-        static func ok() -> Response {
-            json(try! JSONSerialization.data(withJSONObject: ["ok": true]))
+        switch mimeType {
+        case "image/png": return "public.png"
+        case "image/tiff": return "public.tiff"
+        case "image/jpeg": return "public.jpeg"
+        case "text/rtf", "application/rtf": return "public.rtf"
+        case "text/plain": return "public.utf8-plain-text"
+        default: return "public.utf8-plain-text"
         }
     }
 
     // MARK: - Router
 
-    private func route(method: String, path: String, headers: [String: String]?, body: Data?) async -> Response {
-        let cleanPath = path.components(separatedBy: "?").first ?? path
+    private func route(request: HTTPRequestHead, body: Data?) async -> HTTPResponse {
+        let cleanPath = request.path.components(separatedBy: "?").first ?? request.path
 
         // Health
         if cleanPath == "/health" {
-            return Response.json(try! JSONSerialization.data(withJSONObject: ["status": "ok"]))
-        }
-
-        // Screenshot and batch are now guest-side only.
-        if cleanPath == "/vm/screenshot" || cleanPath == "/vm/screenshot/annotated" || cleanPath == "/api/v1/batch" {
-            return await proxyToGuest(method: method, path: path, headers: headers, body: body)
+            return .json(try! JSONSerialization.data(withJSONObject: ["status": "ok"]))
         }
 
         // Everything else: proxy to guest via GhostClient
-        return await proxyToGuest(method: method, path: path, headers: headers, body: body)
+        return await proxyToGuest(request: request, body: body)
     }
 
     // MARK: - Guest Proxy
 
-    private func proxyToGuest(method: String, path: String, headers: [String: String]?, body: Data?) async -> Response {
+    private func proxyToGuest(request: HTTPRequestHead, body: Data?) async -> HTTPResponse {
         guard let client = client else {
-            return .error(500, message: "Guest client not available")
+            return .error(.internalServerError, message: "Guest client not available")
         }
 
-        // Use GhostClient's sendHTTPRequest by building a raw HTTP request through the vsock
-        // For simplicity, use the specific client methods based on the path
+        let method = request.method.rawValue
+        let path = request.path
         let cleanPath = path.components(separatedBy: "?").first ?? path
 
         do {
-            // Guest-side screenshot endpoints
             if cleanPath == "/vm/screenshot" && method == "GET" {
                 let format = HTTPUtilities.parseQuery(path, key: "format") ?? "png"
                 let scale = Double(HTTPUtilities.parseQuery(path, key: "scale") ?? "1.0") ?? 1.0
                 let result = try await client.captureGuestScreenshot(format: format, scale: scale)
-                return Response(statusCode: 200, statusText: "OK", contentType: result.contentType, body: result.data)
+                return HTTPResponse(status: .ok, headers: ["Content-Type": result.contentType], body: .bytes(result.data))
             }
             if cleanPath == "/vm/screenshot/annotated" && method == "GET" {
                 let scale = Double(HTTPUtilities.parseQuery(path, key: "scale") ?? "0.5") ?? 0.5
@@ -311,33 +502,32 @@ final class HostAPIService {
             }
             if cleanPath == "/api/v1/batch" && method == "POST" {
                 guard let body = body else {
-                    return .error(400, message: "Request body required")
+                    return .error(.badRequest, message: "Request body required")
                 }
                 guard let request = try? JSONDecoder().decode(BatchRequest.self, from: body) else {
-                    return .error(400, message: "Invalid JSON")
+                    return .error(.badRequest, message: "Invalid JSON")
                 }
                 let data = try await client.executeGuestBatch(request)
                 return .json(data)
             }
 
-            // Clipboard
             if cleanPath == "/api/v1/clipboard" {
                 if method == "GET" {
                     let resp = try await client.getClipboard()
                     if let data = resp.data {
                         let clipType = resp.type ?? "public.utf8-plain-text"
-                        return .binary(data, headers: [
+                        return HTTPResponse(status: .ok, headers: [
                             "Content-Type": "application/octet-stream",
                             "X-Clipboard-Type": clipType,
-                        ])
+                        ], body: .bytes(data))
                     }
-                    return .noContent()
+                    return HTTPResponse(status: .noContent)
                 } else if method == "POST" {
                     guard let body = body, !body.isEmpty else {
-                        return .error(400, message: "Request body required")
+                        return .error(.badRequest, message: "Request body required")
                     }
-                    let explicitType = headers?["X-Clipboard-Type"] ?? headers?["x-clipboard-type"]
-                    let contentType = (headers?["Content-Type"] ?? headers?["content-type"])?.lowercased()
+                    let explicitType = request.headers["X-Clipboard-Type"]
+                    let contentType = request.headers["Content-Type"]?.lowercased()
 
                     let (clipboardBody, clipType): (Data, String) = {
                         // Backward compatibility for older UI clients posting JSON:
@@ -349,15 +539,14 @@ final class HostAPIService {
                             let parsedType = (object["type"] as? String) ?? "public.utf8-plain-text"
                             return (Data(content.utf8), parsedType)
                         }
-                        return (body, explicitType ?? "public.utf8-plain-text")
+                        return (body, clipboardType(explicitType: explicitType, contentType: contentType))
                     }()
 
                     try await client.setClipboard(data: clipboardBody, type: clipType)
-                    return .ok()
+                    return Self.okResponse()
                 }
             }
 
-            // Apps
             if cleanPath == "/api/v1/apps" && method == "GET" {
                 let resp = try await client.listApps()
                 let data = try JSONEncoder().encode(resp)
@@ -367,28 +556,28 @@ final class HostAPIService {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let bundleId = json["bundleId"] as? String else {
-                    return .error(400, message: "Need bundleId")
+                    return .error(.badRequest, message: "Need bundleId")
                 }
                 try await client.launchApp(bundleId: bundleId)
-                return .ok()
+                return Self.okResponse()
             }
             if cleanPath == "/api/v1/apps/activate" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let bundleId = json["bundleId"] as? String else {
-                    return .error(400, message: "Need bundleId")
+                    return .error(.badRequest, message: "Need bundleId")
                 }
                 try await client.activateApp(bundleId: bundleId)
-                return .ok()
+                return Self.okResponse()
             }
             if cleanPath == "/api/v1/apps/quit" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let bundleId = json["bundleId"] as? String else {
-                    return .error(400, message: "Need bundleId")
+                    return .error(.badRequest, message: "Need bundleId")
                 }
                 try await client.quitApp(bundleId: bundleId)
-                return .ok()
+                return Self.okResponse()
             }
             if cleanPath == "/api/v1/apps/frontmost" && method == "GET" {
                 let bundleId = try await client.getFrontmostApp()
@@ -396,7 +585,6 @@ final class HostAPIService {
                 return .json(data)
             }
 
-            // Accessibility
             if cleanPath == "/api/v1/accessibility" && method == "GET" {
                 let depth = Int(HTTPUtilities.parseQuery(path, key: "depth") ?? "5") ?? 5
                 let targetStr = HTTPUtilities.parseQuery(path, key: "target") ?? "front"
@@ -421,7 +609,7 @@ final class HostAPIService {
             if cleanPath == "/api/v1/accessibility/action" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-                    return .error(400, message: "Invalid JSON")
+                    return .error(.badRequest, message: "Invalid JSON")
                 }
                 let targetStr = HTTPUtilities.parseQuery(path, key: "target") ?? "front"
                 let target = AXTarget(queryValue: targetStr) ?? .front
@@ -431,24 +619,24 @@ final class HostAPIService {
                     action: json["action"] as? String ?? "AXPress",
                     target: target, wait: false
                 )
-                return .ok()
+                return Self.okResponse()
             }
             if cleanPath == "/api/v1/accessibility/menu" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let menuPath = json["path"] as? [String] else {
-                    return .error(400, message: "Need path array")
+                    return .error(.badRequest, message: "Need path array")
                 }
                 let targetStr = HTTPUtilities.parseQuery(path, key: "target") ?? "front"
                 let target = AXTarget(queryValue: targetStr) ?? .front
                 try await client.triggerMenuItem(path: menuPath, target: target, wait: false)
-                return .ok()
+                return Self.okResponse()
             }
             if cleanPath == "/api/v1/accessibility/type" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let value = json["value"] as? String else {
-                    return .error(400, message: "Need value")
+                    return .error(.badRequest, message: "Need value")
                 }
                 let targetStr = HTTPUtilities.parseQuery(path, key: "target") ?? "front"
                 let target = AXTarget(queryValue: targetStr) ?? .front
@@ -456,15 +644,14 @@ final class HostAPIService {
                     value, label: json["label"] as? String,
                     role: json["role"] as? String, target: target
                 )
-                return .ok()
+                return Self.okResponse()
             }
 
-            // Pointer
             if cleanPath == "/api/v1/pointer" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let action = json["action"] as? String else {
-                    return .error(400, message: "Need action")
+                    return .error(.badRequest, message: "Need action")
                 }
                 let responseData = try await client.sendPointerEvent(
                     action: action,
@@ -481,14 +668,13 @@ final class HostAPIService {
                 if let data = responseData {
                     return .json(data)
                 }
-                return .ok()
+                return Self.okResponse()
             }
 
-            // Keyboard
             if cleanPath == "/api/v1/input" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-                    return .error(400, message: "Invalid JSON")
+                    return .error(.badRequest, message: "Invalid JSON")
                 }
                 try await client.sendKeyboardInput(
                     text: json["text"] as? String,
@@ -497,15 +683,14 @@ final class HostAPIService {
                     rate: json["rate"] as? Int,
                     wait: false
                 )
-                return .ok()
+                return Self.okResponse()
             }
 
-            // Exec
             if cleanPath == "/api/v1/exec" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let command = json["command"] as? String else {
-                    return .error(400, message: "Need command")
+                    return .error(.badRequest, message: "Need command")
                 }
                 let resp = try await client.exec(
                     command: command,
@@ -516,31 +701,26 @@ final class HostAPIService {
                 return .json(data)
             }
 
-            // Elements
             if cleanPath == "/api/v1/elements" && method == "GET" {
                 let data = try await client.getElements()
                 return .json(data)
             }
 
-            // Permissions
             if cleanPath == "/api/v1/permissions" {
-                // Proxy to guest
-                let data = try await client.getElements() // Use elements as a proxy for permission check
+                let data = try await client.checkPermissions(prompt: method == "POST")
                 return .json(data)
             }
 
-            // Open
             if cleanPath == "/api/v1/open" && method == "POST" {
                 guard let body = body,
                       let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
                       let openPath = json["path"] as? String else {
-                    return .error(400, message: "Need path")
+                    return .error(.badRequest, message: "Need path")
                 }
                 try await client.openPath(openPath)
-                return .ok()
+                return Self.okResponse()
             }
 
-            // File operations
             if cleanPath == "/api/v1/files" {
                 if method == "GET" {
                     let files = try await client.listFiles()
@@ -549,11 +729,10 @@ final class HostAPIService {
                 }
                 if method == "DELETE" {
                     try await client.clearFileQueue()
-                    return .ok()
+                    return Self.okResponse()
                 }
             }
 
-            // File system
             if cleanPath == "/api/v1/fs" && method == "GET" {
                 let dirPath = HTTPUtilities.parseQuery(path, key: "path") ?? "~"
                 let resp = try await client.listDirectory(path: dirPath)
@@ -561,10 +740,72 @@ final class HostAPIService {
                 return .json(data)
             }
 
-            return .error(404, message: "Not found: \(cleanPath)")
+            return .error(.notFound, message: "Not found: \(cleanPath)")
         } catch {
             let desc = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            return .error(500, message: desc)
+            return .error(.internalServerError, message: desc)
+        }
+    }
+
+    nonisolated private static func okResponse() -> HTTPResponse {
+        .json(try! JSONSerialization.data(withJSONObject: ["ok": true]))
+    }
+
+    nonisolated private static func errorResponse(for error: Error) -> HTTPResponse {
+        let status: HTTPStatus
+        if let httpError = error as? HTTPError {
+            switch httpError {
+            case .headerTooLarge:
+                status = .headerTooLarge
+            case .bodyTooLarge:
+                status = .payloadTooLarge
+            case .unexpectedEOF, .readFailed:
+                status = .requestTimeout
+            default:
+                status = .badRequest
+            }
+        } else {
+            status = .internalServerError
+        }
+        return .error(status, message: error.localizedDescription)
+    }
+
+    nonisolated private static func readRequestBody(fd: Int32, request: HTTPRequestHead, prelude: Data) async throws -> Data? {
+        let framing = HTTPCodec.requestFraming(for: request)
+        switch framing {
+        case .knownLength(0):
+            return nil
+        default:
+            return try await runBlocking {
+                let reader = HTTPBodyReader(fd: fd, framing: framing, prelude: prelude)
+                return try reader.readAll(maxSize: 64 * 1024 * 1024)
+            }
+        }
+    }
+
+    nonisolated private static func writeResponse(fd: Int32, response: HTTPResponse) async throws {
+        try await runBlocking {
+            try writeResponseSync(fd: fd, response: response)
+        }
+    }
+
+    nonisolated private static func writeResponseSync(fd: Int32, response: HTTPResponse, headOnly: Bool = false) throws {
+        if headOnly {
+            try HTTPCodec.writeResponseHead(fd: fd, status: response.status, headers: response.headers)
+        } else {
+            try HTTPCodec.writeResponse(response, fd: fd)
+        }
+    }
+
+    nonisolated private static func runBlocking<T>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    continuation.resume(returning: try operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 

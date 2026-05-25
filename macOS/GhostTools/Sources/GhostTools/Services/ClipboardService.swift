@@ -3,6 +3,7 @@ import Foundation
 
 /// Service for managing clipboard operations between host and guest
 /// The guest always allows clipboard operations - the host controls sync policy
+@MainActor
 final class ClipboardService {
     static let shared = ClipboardService()
 
@@ -12,8 +13,8 @@ final class ClipboardService {
     /// Pasteboard types to check, in priority order (richest first)
     private static let typePriority: [NSPasteboard.PasteboardType] = [
         .png,
-        .tiff,
         .string,
+        .tiff,
     ]
 
     private init() {
@@ -42,7 +43,10 @@ final class ClipboardService {
     /// Gets the best available clipboard data and its UTI type
     /// - Returns: Tuple of (data, uti) or nil if clipboard is empty
     func getClipboardData() -> (data: Data, type: String)? {
-        for pbType in Self.typePriority {
+        var seenTypes = Set(Self.typePriority.map(\.rawValue))
+        let candidateTypes = Self.typePriority + (pasteboard.types ?? []).filter { seenTypes.insert($0.rawValue).inserted }
+
+        for pbType in candidateTypes {
             if pbType == .string {
                 if let text = pasteboard.string(forType: .string) {
                     return (Data(text.utf8), utiString(for: pbType))
@@ -66,7 +70,10 @@ final class ClipboardService {
         let pbType = pasteboardType(for: type)
         pasteboard.clearContents()
         let success: Bool
-        if pbType == .string, let text = String(data: data, encoding: .utf8) {
+        if pbType == .string {
+            guard let text = String(data: data, encoding: .utf8) else {
+                return false
+            }
             success = pasteboard.setString(text, forType: .string)
         } else {
             success = pasteboard.setData(data, forType: pbType)
@@ -102,6 +109,8 @@ final class ClipboardService {
         switch uti {
         case "public.png": return .png
         case "public.tiff": return .tiff
+        case "public.jpeg": return NSPasteboard.PasteboardType("public.jpeg")
+        case "public.rtf": return .rtf
         case "public.utf8-plain-text": return .string
         default: return NSPasteboard.PasteboardType(uti)
         }

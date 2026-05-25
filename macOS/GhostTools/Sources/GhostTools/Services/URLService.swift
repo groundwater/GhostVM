@@ -2,7 +2,7 @@ import Foundation
 
 /// Service for managing URLs to be opened on the host
 final class URLService {
-    static let shared = URLService()
+    nonisolated(unsafe) static let shared = URLService()
 
     /// URLs queued for opening on host
     private var pendingURLs: [URL] = []
@@ -15,7 +15,7 @@ final class URLService {
         lock.lock()
         pendingURLs.append(url)
         lock.unlock()
-        EventPushServer.shared.pushEvent(.urls([url.absoluteString]))
+        EventPushService.shared.pushEvent(.urls([url.absoluteString]))
         log("[URLService] Queued URL: \(url.absoluteString)")
     }
 

@@ -33,9 +33,9 @@ final class LogService: @unchecked Sendable {
 }
 
 /// Global logging function that prints locally, buffers for host polling,
-/// and pushes to host via EventPushServer
+/// and pushes to host via EventPushService
 func log(_ message: String) {
     print(message)
     LogService.shared.append(message)
-    EventPushServer.shared.pushEvent(.log(message))
+    EventPushService.shared.pushEvent(.log(message))
 }

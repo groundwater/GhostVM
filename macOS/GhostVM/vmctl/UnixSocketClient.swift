@@ -1,5 +1,6 @@
 import Foundation
 import GhostVMKit
+import GhostHTTP
 
 /// Synchronous HTTP/1.1 client over a Unix domain socket.
 /// Blocking I/O is fine for CLI usage.
@@ -73,57 +74,24 @@ struct UnixSocketClient {
             throw VMError.message("Failed to connect to socket at \(socketPath): errno \(errno)")
         }
 
-        // Build HTTP request
-        var requestStr = "\(method) \(path) HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
-        if let body = body {
-            requestStr += "Content-Length: \(body.count)\r\n"
-            if let ct = contentType {
-                requestStr += "Content-Type: \(ct)\r\n"
-            }
+        var headers = HTTPHeaders()
+        if let contentType {
+            headers["Content-Type"] = contentType
         }
-        requestStr += "\r\n"
-
-        // Write request
-        let headerData = Data(requestStr.utf8)
-        try headerData.withUnsafeBytes { ptr in
-            let written = Darwin.write(fd, ptr.baseAddress!, headerData.count)
-            guard written == headerData.count else {
-                throw VMError.message("Failed to write request headers")
-            }
-        }
-        if let body = body, !body.isEmpty {
-            try body.withUnsafeBytes { ptr in
-                let written = Darwin.write(fd, ptr.baseAddress!, body.count)
-                guard written == body.count else {
-                    throw VMError.message("Failed to write request body")
-                }
-            }
-        }
-
-        // Signal we're done writing
-        Darwin.shutdown(fd, SHUT_WR)
-
-        // Read response until EOF
-        var responseData = Data()
-        var buffer = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let n = Darwin.read(fd, &buffer, buffer.count)
-            if n <= 0 { break }
-            responseData.append(contentsOf: buffer[0..<n])
-        }
-
-        guard !responseData.isEmpty else {
-            throw VMError.message("Empty response from server")
-        }
-
-        // Parse using GhostVMKit's HTTPResponseParser
-        let (statusCode, headers, bodyData) = try HTTPResponseParser.parseBinaryWithHeaders(responseData)
-        let ct = headers["Content-Type"] ?? "application/octet-stream"
+        let response = try HTTPClient.performRequest(
+            fd: fd,
+            method: method,
+            path: path,
+            headers: headers,
+            body: body
+        )
+        let headerMap = response.head.headers.dictionary
+        let ct = response.head.header("Content-Type") ?? "application/octet-stream"
 
         return HTTPResponse(
-            statusCode: statusCode,
-            headers: headers,
-            body: bodyData ?? Data(),
+            statusCode: response.head.status.rawValue,
+            headers: headerMap,
+            body: response.body,
             contentType: ct
         )
     }

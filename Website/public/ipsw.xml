@@ -16,13 +16,13 @@
 		</dict>
 		<dict>
 			<key>ProductVersion</key>
-			<string>26.3.2</string>
+			<string>26.4.1</string>
 			<key>BuildVersion</key>
-			<string>25D2140</string>
+			<string>25E253</string>
 			<key>FirmwareURL</key>
-			<string>https://updates.cdn-apple.com/2026WinterFCS/fullrestores/047-94879/40A2B65E-4E49-4EAA-8BEC-62A305007488/UniversalMac_26.3.2_25D2140_Restore.ipsw</string>
+			<string>https://updates.cdn-apple.com/2026WinterFCS/fullrestores/122-28781/DCB2FF13-06CB-44C2-BCA2-DFCAF3521D46/UniversalMac_26.4.1_25E253_Restore.ipsw</string>
 			<key>FirmwareSHA1</key>
-			<string>338037f50ea1d6b39e7e9f82a5276e8b1f693ee8</string>
+			<string>03078f4af82bff5473398ca49f99288c76253fe8</string>
 		</dict>
 	</array>
 </dict>
