@@ -22,6 +22,20 @@
     </item>
     -->
     <item>
+      <title>GhostVM 2.11.0</title>
+      <pubDate>Thu, 16 Apr 2026 12:34:16 -0700</pubDate>
+      <sparkle:version>2.11.0</sparkle:version>
+      <sparkle:shortVersionString>2.11.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+      <description><![CDATA[<ul><li>Fix --headless flag and add vmctl entitlements for headless VM support</li></ul>]]></description>
+      <enclosure
+        url="https://github.com/groundwater/GhostVM/releases/download/v2.11.0/GhostVM-2.11.0.dmg"
+        type="application/octet-stream"
+        sparkle:edSignature="rba3YXg29rSs//yoh/YzwrUhg+2c3Qrd9qiIbX/ipBMqHHJsbnz/aMhq6NyKTslS3fDQx8/uqIto9W6ZHlBADA=="
+        length="32398124"
+      />
+    </item>
+    <item>
       <title>GhostVM 2.10.0</title>
       <pubDate>Mon, 13 Apr 2026 23:44:17 -0700</pubDate>
       <sparkle:version>2.10.0</sparkle:version>
