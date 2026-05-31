@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import Combine
 import GhostVMKit
+import os
 
 /// Represents the state of a file transfer
 public enum FileTransferState: Equatable {
@@ -47,6 +48,8 @@ public struct FileTransfer: Identifiable {
 /// Service for managing file transfers between host and guest VM
 @MainActor
 public final class FileTransferService: ObservableObject {
+    private static let logger = Logger(subsystem: "org.ghostvm.ghostvm", category: "FileTransfer")
+
     /// Active transfers
     @Published public private(set) var transfers: [FileTransfer] = []
 
@@ -198,7 +201,7 @@ public final class FileTransferService: ObservableObject {
         }
     }
 
-    /// Fetch a file from the guest VM and save to host
+    /// Fetch a file from the guest VM and save to host (streamed to disk with progress)
     /// - Parameter guestPath: Path in the guest to fetch
     /// - Parameter savePanel: Whether to show a save panel (true) or save to Downloads (false)
     public func fetchFile(at guestPath: String, showSavePanel: Bool = true) {
@@ -217,42 +220,68 @@ public final class FileTransferService: ObservableObject {
 
         Task {
             do {
-                updateTransferState(id: transferId, state: .transferring(progress: 0.5))
-
-                let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
-
-                // Determine save location
+                // Determine save location before starting the transfer
+                let suggestedName = filename
                 let saveURL: URL
                 if showSavePanel {
-                    guard let url = await showSavePanelAsync(suggestedFilename: fetchedFilename) else {
+                    guard let url = await showSavePanelAsync(suggestedFilename: suggestedName) else {
                         updateTransferState(id: transferId, state: .failed(error: "Save cancelled"))
                         updateIsTransferring()
                         return
                     }
                     saveURL = url
                 } else {
-                    // Save to Downloads
                     let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
-                    saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
+                    saveURL = downloadsURL.appendingPathComponent(suggestedName)
                 }
 
-                // Write file
-                try data.write(to: saveURL)
-                Self.applyQuarantine(to: saveURL)
+                // Stream directly to a temp file, then move to final location
+                let tempURL = saveURL.appendingPathExtension("ghostvm-partial")
 
-                // Apply permissions if provided
+                updateTransferState(id: transferId, state: .transferring(progress: 0.0))
+
+                let (fetchedFilename, permissions) = try await client.fetchFile(
+                    at: guestPath,
+                    to: tempURL
+                ) { [weak self] progress in
+                    Task { @MainActor in
+                        self?.updateTransferState(id: transferId, state: .transferring(progress: progress))
+                    }
+                }
+
+                // Move temp file to final location (use fetched filename if save panel wasn't shown)
+                var finalURL = saveURL
+                if !showSavePanel {
+                    let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+                    finalURL = downloadsURL.appendingPathComponent(fetchedFilename)
+                }
+                if FileManager.default.fileExists(atPath: finalURL.path) {
+                    try FileManager.default.removeItem(at: finalURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: finalURL)
+
+                Self.applyQuarantine(to: finalURL)
+
                 if let permissions = permissions {
-                    try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: saveURL.path)
+                    try? FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: finalURL.path)
                 }
 
-                updateTransferState(id: transferId, state: .completed(path: saveURL.path))
+                updateTransferState(id: transferId, state: .completed(path: finalURL.path))
 
-                // Reveal in Finder (only for single-file fetch with save panel)
                 if showSavePanel {
-                    NSWorkspace.shared.activateFileViewerSelecting([saveURL])
+                    NSWorkspace.shared.activateFileViewerSelecting([finalURL])
                 }
 
             } catch {
+                // Clean up any partial download from a failed/interrupted fetch.
+                // tempURL is constructed deterministically as saveURL+".ghostvm-partial"
+                // but at this point saveURL may not have been computed yet on the
+                // early-cancel path; we best-effort scan the candidate locations.
+                let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
+                if let downloadsURL {
+                    let candidate = downloadsURL.appendingPathComponent(filename).appendingPathExtension("ghostvm-partial")
+                    try? FileManager.default.removeItem(at: candidate)
+                }
                 updateTransferState(id: transferId, state: .failed(error: error.localizedDescription))
                 lastError = "Fetch failed: \(error.localizedDescription)"
             }
@@ -271,10 +300,9 @@ public final class FileTransferService: ObservableObject {
 
     /// Fetch all queued files from the guest and save to Downloads
     public func fetchAllGuestFiles() {
-        NSLog("[FileTransfer] fetchAllGuestFiles called, ghostClient=%@, queuedPaths=%d",
-              ghostClient != nil ? "present" : "NIL", queuedGuestFilePaths.count)
+        Self.logger.info("fetchAllGuestFiles called, ghostClient=\(self.ghostClient != nil ? "present" : "NIL", privacy: .public), queuedPaths=\(self.queuedGuestFilePaths.count)")
         guard let client = ghostClient else {
-            NSLog("[FileTransfer] ERROR: ghostClient is nil — cannot fetch files")
+            Self.logger.error("fetchAllGuestFiles: ghostClient is nil — cannot fetch files")
             lastError = "Not connected to guest"
             return
         }
@@ -282,10 +310,10 @@ public final class FileTransferService: ObservableObject {
         // Use the file paths we already have from the event stream
         // instead of making a redundant HTTP round-trip via listGuestFiles()
         let files = queuedGuestFilePaths
-        NSLog("[FileTransfer] Using %d file path(s) from event stream: %@", files.count, files.description)
+        Self.logger.info("fetchAllGuestFiles: using \(files.count) file path(s): \(files.description, privacy: .public)")
 
         guard !files.isEmpty else {
-            NSLog("[FileTransfer] No files to fetch — clearing stale toolbar state")
+            Self.logger.info("fetchAllGuestFiles: no files to fetch — clearing stale toolbar state")
             queuedGuestFilePaths = []
             queuedGuestFileCount = 0
             return
@@ -295,13 +323,25 @@ public final class FileTransferService: ObservableObject {
             var savedURLs: [URL] = []
             var failedPaths: [String] = []
             let downloadsURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+            Self.logger.info("fetchAllGuestFiles: downloadsURL=\(downloadsURL.path, privacy: .public)")
 
             for guestPath in files {
+                let tempURL = downloadsURL.appendingPathComponent(UUID().uuidString + ".ghostvm-partial")
                 do {
-                    NSLog("[FileTransfer] Fetching: %@", guestPath)
-                    let (data, fetchedFilename, permissions) = try await client.fetchFile(at: guestPath)
+                    Self.logger.info("fetchAllGuestFiles: fetching \(guestPath, privacy: .public) → temp \(tempURL.path, privacy: .public)")
+                    let (fetchedFilename, permissions) = try await client.fetchFile(
+                        at: guestPath,
+                        to: tempURL
+                    ) { _ in /* batch fetch — no per-file progress UI */ }
+                    Self.logger.info("fetchAllGuestFiles: client.fetchFile returned filename=\(fetchedFilename, privacy: .public)")
+
                     let saveURL = downloadsURL.appendingPathComponent(fetchedFilename)
-                    try data.write(to: saveURL)
+                    if FileManager.default.fileExists(atPath: saveURL.path) {
+                        Self.logger.info("fetchAllGuestFiles: removing existing \(saveURL.path, privacy: .public)")
+                        try FileManager.default.removeItem(at: saveURL)
+                    }
+                    Self.logger.info("fetchAllGuestFiles: moveItem \(tempURL.path, privacy: .public) → \(saveURL.path, privacy: .public)")
+                    try FileManager.default.moveItem(at: tempURL, to: saveURL)
                     Self.applyQuarantine(to: saveURL)
 
                     if let permissions = permissions {
@@ -309,9 +349,10 @@ public final class FileTransferService: ObservableObject {
                     }
 
                     savedURLs.append(saveURL)
-                    NSLog("[FileTransfer] Fetched: %@", fetchedFilename)
+                    Self.logger.info("fetchAllGuestFiles: fetched \(fetchedFilename, privacy: .public) → \(saveURL.path, privacy: .public)")
                 } catch {
-                    NSLog("[FileTransfer] Failed to fetch %@: %@", guestPath, error.localizedDescription)
+                    Self.logger.error("fetchAllGuestFiles: failed to fetch \(guestPath, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    try? FileManager.default.removeItem(at: tempURL)
                     failedPaths.append(URL(fileURLWithPath: guestPath).lastPathComponent)
                 }
             }
@@ -327,14 +368,14 @@ public final class FileTransferService: ObservableObject {
                     try await client.clearFileQueue()
                     self.queuedGuestFilePaths = []
                     self.queuedGuestFileCount = 0
-                    NSLog("[FileTransfer] Cleared guest file queue")
+                    Self.logger.info("fetchAllGuestFiles: cleared guest file queue")
                 } catch {
-                    NSLog("[FileTransfer] ERROR clearing queue: %@", error.localizedDescription)
+                    Self.logger.error("fetchAllGuestFiles: failed clearing queue: \(error.localizedDescription, privacy: .public)")
                     self.lastError = "Failed to clear queue: \(error.localizedDescription)"
                 }
             } else {
                 self.lastError = "Failed to fetch: \(failedPaths.joined(separator: ", "))"
-                NSLog("[FileTransfer] %d file(s) failed, queue NOT cleared", failedPaths.count)
+                Self.logger.error("fetchAllGuestFiles: \(failedPaths.count) file(s) failed, queue NOT cleared")
             }
         }
     }

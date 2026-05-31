@@ -1,7 +1,8 @@
 import Foundation
 import AppKit
 import Combine
-import Virtualization
+@preconcurrency import Virtualization
+import GhostHTTP
 import GhostVMKit
 
 /// A guest port with optional process name.
@@ -17,8 +18,9 @@ public struct GuestForegroundApp: Equatable {
     public let icon: NSImage?
 }
 
-/// Persistent event stream from guest via vsock port 5003.
-/// Reads NDJSON lines and dispatches: file queue updates, URL opens, log messages.
+/// Persistent event stream from guest via the unified HTTP server on vsock port 5000.
+/// Uses HTTP upgrade, then reads NDJSON lines and dispatches: file queue updates,
+/// URL opens, log messages.
 @MainActor
 public final class EventStreamService: ObservableObject {
     @Published public private(set) var queuedGuestFiles: [String] = []
@@ -30,8 +32,7 @@ public final class EventStreamService: ObservableObject {
 
     private var client: GhostClient?
     private var task: Task<Void, Never>?
-    private let port: UInt32 = 5003
-
+    private var currentConnection: VZVirtioSocketConnection?
     public init() {}
 
     public func start(client: GhostClient) {
@@ -45,6 +46,8 @@ public final class EventStreamService: ObservableObject {
     public func stop() {
         task?.cancel()
         task = nil
+        currentConnection?.close()
+        currentConnection = nil
         client = nil
         queuedGuestFiles = []
         detectedGuestPorts = []
@@ -60,27 +63,56 @@ public final class EventStreamService: ObservableObject {
         while !Task.isCancelled {
             guard let client = client else { break }
 
-            NSLog("EventStream: connecting to port %u...", port)
+            NSLog("EventStream: connecting to unified HTTP event stream...")
 
             do {
-                // IMPORTANT: Hold `connection` alive — dropping it closes the fd.
-                let connection = try await client.connectRaw(port: port)
+                let connection = try await client.connectRaw(port: 5000)
                 let fd = connection.fileDescriptor
+                currentConnection = connection
+                clearReceiveTimeout(fd: fd)
 
-                NSLog("EventStream: connected (fd=%d), reading NDJSON lines...", fd)
+                let upgraded: HTTPUpgradedConnection = try await withCheckedThrowingContinuation { continuation in
+                    DispatchQueue.global(qos: .utility).async {
+                        do {
+                            let upgraded = try HTTPClient.performUpgradeRequest(
+                                fd: fd,
+                                path: "/api/v1/event-stream",
+                                headers: [
+                                    "Host": "localhost",
+                                    "Upgrade": "event-stream",
+                                    "Connection": "Upgrade",
+                                ]
+                            )
+                            continuation.resume(returning: upgraded)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+
+                guard upgraded.responseHead.status == .switchingProtocols else {
+                    connection.close()
+                    throw GhostClientError.invalidResponse(upgraded.responseHead.status.rawValue)
+                }
+
+                NSLog("EventStream: upgraded (fd=%d), reading NDJSON lines...", fd)
 
                 // Read NDJSON lines on background queue.
                 // `connection` is captured to keep it alive.
                 await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                     DispatchQueue.global(qos: .utility).async { [weak self] in
-                        self?.readLines(fd: fd)
+                        self?.readLines(fd: fd, initialData: upgraded.prelude)
                         NSLog("EventStream: connection lost (EOF)")
                         connection.close()
                         continuation.resume()
                     }
                 }
+                if currentConnection?.fileDescriptor == fd {
+                    currentConnection = nil
+                }
             } catch {
                 NSLog("EventStream: connection failed: %@", error.localizedDescription)
+                currentConnection = nil
             }
 
             // Wait before retrying
@@ -93,17 +125,11 @@ public final class EventStreamService: ObservableObject {
     }
 
     /// Read NDJSON lines from the fd until EOF. Dispatches events to MainActor.
-    private nonisolated func readLines(fd: Int32) {
+    private nonisolated func readLines(fd: Int32, initialData: Data = Data()) {
         let bufferSize = 4096
-        var leftover = Data()
+        var leftover = initialData
         var buffer = [UInt8](repeating: 0, count: bufferSize)
-
         while true {
-            let n = Darwin.read(fd, &buffer, bufferSize)
-            if n <= 0 { break }
-
-            leftover.append(contentsOf: buffer[0..<n])
-
             // Process complete lines
             while let newlineIndex = leftover.firstIndex(of: 0x0A) { // \n
                 let lineData = leftover[leftover.startIndex..<newlineIndex]
@@ -114,7 +140,21 @@ public final class EventStreamService: ObservableObject {
 
                 dispatchEvent(line)
             }
+
+            let n = Darwin.read(fd, &buffer, bufferSize)
+            if n < 0 {
+                let err = errno
+                if err == EINTR || err == EAGAIN || err == EWOULDBLOCK { continue }
+                break
+            }
+            if n == 0 { break }
+            leftover.append(contentsOf: buffer[0..<n])
         }
+    }
+
+    private nonisolated func clearReceiveTimeout(fd: Int32) {
+        var noTimeout = timeval(tv_sec: 0, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &noTimeout, socklen_t(MemoryLayout<timeval>.size))
     }
 
     private nonisolated func dispatchEvent(_ jsonLine: String) {

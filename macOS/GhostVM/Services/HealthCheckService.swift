@@ -3,9 +3,8 @@ import Combine
 import Virtualization
 import GhostVMKit
 
-/// Persistent health check via vsock port 5002.
-/// Connects once, reads version line, then blocks on read until EOF.
-/// Connection close = unhealthy. Reconnects after a delay.
+/// Periodic health check via the unified HTTP server on vsock port 5000.
+/// Polls `/health` and treats success as healthy.
 @MainActor
 public final class HealthCheckService: ObservableObject {
     @Published public private(set) var status: GuestToolsStatus = .connecting
@@ -14,7 +13,6 @@ public final class HealthCheckService: ObservableObject {
 
     private var client: GhostClient?
     private var task: Task<Void, Never>?
-    private let port: UInt32 = 5002
     private var notFoundDeadline: Date?
     private var deadlineTask: Task<Void, Never>?
 
@@ -59,67 +57,21 @@ public final class HealthCheckService: ObservableObject {
         while !Task.isCancelled {
             guard let client = client else { break }
 
-            NSLog("HealthCheck: connecting to port %u...", port)
+            NSLog("HealthCheck: polling unified HTTP health endpoint...")
 
-            do {
-                // IMPORTANT: Hold `connection` alive — dropping it closes the fd.
-                let connection = try await client.connectRaw(port: port)
-                let fd = connection.fileDescriptor
-
-                NSLog("HealthCheck: connected, reading version (fd=%d)...", fd)
-
-                // Read version line on a background queue
-                let versionOK: Bool = await withCheckedContinuation { continuation in
-                    DispatchQueue.global(qos: .utility).async {
-                        var buffer = [UInt8](repeating: 0, count: 512)
-                        let n = Darwin.read(fd, &buffer, buffer.count - 1)
-                        NSLog("HealthCheck: version read n=%d", n)
-                        continuation.resume(returning: n > 0)
-                    }
-                }
-
-                if versionOK {
-                    NSLog("HealthCheck: CONNECTED")
-                    deadlineTask?.cancel()
-                    deadlineTask = nil
-                    notFoundDeadline = nil
-                    status = .connected
-
-                    // Block on read until EOF (guest disconnects or dies).
-                    // `connection` is captured by the closure to keep it alive.
-                    await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                        DispatchQueue.global(qos: .utility).async {
-                            var buf = [UInt8](repeating: 0, count: 1)
-                            while true {
-                                var pfd = pollfd(fd: fd, events: Int16(POLLIN | POLLHUP | POLLERR), revents: 0)
-                                let ret = poll(&pfd, 1, 5000) // 5-second timeout
-                                if ret > 0 {
-                                    if pfd.revents & Int16(POLLHUP | POLLERR) != 0 {
-                                        NSLog("HealthCheck: connection hangup/error detected via poll")
-                                        break
-                                    }
-                                    let n = Darwin.read(fd, &buf, 1)
-                                    if n <= 0 { break }
-                                } else if ret < 0 {
-                                    break // poll error
-                                }
-                                // ret == 0: timeout, loop back and poll again
-                            }
-                            NSLog("HealthCheck: connection lost (EOF)")
-                            connection.close()
-                            continuation.resume()
-                        }
-                    }
-
-                    // Connection lost — restart deadline
+            let isHealthy = await client.checkHealth()
+            if isHealthy {
+                NSLog("HealthCheck: CONNECTED")
+                deadlineTask?.cancel()
+                deadlineTask = nil
+                notFoundDeadline = nil
+                status = .connected
+            } else {
+                NSLog("HealthCheck: request failed")
+                if status == .connected {
                     status = .connecting
                     startNotFoundDeadline()
-                } else {
-                    NSLog("HealthCheck: version read failed, closing")
-                    connection.close()
                 }
-            } catch {
-                NSLog("HealthCheck: connection failed: %@", error.localizedDescription)
             }
 
             // Update status based on deadline (if deadline task already fired)

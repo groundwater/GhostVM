@@ -35,9 +35,11 @@ final class MockGhostClient: GhostClientProtocol {
         return "/guest/path/\(fileURL.lastPathComponent)"
     }
 
-    func fetchFile(at path: String) async throws -> (data: Data, filename: String, permissions: Int?) {
+    func fetchFile(at path: String, to destinationURL: URL, progress: @escaping (Double) -> Void) async throws -> (filename: String, permissions: Int?) {
         if let error = shouldThrow { throw error }
-        return (fetchedFileData, fetchedFilename, fetchedPermissions)
+        try fetchedFileData.write(to: destinationURL)
+        progress(1.0)
+        return (fetchedFilename, fetchedPermissions)
     }
 
     func listFiles() async throws -> [String] {

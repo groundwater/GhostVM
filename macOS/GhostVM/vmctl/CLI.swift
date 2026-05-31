@@ -45,6 +45,12 @@ struct CLI {
             } catch {
                 fail(error)
             }
+        case "suspend":
+            do {
+                try handleSuspend(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
         case "status":
             do {
                 try handleStatus(arguments: Array(arguments.dropFirst()))
@@ -69,9 +75,27 @@ struct CLI {
             } catch {
                 fail(error)
             }
+        case "clone":
+            do {
+                try handleClone(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
         case "remote":
             do {
                 try RemoteCommand.run(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
+        case "shell":
+            do {
+                try ShellCommand.run(arguments: Array(arguments.dropFirst()))
+            } catch {
+                fail(error)
+            }
+        case "vsock":
+            do {
+                try VsockCommand.run(arguments: Array(arguments.dropFirst()))
             } catch {
                 fail(error)
             }
@@ -247,6 +271,23 @@ struct CLI {
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
         try controller.stopVM(bundleURL: bundleURL)
+    }
+
+    private func handleSuspend(arguments: [String]) throws {
+        guard let bundleArg = arguments.first else {
+            throw VMError.message("Usage: vmctl suspend <bundle-path>")
+        }
+        let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
+        try controller.suspendVM(bundleURL: bundleURL)
+    }
+
+    private func handleClone(arguments: [String]) throws {
+        guard arguments.count >= 2 else {
+            throw VMError.message("Usage: vmctl clone <source-bundle-path> <new-name>")
+        }
+        let bundleURL = try resolveBundleURL(argument: arguments[0], mustExist: true)
+        let newURL = try controller.cloneVM(bundleURL: bundleURL, newName: arguments[1])
+        print("Cloned '\(controller.displayName(for: bundleURL))' to '\(newURL.path)' (APFS copy-on-write).")
     }
 
     private func handleStatus(arguments: [String]) throws {
@@ -457,11 +498,14 @@ Commands:
   install <bundle-path>
   start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
   stop <bundle-path>
+  suspend <bundle-path>
   status <bundle-path>
   resume <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
   discard-suspend <bundle-path>
+  clone <source-bundle-path> <new-name>  Clone a VM (APFS copy-on-write, instant)
   snapshot <bundle-path> list
   snapshot <bundle-path> <create|revert|delete> <snapshot-name>
+  shell --name <VMName> [--command /bin/bash]  Interactive terminal on guest
   remote --name <VMName> [--json] <subcommand> [args...]
   remote --socket <path> [--json] <subcommand> [args...]
 
@@ -482,9 +526,11 @@ Examples:
   vmctl start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
   vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
   vmctl stop ~/VMs/sandbox.GhostVM
+  vmctl suspend ~/VMs/sandbox.GhostVM                  # Save state and suspend
   vmctl status ~/VMs/sandbox.GhostVM
   vmctl resume ~/VMs/sandbox.GhostVM                   # Resume from suspended state
   vmctl discard-suspend ~/VMs/sandbox.GhostVM          # Discard suspended state
+  vmctl clone ~/VMs/sandbox.GhostVM sandbox-clone      # Clone VM (instant, APFS COW)
   vmctl snapshot ~/VMs/sandbox.GhostVM list
   vmctl snapshot ~/VMs/sandbox.GhostVM create clean
   vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
@@ -500,7 +546,6 @@ Examples:
 Notes:
   - After installation, enable Remote Login (SSH) inside the guest for convenient headless access.
   - Apple's EULA requires macOS guests to run on Apple-branded hardware.
-  - Use Virtual Machine > Suspend menu (Cmd+S) to suspend a running VM.
 """
         print(help)
         exit(exitCode)

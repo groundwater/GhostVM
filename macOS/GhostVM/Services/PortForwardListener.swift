@@ -1,4 +1,5 @@
 import Foundation
+import GhostHTTP
 import GhostVMKit
 import Virtualization
 import os
@@ -30,10 +31,9 @@ enum PortForwardError: Error, LocalizedError {
 /// Listens on a host TCP port and forwards connections to the guest VM via vsock.
 ///
 /// Each incoming TCP connection triggers:
-/// 1. Vsock connection to guest on port 5001
-/// 2. Send "CONNECT <guestPort>\r\n"
-/// 3. Wait for "OK\r\n"
-/// 4. Bridge TCP <-> vsock bidirectionally
+/// 1. Vsock connection to guest on port 5000
+/// 2. HTTP upgrade request to `/api/v1/tunnel-connect`
+/// 3. Raw byte bridge after `101 Switching Protocols`
 final class PortForwardListener: @unchecked Sendable {
     private static let logger = Logger(subsystem: "org.ghostvm.ghostvm", category: "PortForwardListener")
     private let hostPort: UInt16
@@ -48,8 +48,8 @@ final class PortForwardListener: @unchecked Sendable {
     private var activeConnections = 0
     private let connectionLock = NSLock()
 
-    /// The vsock port where TunnelServer listens in the guest
-    private let tunnelServerPort: UInt32 = 5001
+    /// The unified guest HTTP server port.
+    private let tunnelServerPort: UInt32 = 5000
 
     init(
         hostPort: UInt16,
@@ -243,78 +243,46 @@ final class PortForwardListener: @unchecked Sendable {
         let tcpIO = AsyncVSockIO(fd: tcpFd, ownsFD: false)
         let vsockIO = BlockingVSockChannel(fd: vsockFd, ownsFD: false)
 
-        // Send CONNECT command
-        Self.logger.debug("Sending CONNECT command id=\(connectionID, privacy: .public) guestPort=\(self.guestPort)")
         do {
-            try await vsockIO.writeAll(Data("CONNECT \(guestPort)\r\n".utf8))
-            Self.logger.debug("CONNECT command write completed id=\(connectionID, privacy: .public)")
-        } catch {
-            reportOperationalError(
-                phase: .handshakeWrite,
-                message: describe(error: error),
-                error: error,
-                connectionID: connectionID
-            )
-            return
-        }
-
-        let responseData: Data
-        do {
-            responseData = try await readConnectResponse(vsockIO)
-            Self.logger.debug("CONNECT response bytes read id=\(connectionID, privacy: .public) bytes=\(responseData.count)")
-        } catch let error as ConnectReadError {
-            switch error {
-            case .timeout:
-                reportOperationalError(
-                    phase: .handshakeRead,
-                    message: "Timeout waiting for CONNECT response",
-                    error: error,
-                    connectionID: connectionID
-                )
-                return
-            case .eof:
-                reportOperationalError(
-                    phase: .handshakeRead,
-                    message: "Failed to read CONNECT response: bytesRead=0 EOF",
-                    error: error,
-                    connectionID: connectionID
-                )
-                return
-            case .transport(let ioError):
-                reportOperationalError(
-                    phase: .handshakeRead,
-                    message: describe(error: ioError),
-                    error: ioError,
-                    connectionID: connectionID
-                )
-                return
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let flags = fcntl(vsockFd, F_GETFL, 0)
+                        if flags >= 0 && (flags & O_NONBLOCK) != 0 {
+                            _ = fcntl(vsockFd, F_SETFL, flags & ~O_NONBLOCK)
+                        }
+                        let upgraded = try HTTPClient.performUpgradeRequest(
+                            fd: vsockFd,
+                            path: "/api/v1/tunnel-connect",
+                            headers: [
+                                "Host": "localhost",
+                                "Upgrade": "tunnel",
+                                "Connection": "Upgrade",
+                                "Tunnel-Port": "\(self.guestPort)",
+                            ]
+                        )
+                        guard upgraded.responseHead.status == .switchingProtocols else {
+                            throw PortForwardError.protocolError("Guest refused tunnel upgrade with status \(upgraded.responseHead.status.rawValue)")
+                        }
+                        try self.writePrelude(upgraded.prelude, to: tcpFd)
+                        continuation.resume(returning: ())
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
             }
+            Self.logger.debug("Tunnel upgrade completed id=\(connectionID, privacy: .public) guestPort=\(self.guestPort)")
         } catch {
+            let phase: PortForwardRuntimeError.Phase
+            if error is PortForwardError {
+                phase = .handshakeProtocol
+            } else {
+                phase = .handshakeRead
+            }
             reportOperationalError(
-                phase: .handshakeRead,
+                phase: phase,
                 message: describe(error: error),
                 error: error,
-                connectionID: connectionID
-            )
-            return
-        }
-
-        guard let response = String(data: responseData, encoding: .utf8) else {
-            reportOperationalError(
-                phase: .handshakeProtocol,
-                message: "Invalid CONNECT response encoding",
-                connectionID: connectionID
-            )
-            return
-        }
-
-        let trimmed = response.trimmingCharacters(in: .whitespacesAndNewlines)
-        Self.logger.debug("CONNECT response id=\(connectionID, privacy: .public): \(trimmed, privacy: .public)")
-
-        if trimmed != "OK" {
-            reportOperationalError(
-                phase: .handshakeProtocol,
-                message: "Guest refused connection: '\(trimmed)'",
                 connectionID: connectionID
             )
             return
@@ -354,8 +322,13 @@ final class PortForwardListener: @unchecked Sendable {
             }
 
             let described = describe(error: error)
-            Self.logger.fault("Unexpected bridge error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort): \(described, privacy: .public)")
-            fatalError("[PortForwardListener] Bridge failed unexpectedly: \(described)")
+            Self.logger.error("Unexpected bridge error id=\(connectionID, privacy: .public) hostPort=\(self.hostPort) guestPort=\(self.guestPort): \(described, privacy: .public)")
+            reportOperationalError(
+                phase: .bridge,
+                message: described,
+                error: error,
+                connectionID: connectionID
+            )
         }
     }
 
@@ -382,40 +355,6 @@ final class PortForwardListener: @unchecked Sendable {
         }
     }
 
-    private enum ConnectReadError: Error {
-        case timeout
-        case eof
-        case transport(AsyncVSockIOError)
-    }
-
-    private func readConnectResponse(_ io: some SocketChannel) async throws -> Data {
-        try await withThrowingTaskGroup(of: Data.self) { group in
-            group.addTask {
-                do {
-                    guard let data = try await io.read(maxBytes: 255), !data.isEmpty else {
-                        throw ConnectReadError.eof
-                    }
-                    return data
-                } catch let error as AsyncVSockIOError {
-                    throw ConnectReadError.transport(error)
-                }
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: 5_000_000_000)
-                throw ConnectReadError.timeout
-            }
-
-            do {
-                let first = try await group.next()!
-                group.cancelAll()
-                return first
-            } catch {
-                group.cancelAll()
-                throw error
-            }
-        }
-    }
-
     private func describe(error: Error) -> String {
         if let ioError = error as? AsyncVSockIOError {
             switch ioError {
@@ -432,6 +371,9 @@ final class PortForwardListener: @unchecked Sendable {
             case .cancelled:
                 return "cancelled"
             }
+        }
+        if let portError = error as? PortForwardError {
+            return portError.localizedDescription
         }
         return String(describing: error)
     }
@@ -469,5 +411,28 @@ final class PortForwardListener: @unchecked Sendable {
             }
         }
         onOperationalError(runtimeError)
+    }
+
+    private func writePrelude(_ data: Data, to fd: Int32) throws {
+        guard !data.isEmpty else { return }
+
+        var offset = 0
+        while offset < data.count {
+            let written = data.withUnsafeBytes { ptr in
+                Darwin.write(fd, ptr.baseAddress! + offset, data.count - offset)
+            }
+            if written > 0 {
+                offset += written
+                continue
+            }
+            if written == 0 {
+                throw PortForwardError.connectFailed("short write while replaying tunnel prelude")
+            }
+            let err = errno
+            if err == EINTR {
+                continue
+            }
+            throw PortForwardError.connectFailed("failed to replay tunnel prelude: errno \(err)")
+        }
     }
 }

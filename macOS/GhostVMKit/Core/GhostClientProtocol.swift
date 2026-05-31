@@ -6,7 +6,7 @@ public protocol GhostClientProtocol {
     func getClipboard() async throws -> ClipboardGetResponse
     func setClipboard(data: Data, type: String) async throws
     func sendFile(fileURL: URL, relativePath: String?, batchID: String?, isLastInBatch: Bool, permissions: Int?, progressHandler: ((Double) -> Void)?) async throws -> String
-    func fetchFile(at path: String) async throws -> (data: Data, filename: String, permissions: Int?)
+    func fetchFile(at path: String, to destinationURL: URL, progress: @escaping (Double) -> Void) async throws -> (filename: String, permissions: Int?)
     func listFiles() async throws -> [String]
     func clearFileQueue() async throws
     func checkHealth() async -> Bool

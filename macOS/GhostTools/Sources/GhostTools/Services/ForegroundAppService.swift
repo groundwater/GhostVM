@@ -3,7 +3,7 @@ import AppKit
 /// Observes the frontmost application and pushes foreground-app events to the host.
 /// Events include the app name, bundle ID, and a 128x128 PNG icon (base64-encoded).
 /// A 500ms debounce prevents rapid Cmd+Tab from flooding the channel.
-final class ForegroundAppService {
+final class ForegroundAppService: @unchecked Sendable {
     static let shared = ForegroundAppService()
 
     private var observer: NSObjectProtocol?
@@ -25,12 +25,6 @@ final class ForegroundAppService {
             self?.pushCurrentApp()
         }
 
-        // Re-push when a new host client connects (they missed the initial push)
-        EventPushServer.shared.onClientConnected = { [weak self] in
-            print("[ForegroundAppService] Client connected, pushing current app")
-            self?.pushCurrentApp()
-        }
-
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -42,7 +36,6 @@ final class ForegroundAppService {
     }
 
     func stop() {
-        EventPushServer.shared.onClientConnected = nil
         if let obs = observer {
             NSWorkspace.shared.notificationCenter.removeObserver(obs)
             observer = nil
@@ -50,6 +43,10 @@ final class ForegroundAppService {
         debounceTimer?.invalidate()
         debounceTimer = nil
         previousBundleId = nil
+    }
+
+    func pushCurrentAppToConnectedClient() {
+        pushCurrentApp()
     }
 
     private func pushCurrentApp() {
@@ -122,6 +119,6 @@ final class ForegroundAppService {
             }
         }
 
-        EventPushServer.shared.pushEvent(.app(name: name, bundleId: bundleId, iconBase64: iconBase64))
+        EventPushService.shared.pushEvent(.app(name: name, bundleId: bundleId, iconBase64: iconBase64))
     }
 }

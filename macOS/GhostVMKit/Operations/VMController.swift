@@ -396,12 +396,20 @@ public final class VMController {
             throw VMError.message("Failed to create auxiliary storage: \(error.localizedDescription)")
         }
 
-        if !fileManager.createFile(atPath: layout.diskURL.path, contents: nil, attributes: nil) {
-            throw VMError.message("Failed to create disk image at \(layout.diskURL.path).")
+        // Create ASIF disk image for near-native SSD performance
+        let diskSizeGiB = max(1, requestedDiskBytes / (1024 * 1024 * 1024))
+        let diskutil = Process()
+        diskutil.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+        diskutil.arguments = ["image", "create", "blank",
+                              "--fs", "none",
+                              "--format", "ASIF",
+                              "--size", "\(diskSizeGiB)GiB",
+                              layout.diskURL.path]
+        try diskutil.run()
+        diskutil.waitUntilExit()
+        guard diskutil.terminationStatus == 0 else {
+            throw VMError.message("Failed to create ASIF disk image (exit \(diskutil.terminationStatus)).")
         }
-        let handle = try FileHandle(forWritingTo: layout.diskURL)
-        try handle.truncate(atOffset: requestedDiskBytes)
-        try handle.close()
 
         // Handle legacy single shared folder
         var sharedFolderAbsolute: String?
@@ -1060,6 +1068,51 @@ public final class VMController {
 
     public func discardSuspend(name: String) throws {
         try discardSuspend(bundleURL: bundleURL(for: name))
+    }
+
+    /// Suspend a running helper-backed VM by asking its helper process to save state.
+    /// Reuses the existing `com.ghostvm.helper.suspend.<hash>` notification that the
+    /// helper already listens for, then blocks until the helper exits and the saved
+    /// suspend state is verified on disk.
+    public func suspendVM(bundleURL: URL, timeout: TimeInterval = 300) throws {
+        let standardized = bundleURL.standardizedFileURL
+        let layout = try layoutForExistingBundle(at: standardized)
+        let entry = try loadEntry(for: standardized)
+        let vmName = displayName(for: standardized)
+
+        guard let pid = entry.runningPID else {
+            print(entry.isSuspended ? "VM '\(vmName)' is already suspended." : "VM '\(vmName)' does not appear to be running.")
+            return
+        }
+
+        let bundlePathHash = standardized.path.stableHash
+        print("Sending suspend request to VM '\(vmName)' (PID \(pid)).")
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.ghostvm.helper.suspend.\(bundlePathHash)"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 {
+                let config = try VMConfigStore(layout: layout).load()
+                guard config.isSuspended, fileManager.fileExists(atPath: layout.suspendStateURL.path) else {
+                    throw VMError.message("VM '\(vmName)' exited before saving suspended state.")
+                }
+                removeVMLock(at: layout.pidFileURL)
+                print("VM '\(vmName)' suspended.")
+                return
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+
+        throw VMError.message("Timed out waiting for VM '\(vmName)' to suspend.")
+    }
+
+    public func suspendVM(name: String, timeout: TimeInterval = 300) throws {
+        try suspendVM(bundleURL: bundleURL(for: name), timeout: timeout)
     }
 
     // MARK: - CLI Start/Resume (blocking)

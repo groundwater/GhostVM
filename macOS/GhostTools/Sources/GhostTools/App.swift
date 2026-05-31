@@ -59,9 +59,7 @@ struct GhostToolsApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let logger = Logger(subsystem: "org.ghostvm.ghosttools", category: "App")
     private var statusItem: NSStatusItem?
-    private var server: VsockServer?
-    private var tunnelServer: TunnelServer?
-    private var healthServer: HealthServer?
+    private var server: VsockListener?
     private var isServerRunning = false
     private var lastTunnelError: String?
     private var isFilePickerOpen = false
@@ -165,9 +163,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         startServer()
-        startTunnelServer()
-        startHealthServer()
-        startEventPushServer()
+        configureTunnelService()
+        startEventPushService()
         startPortScanner()
         startForegroundAppService()
         AutoUpdateService.shared.start(appDelegate: self)
@@ -684,9 +681,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ForegroundAppService.shared.stop()
         PortScannerService.shared.stop()
         server?.stop()
-        tunnelServer?.stop()
-        healthServer?.stop()
-        EventPushServer.shared.stop()
+        TunnelService.shared.stop()
+        EventPushService.shared.stop()
     }
 
     // MARK: - URL Handling
@@ -907,89 +903,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startServer() {
         print("[GhostTools] startServer() called")
-        Task {
-            do {
-                print("[GhostTools] Creating router...")
-                let router = Router()
-                print("[GhostTools] Creating VsockServer on port 5000...")
-                server = VsockServer(port: 5000, router: router)
+        do {
+            let router = Router()
 
-                server?.onStatusChange = { [weak self] running in
-                    Task { @MainActor in
-                        print("[GhostTools] Server status changed: \(running)")
-                        self?.isServerRunning = running
-                        self?.updateStatusIcon(connected: running)
-                        self?.updateMenu()
-                    }
+            print("[GhostTools] Creating VsockListener on port 5000...")
+            let srv = VsockListener(port: 5000, router: router)
+            srv.onStatusChange = { [weak self] running in
+                Task { @MainActor in
+                    print("[GhostTools] Server status changed: \(running)")
+                    self?.isServerRunning = running
+                    self?.updateStatusIcon(connected: running)
+                    self?.updateMenu()
                 }
-
-                print("[GhostTools] Starting vsock server...")
-                try await server?.start()
-                print("[GhostTools] Server started successfully")
-            } catch {
-                print("[GhostTools] Failed to start server: \(error)")
-                print("[GhostTools] Error details: \(String(describing: error))")
-                isServerRunning = false
-                updateStatusIcon(connected: false)
-                updateMenu()
             }
+            server = srv
+            try srv.start()
+
+            print("[GhostTools] Server started successfully")
+        } catch {
+            print("[GhostTools] Failed to start server: \(error)")
+            print("[GhostTools] Error details: \(String(describing: error))")
+            isServerRunning = false
+            updateStatusIcon(connected: false)
+            updateMenu()
         }
     }
 
-    private func startTunnelServer() {
-        Self.logger.info("startTunnelServer() called")
-        Task {
-            do {
-                tunnelServer = TunnelServer()
-                tunnelServer?.onOperationalError = { [weak self] runtimeError in
-                    Task { @MainActor in
-                        self?.lastTunnelError = runtimeError.message
-                        self?.updateMenu()
-                    }
-                    Self.logger.error("Tunnel operational error phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(runtimeError.targetPort ?? 0): \(runtimeError.message, privacy: .public)")
-                }
-                tunnelServer?.onConnectionSuccess = { [weak self] in
-                    Task { @MainActor in
-                        self?.lastTunnelError = nil
-                        self?.updateMenu()
-                    }
-                }
-                Self.logger.info("Starting tunnel server on vsock port 5001...")
-                try await tunnelServer?.start()
-                Self.logger.info("Tunnel server started successfully")
-            } catch {
-                let message = "Failed to start tunnel server: \(error.localizedDescription)"
-                Self.logger.error("\(message, privacy: .public)")
-                lastTunnelError = message
-                updateMenu()
+    private func configureTunnelService() {
+        Self.logger.info("configureTunnelService() called")
+        let srv = TunnelService.shared
+        srv.onOperationalError = { [weak self] runtimeError in
+            Task { @MainActor in
+                self?.lastTunnelError = runtimeError.message
+                self?.updateMenu()
             }
+            Self.logger.error("Tunnel operational error phase=\(runtimeError.phase.rawValue, privacy: .public) targetPort=\(runtimeError.targetPort ?? 0): \(runtimeError.message, privacy: .public)")
+        }
+        srv.onConnectionSuccess = { [weak self] in
+            Task { @MainActor in
+                self?.lastTunnelError = nil
+                self?.updateMenu()
+            }
+        }
+        do {
+            try srv.start()
+            Self.logger.info("Tunnel service registered on unified HTTP server")
+        } catch {
+            let message = "Failed to configure tunnel service: \(error.localizedDescription)"
+            Self.logger.error("\(message, privacy: .public)")
+            lastTunnelError = message
+            updateMenu()
         }
     }
 
-    private func startHealthServer() {
-        print("[GhostTools] startHealthServer() called")
-        Task {
-            do {
-                healthServer = HealthServer()
-                print("[GhostTools] Starting health server on vsock port 5002...")
-                try await healthServer?.start()
-                print("[GhostTools] Health server started successfully")
-            } catch {
-                print("[GhostTools] Failed to start health server: \(error)")
-            }
-        }
-    }
-
-    private func startEventPushServer() {
-        print("[GhostTools] startEventPushServer() called")
-        Task {
-            do {
-                print("[GhostTools] Starting event push server on vsock port 5003...")
-                try await EventPushServer.shared.start()
-                print("[GhostTools] Event push server started successfully")
-            } catch {
-                print("[GhostTools] Failed to start event push server: \(error)")
-            }
+    private func startEventPushService() {
+        print("[GhostTools] startEventPushService() called")
+        do {
+            try EventPushService.shared.start()
+            print("[GhostTools] Event push service attached to unified HTTP server")
+        } catch {
+            print("[GhostTools] Failed to start event push server: \(error)")
         }
     }
 

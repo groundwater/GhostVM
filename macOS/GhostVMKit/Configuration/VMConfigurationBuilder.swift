@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Virtualization
+import os
 
 /// Builds VZVirtualMachineConfiguration from stored config and layout.
 public final class VMConfigurationBuilder {
@@ -34,11 +35,21 @@ public final class VMConfigurationBuilder {
         diskDevice.blockDeviceIdentifier = "macos-root"
         var storageDevices: [VZStorageDeviceConfiguration] = [diskDevice]
 
-        // Always attach GhostTools.dmg (user can eject if not needed)
+        // Attach GhostTools.dmg if available and readable (non-fatal if format unsupported)
         if let dmgURL = Self.findGhostToolsDMG() {
-            let dmgAttachment = try VZDiskImageStorageDeviceAttachment(url: dmgURL, readOnly: true)
-            let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: dmgAttachment)
-            storageDevices.append(usbDevice)
+            let logger = Logger(subsystem: "org.ghostvm", category: "VMConfigurationBuilder")
+            logger.info("GhostTools.dmg found at: \(dmgURL.path, privacy: .public)")
+            do {
+                let dmgAttachment = try VZDiskImageStorageDeviceAttachment(url: dmgURL, readOnly: true)
+                let usbDevice = VZUSBMassStorageDeviceConfiguration(attachment: dmgAttachment)
+                storageDevices.append(usbDevice)
+                logger.info("GhostTools.dmg attached as USB mass storage")
+            } catch {
+                logger.error("GhostTools.dmg skipped: \(error.localizedDescription, privacy: .public)")
+            }
+        } else {
+            let logger = Logger(subsystem: "org.ghostvm", category: "VMConfigurationBuilder")
+            logger.warning("GhostTools.dmg not found in any search path")
         }
 
         config.storageDevices = storageDevices
