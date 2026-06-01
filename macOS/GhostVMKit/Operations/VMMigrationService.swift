@@ -10,6 +10,7 @@ public final class VMMigrationService: NSObject {
     public enum MigrationError: Error, LocalizedError {
         case sourceNotFound
         case diskNotFound
+        case destinationMatchesSource
         case asifCreationFailed(Int32, String)
         case moveFailed(String)
         case cancelled
@@ -18,6 +19,7 @@ public final class VMMigrationService: NSObject {
             switch self {
             case .sourceNotFound: return "Source VM bundle not found"
             case .diskNotFound: return "Source disk.img not found"
+            case .destinationMatchesSource: return "Choose a different destination for the migrated VM"
             case .asifCreationFailed(let code, let detail):
                 return detail.isEmpty ? "Failed to create ASIF image (exit \(code))" : detail
             case .moveFailed(let msg): return "Failed to finalize migration: \(msg)"
@@ -52,7 +54,7 @@ public final class VMMigrationService: NSObject {
     ///
     /// - Parameters:
     ///   - source: URL of the existing .GhostVM bundle
-    ///   - destination: URL for the new .GhostVM bundle (must not exist)
+    ///   - destination: URL for the new .GhostVM bundle (must not be the source)
     ///   - progressHandler: Called with (fractionCompleted, statusMessage)
     ///   - outputHandler: Called with each line of diskutil output for terminal display
     public func migrate(
@@ -74,10 +76,11 @@ public final class VMMigrationService: NSObject {
         guard fileManager.fileExists(atPath: srcLayout.diskURL.path) else {
             throw MigrationError.diskNotFound
         }
+        try validateDestination(source: source, destination: destination)
 
         // Work in a temp directory, then atomic move to destination.
-        // This allows migrating to the same path (overwrite) safely,
-        // and ensures partial failures leave no debris at the destination.
+        // Partial failures only clean this temp bundle; the chosen destination
+        // is touched during finalization after conversion succeeds.
         let tempDir = fileManager.temporaryDirectory
             .appendingPathComponent("ghostvm-migration-\(UUID().uuidString).GhostVM")
         let dstLayout = VMFileLayout(bundleURL: tempDir)
@@ -104,7 +107,7 @@ public final class VMMigrationService: NSObject {
             try? fileManager.copyItem(at: srcLayout.customIconURL, to: dstLayout.customIconURL)
         }
 
-        if isCancelled { cleanup(destination); throw MigrationError.cancelled }
+        if isCancelled { cleanup(tempDir); throw MigrationError.cancelled }
 
         // Convert raw disk to ASIF using diskutil (handles sparsity natively)
         progressHandler(0.1, "Converting disk to ASIF format...")
@@ -209,6 +212,21 @@ public final class VMMigrationService: NSObject {
             try fileManager.removeItem(at: destination)
         } catch {
             Self.logger.warning("Failed to clean up partial migration at \(destination.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    func validateDestination(source: URL, destination: URL) throws {
+        let normalizedSource = source.resolvingSymlinksInPath().standardizedFileURL
+        let normalizedDestination = destination.resolvingSymlinksInPath().standardizedFileURL
+        if normalizedSource.path == normalizedDestination.path {
+            throw MigrationError.destinationMatchesSource
+        }
+
+        guard fileManager.fileExists(atPath: normalizedDestination.path) else { return }
+        let sourceID = try? normalizedSource.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier as? NSObject
+        let destinationID = try? normalizedDestination.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier as? NSObject
+        if let sourceID, let destinationID, sourceID.isEqual(destinationID) {
+            throw MigrationError.destinationMatchesSource
         }
     }
 }
