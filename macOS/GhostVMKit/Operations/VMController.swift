@@ -396,20 +396,7 @@ public final class VMController {
             throw VMError.message("Failed to create auxiliary storage: \(error.localizedDescription)")
         }
 
-        // Create ASIF disk image for near-native SSD performance
-        let diskSizeGiB = max(1, requestedDiskBytes / (1024 * 1024 * 1024))
-        let diskutil = Process()
-        diskutil.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
-        diskutil.arguments = ["image", "create", "blank",
-                              "--fs", "none",
-                              "--format", "ASIF",
-                              "--size", "\(diskSizeGiB)GiB",
-                              layout.diskURL.path]
-        try diskutil.run()
-        diskutil.waitUntilExit()
-        guard diskutil.terminationStatus == 0 else {
-            throw VMError.message("Failed to create ASIF disk image (exit \(diskutil.terminationStatus)).")
-        }
+        try createDiskImage(at: layout.diskURL, sizeBytes: requestedDiskBytes, format: options.diskImageFormat)
 
         // Handle legacy single shared folder
         var sharedFolderAbsolute: String?
@@ -475,6 +462,44 @@ public final class VMController {
 
     public func initVM(name: String, options: InitOptions) throws {
         try initVM(at: bundleURL(for: name), preferredName: name, options: options)
+    }
+
+    private func createDiskImage(at url: URL, sizeBytes: UInt64, format: DiskImageFormat) throws {
+        switch format {
+        case .sparseFile:
+            if !fileManager.createFile(atPath: url.path, contents: nil, attributes: nil) {
+                throw VMError.message("Failed to create disk image at \(url.path).")
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.truncate(atOffset: sizeBytes)
+            try handle.close()
+
+        case .asif:
+            guard DiskImageFormat.isASIFCreationSupported else {
+                throw VMError.message("ASIF disk images require macOS 26 or later. Choose Sparse File on this Mac.")
+            }
+
+            let diskSizeGiB = max(1, sizeBytes / (1024 * 1024 * 1024))
+            let diskutil = Process()
+            diskutil.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
+            diskutil.arguments = ["image", "create", "blank",
+                                  "--fs", "none",
+                                  "--format", "ASIF",
+                                  "--size", "\(diskSizeGiB)GiB",
+                                  url.path]
+
+            let stderrPipe = Pipe()
+            diskutil.standardError = stderrPipe
+            try diskutil.run()
+            diskutil.waitUntilExit()
+
+            guard diskutil.terminationStatus == 0 else {
+                let detail = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let suffix = detail.isEmpty ? "" : ": \(detail)"
+                throw VMError.message("Failed to create ASIF disk image (exit \(diskutil.terminationStatus))\(suffix)")
+            }
+        }
     }
 
     // MARK: - Rename VM
@@ -1269,6 +1294,8 @@ public final class VMController {
             try store.save(config)
         }
 
+        try validateDiskFormat(layout: layout)
+
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
                 if owner.isEmbedded {
@@ -1303,6 +1330,8 @@ public final class VMController {
             try store.save(config)
         }
 
+        try validateDiskFormat(layout: layout)
+
         if let owner = readVMLockOwner(from: layout.pidFileURL) {
             if kill(owner.pid, 0) == 0 {
                 if owner.isEmbedded {
@@ -1328,5 +1357,19 @@ public final class VMController {
             removeVMLock(at: layout.pidFileURL)
         }
         return false
+    }
+
+    private func validateDiskFormat(layout: VMFileLayout) throws {
+        let format = DiskFormat.detect(at: layout.diskURL)
+        guard format.isSupportedForCurrentHost else {
+            switch format {
+            case .asif:
+                throw VMError.message("This VM uses an ASIF disk image, which requires macOS 26 or later.")
+            case .unknown:
+                throw VMError.message("Could not identify the VM disk image format.")
+            case .raw:
+                throw VMError.message("This VM disk image format is not supported on this Mac.")
+            }
+        }
     }
 }

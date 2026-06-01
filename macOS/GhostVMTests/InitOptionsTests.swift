@@ -7,6 +7,7 @@ final class InitOptionsTests: XCTestCase {
         XCTAssertEqual(options.cpus, 4)
         XCTAssertEqual(options.memoryGiB, 8)
         XCTAssertEqual(options.diskGiB, 256)
+        XCTAssertEqual(options.diskImageFormat, DiskImageFormat.defaultForCurrentHost)
         XCTAssertNil(options.restoreImagePath)
         XCTAssertNil(options.sharedFolderPath)
         XCTAssertFalse(options.sharedFolderWritable)
@@ -19,12 +20,14 @@ final class InitOptionsTests: XCTestCase {
             memoryGiB: 16,
             diskGiB: 128,
             restoreImagePath: "/path/to/restore.ipsw",
+            diskImageFormat: .sparseFile,
             sharedFolderPath: "/Users/test/shared",
             sharedFolderWritable: true
         )
         XCTAssertEqual(options.cpus, 8)
         XCTAssertEqual(options.memoryGiB, 16)
         XCTAssertEqual(options.diskGiB, 128)
+        XCTAssertEqual(options.diskImageFormat, .sparseFile)
         XCTAssertEqual(options.restoreImagePath, "/path/to/restore.ipsw")
         XCTAssertEqual(options.sharedFolderPath, "/Users/test/shared")
         XCTAssertTrue(options.sharedFolderWritable)

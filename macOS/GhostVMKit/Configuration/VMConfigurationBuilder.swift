@@ -29,7 +29,7 @@ public final class VMConfigurationBuilder {
         platform.auxiliaryStorage = VZMacAuxiliaryStorage(url: layout.auxiliaryStorageURL)
         config.platform = platform
 
-        // Attach the raw disk image as the primary boot volume.
+        // Attach the VM root disk image as the primary boot volume.
         let diskAttachment = try VZDiskImageStorageDeviceAttachment(url: layout.diskURL, readOnly: false)
         let diskDevice = VZVirtioBlockDeviceConfiguration(attachment: diskAttachment)
         diskDevice.blockDeviceIdentifier = "macos-root"

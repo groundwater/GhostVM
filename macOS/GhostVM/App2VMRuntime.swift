@@ -91,7 +91,7 @@ final class App2VMSessionRegistry {
             migrateButton.frame = NSRect(x: 310, y: 12, width: 95, height: 30)
             contentView.addSubview(migrateButton)
 
-            let notNowButton = NSButton(title: "Not Now", target: nil, action: nil)
+            let notNowButton = NSButton(title: "Cancel", target: nil, action: nil)
             notNowButton.bezelStyle = .rounded
             notNowButton.keyEquivalent = "\u{1b}" // Escape
             notNowButton.frame = NSRect(x: 215, y: 12, width: 90, height: 30)
@@ -292,11 +292,6 @@ private final class MigrationPromptHandler: NSObject {
 
     @objc func notNow() {
         dismissPanel()
-
-        App2VMSessionRegistry.shared.startVMSession(
-            bundleURL: bundleURL, store: store, vmID: vmID, recovery: recovery,
-            skipHelperCopy: true
-        )
     }
 }
 
@@ -328,17 +323,33 @@ extension App2VMSessionRegistry {
     ///   - vmID: The VM's ID in the store for status updates
     ///   - runningPID: If non-nil, reconnect to an already-running helper instead of launching a new one
     func startVM(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil, recovery: Bool = false) {
-        // Check if disk needs ASIF migration (only for fresh launches, not reconnects)
         if runningPID == nil {
             let layout = VMFileLayout(bundleURL: bundleURL)
             let format = DiskFormat.detect(at: layout.diskURL)
-            if !format.isASIF {
-                Self.promptMigration(bundleURL: bundleURL, store: store, vmID: vmID, recovery: recovery)
+            if !format.isSupportedForCurrentHost {
+                let message: String
+                switch format {
+                case .asif:
+                    message = "This VM uses an ASIF disk image, which requires macOS 26 or later."
+                case .unknown:
+                    message = "GhostVM could not identify this VM's disk image format."
+                case .raw:
+                    message = "This VM's disk image format is not supported on this Mac."
+                }
+                store.updateStatus(for: vmID, status: "Error")
+                store.lastStartError = message
                 return
             }
         }
 
         startVMSession(bundleURL: bundleURL, store: store, vmID: vmID, runningPID: runningPID, recovery: recovery)
+    }
+
+    func migrateToASIF(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID) {
+        guard DiskImageFormat.isASIFCreationSupported else { return }
+        let layout = VMFileLayout(bundleURL: bundleURL)
+        guard DiskFormat.detect(at: layout.diskURL) == .raw else { return }
+        Self.promptMigration(bundleURL: bundleURL, store: store, vmID: vmID, recovery: false)
     }
 
     fileprivate func startVMSession(bundleURL: URL, store: App2VMStore, vmID: App2VM.ID, runningPID: pid_t? = nil, recovery: Bool = false, skipHelperCopy: Bool = false) {
@@ -408,7 +419,7 @@ final class App2VMRunSession: NSObject, ObservableObject, @unchecked Sendable {
     var recoveryBoot: Bool = false
 
     /// When true, skip copying the helper app/GhostTools into the VM bundle.
-    /// Used when launching a legacy VM that declined ASIF migration.
+    /// Used when launching a VM without copying helper resources.
     var skipHelperCopy: Bool = false
 
     /// The VM's dispatch queue, needed for vsock operations

@@ -736,6 +736,7 @@ struct CreateVMDemoView: View {
     @State private var cpuCount: String = "4"
     @State private var memoryGiB: String = "8"
     @State private var diskGiB: String = "256"
+    @State private var diskImageFormat: DiskImageFormat = .defaultForCurrentHost
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
     @State private var restoreItems: [RestoreItem] = []
@@ -791,10 +792,22 @@ struct CreateVMDemoView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            labeledRow("Disk Format") {
+                Picker("Disk Format", selection: $diskImageFormat) {
+                    ForEach(availableDiskImageFormats, id: \.self) { format in
+                        Text(format.displayName).tag(format)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .frame(maxWidth: 260, alignment: .leading)
+                .accessibilityIdentifier("createVM.diskFormatPicker")
+            }
             HStack(alignment: .top, spacing: 12) {
                 Color.clear.frame(width: labelWidth)
                 Label(
-                    "APFS sparse file: Finder may show the full 256 GiB logical size, but physical usage only grows as blocks are written. Resize after install is not supported.",
+                    diskImageFormat.diskFormatHelp,
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .font(.caption)
@@ -843,6 +856,11 @@ struct CreateVMDemoView: View {
         .padding(EdgeInsets(top: 18, leading: 24, bottom: 18, trailing: 24))
         .frame(minWidth: 520)
         .onAppear(perform: reloadRestoreItems)
+        .onAppear {
+            if !diskImageFormat.isSupportedForCreation {
+                diskImageFormat = .defaultForCurrentHost
+            }
+        }
         .onChange(of: restoreStore.images) {
             reloadRestoreItems()
         }
@@ -862,6 +880,10 @@ struct CreateVMDemoView: View {
         return selectedRestorePath != nil
     }
 
+    private var availableDiskImageFormats: [DiskImageFormat] {
+        DiskImageFormat.allCases.filter(\.isSupportedForCreation)
+    }
+
     @ViewBuilder
     private var restorePicker: some View {
         Picker("Restore Image", selection: restoreSelectionBinding) {
@@ -875,7 +897,7 @@ struct CreateVMDemoView: View {
                 .tag("__manage_restore__")
         }
         .labelsHidden()
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onChange(of: restoreSelectionBinding.wrappedValue) { oldValue, newValue in
             if newValue == "__manage_restore__" {
                 DispatchQueue.main.async {
@@ -983,6 +1005,7 @@ struct CreateVMDemoView: View {
         opts.cpus = Int(cpuCount) ?? 4
         opts.memoryGiB = UInt64(memoryGiB) ?? 8
         opts.diskGiB = UInt64(diskGiB) ?? 256
+        opts.diskImageFormat = diskImageFormat
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
         opts.networkConfig = networkConfig
@@ -1008,6 +1031,26 @@ struct CreateVMDemoView: View {
         }
     }
 
+}
+
+private extension DiskImageFormat {
+    var displayName: String {
+        switch self {
+        case .asif:
+            return "ASIF"
+        case .sparseFile:
+            return "Sparse File"
+        }
+    }
+
+    var diskFormatHelp: String {
+        switch self {
+        case .asif:
+            return "ASIF is the default on macOS 26+ and provides near-native SSD performance. VMs using ASIF require macOS 26 or later."
+        case .sparseFile:
+            return "Sparse file disks work on macOS 15+. Finder may show the full logical size, but physical usage only grows as blocks are written."
+        }
+    }
 }
 
 @available(macOS 13.0, *)
@@ -2025,6 +2068,7 @@ struct VMContextMenu: View {
         let isSuspended = lowerStatus.contains("suspended")
         let canSuspend = lowerStatus.contains("running")
         let canShutDown = lowerStatus.contains("running")
+        let diskFormat = DiskFormat.detect(at: VMFileLayout(bundleURL: vm.bundleURL).diskURL)
 
         // Show Install for macOS VMs that need installation
         if vm.needsInstall {
@@ -2073,6 +2117,13 @@ struct VMContextMenu: View {
             requestClone()
         }
         .disabled(!vm.installed)
+
+        if #available(macOS 26.0, *), diskFormat == .raw {
+            Button("Upgrade Disk to ASIF…") {
+                App2VMSessionRegistry.shared.migrateToASIF(bundleURL: vm.bundleURL, store: store, vmID: vm.id)
+            }
+            .disabled(isRunning)
+        }
 
         Divider()
 

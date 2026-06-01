@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Migrates a VM bundle from raw disk.img to ASIF format.
+/// Migrates a VM bundle from a sparse disk.img to ASIF format.
 /// The source bundle is NEVER modified — the migration creates a new bundle at the destination.
 public final class VMMigrationService: NSObject {
 
@@ -10,18 +10,24 @@ public final class VMMigrationService: NSObject {
     public enum MigrationError: Error, LocalizedError {
         case sourceNotFound
         case diskNotFound
+        case destinationMatchesSource
+        case destinationAlreadyExists
         case asifCreationFailed(Int32, String)
         case moveFailed(String)
         case cancelled
+        case unsupportedHost
 
         public var errorDescription: String? {
             switch self {
             case .sourceNotFound: return "Source VM bundle not found"
             case .diskNotFound: return "Source disk.img not found"
+            case .destinationMatchesSource: return "Choose a different destination for the migrated VM"
+            case .destinationAlreadyExists: return "Choose a destination that does not already exist"
             case .asifCreationFailed(let code, let detail):
                 return detail.isEmpty ? "Failed to create ASIF image (exit \(code))" : detail
             case .moveFailed(let msg): return "Failed to finalize migration: \(msg)"
             case .cancelled: return "Migration cancelled"
+            case .unsupportedHost: return "ASIF migration requires macOS 26 or later."
             }
         }
     }
@@ -68,16 +74,21 @@ public final class VMMigrationService: NSObject {
 
         let srcLayout = VMFileLayout(bundleURL: source)
 
+        guard DiskImageFormat.isASIFCreationSupported else {
+            throw MigrationError.unsupportedHost
+        }
+
         guard fileManager.fileExists(atPath: source.path) else {
             throw MigrationError.sourceNotFound
         }
         guard fileManager.fileExists(atPath: srcLayout.diskURL.path) else {
             throw MigrationError.diskNotFound
         }
+        try validateDestination(source: source, destination: destination)
 
         // Work in a temp directory, then atomic move to destination.
-        // This allows migrating to the same path (overwrite) safely,
-        // and ensures partial failures leave no debris at the destination.
+        // Partial failures only clean this temp bundle; the chosen destination
+        // is touched during finalization after conversion succeeds.
         let tempDir = fileManager.temporaryDirectory
             .appendingPathComponent("ghostvm-migration-\(UUID().uuidString).GhostVM")
         let dstLayout = VMFileLayout(bundleURL: tempDir)
@@ -104,9 +115,9 @@ public final class VMMigrationService: NSObject {
             try? fileManager.copyItem(at: srcLayout.customIconURL, to: dstLayout.customIconURL)
         }
 
-        if isCancelled { cleanup(destination); throw MigrationError.cancelled }
+        if isCancelled { cleanup(tempDir); throw MigrationError.cancelled }
 
-        // Convert raw disk to ASIF using diskutil (handles sparsity natively)
+        // Convert sparse disk to ASIF using diskutil (handles sparsity natively)
         progressHandler(0.1, "Converting disk to ASIF format...")
         let diskutil = Process()
         diskutil.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")
@@ -189,11 +200,8 @@ public final class VMMigrationService: NSObject {
 
         if isCancelled { cleanup(tempDir); throw MigrationError.cancelled }
 
-        // Atomic move: remove destination if it exists, then move temp → destination
+        // Atomic move into the destination validated before migration started.
         progressHandler(0.95, "Finalizing...")
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
         do {
             try fileManager.moveItem(at: tempDir, to: destination)
         } catch {
@@ -210,5 +218,21 @@ public final class VMMigrationService: NSObject {
         } catch {
             Self.logger.warning("Failed to clean up partial migration at \(destination.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    func validateDestination(source: URL, destination: URL) throws {
+        let normalizedSource = source.resolvingSymlinksInPath().standardizedFileURL
+        let normalizedDestination = destination.resolvingSymlinksInPath().standardizedFileURL
+        if normalizedSource.path == normalizedDestination.path {
+            throw MigrationError.destinationMatchesSource
+        }
+
+        guard fileManager.fileExists(atPath: normalizedDestination.path) else { return }
+        let sourceID = try? normalizedSource.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier as? NSObject
+        let destinationID = try? normalizedDestination.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier as? NSObject
+        if let sourceID, let destinationID, sourceID.isEqual(destinationID) {
+            throw MigrationError.destinationMatchesSource
+        }
+        throw MigrationError.destinationAlreadyExists
     }
 }

@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "GhostTools",
     platforms: [
-        .macOS("26.0")
+        .macOS(.v15)
     ],
     products: [
         .executable(name: "GhostTools", targets: ["GhostTools"])
