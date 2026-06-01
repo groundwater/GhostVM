@@ -1,7 +1,7 @@
 import Foundation
 import os
 
-/// Migrates a VM bundle from raw disk.img to ASIF format.
+/// Migrates a VM bundle from a sparse disk.img to ASIF format.
 /// The source bundle is NEVER modified — the migration creates a new bundle at the destination.
 public final class VMMigrationService: NSObject {
 
@@ -13,6 +13,7 @@ public final class VMMigrationService: NSObject {
         case asifCreationFailed(Int32, String)
         case moveFailed(String)
         case cancelled
+        case unsupportedHost
 
         public var errorDescription: String? {
             switch self {
@@ -22,6 +23,7 @@ public final class VMMigrationService: NSObject {
                 return detail.isEmpty ? "Failed to create ASIF image (exit \(code))" : detail
             case .moveFailed(let msg): return "Failed to finalize migration: \(msg)"
             case .cancelled: return "Migration cancelled"
+            case .unsupportedHost: return "ASIF migration requires macOS 26 or later."
             }
         }
     }
@@ -68,6 +70,10 @@ public final class VMMigrationService: NSObject {
 
         let srcLayout = VMFileLayout(bundleURL: source)
 
+        guard DiskImageFormat.isASIFCreationSupported else {
+            throw MigrationError.unsupportedHost
+        }
+
         guard fileManager.fileExists(atPath: source.path) else {
             throw MigrationError.sourceNotFound
         }
@@ -106,7 +112,7 @@ public final class VMMigrationService: NSObject {
 
         if isCancelled { cleanup(destination); throw MigrationError.cancelled }
 
-        // Convert raw disk to ASIF using diskutil (handles sparsity natively)
+        // Convert sparse disk to ASIF using diskutil (handles sparsity natively)
         progressHandler(0.1, "Converting disk to ASIF format...")
         let diskutil = Process()
         diskutil.executableURL = URL(fileURLWithPath: "/usr/sbin/diskutil")

@@ -625,8 +625,20 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@# Build app + cli (debug)
 	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=1 BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
-	xcodebuild -project $(XCODE_PROJECT) -scheme $(APP_NAME) -configuration Debug -derivedDataPath $(BUILD_DIR) DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" build
-	xcodebuild -project $(XCODE_PROJECT) -scheme vmctl -configuration Debug -derivedDataPath $(BUILD_DIR) DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" build
+	xcodebuild -project $(XCODE_PROJECT) -scheme $(APP_NAME) -configuration Debug -derivedDataPath $(BUILD_DIR) \
+		CODE_SIGN_STYLE=Manual \
+		CODE_SIGN_IDENTITY=- \
+		DEVELOPMENT_TEAM= \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGNING_REQUIRED=NO \
+		build
+	xcodebuild -project $(XCODE_PROJECT) -scheme vmctl -configuration Debug -derivedDataPath $(BUILD_DIR) \
+		CODE_SIGN_STYLE=Manual \
+		CODE_SIGN_IDENTITY=- \
+		DEVELOPMENT_TEAM= \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGNING_REQUIRED=NO \
+		build
 	@# Copy resources into debug app
 	@mkdir -p "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources"
 	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"

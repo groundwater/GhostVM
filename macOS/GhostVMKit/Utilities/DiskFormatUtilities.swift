@@ -1,5 +1,36 @@
 import Foundation
 
+/// Disk image formats GhostVM can create for VM root disks.
+public enum DiskImageFormat: String, CaseIterable {
+    /// Sparse file created with ftruncate().
+    case sparseFile = "sparse-file"
+    /// Apple Sparse Image Format, created by diskutil on macOS 26+.
+    case asif
+
+    public static var defaultForCurrentHost: DiskImageFormat {
+        if isASIFCreationSupported {
+            return .asif
+        }
+        return .sparseFile
+    }
+
+    public static var isASIFCreationSupported: Bool {
+        if #available(macOS 26.0, *) {
+            return true
+        }
+        return false
+    }
+
+    public var isSupportedForCreation: Bool {
+        switch self {
+        case .sparseFile:
+            return true
+        case .asif:
+            return Self.isASIFCreationSupported
+        }
+    }
+}
+
 /// Identifies the format of a VM disk image.
 public enum DiskFormat: String {
     /// Raw sparse file (created via truncate)
@@ -33,4 +64,15 @@ public enum DiskFormat: String {
     }
 
     public var isASIF: Bool { self == .asif }
+
+    public var isSupportedForCurrentHost: Bool {
+        switch self {
+        case .raw:
+            return true
+        case .asif:
+            return DiskImageFormat.isASIFCreationSupported
+        case .unknown:
+            return false
+        }
+    }
 }

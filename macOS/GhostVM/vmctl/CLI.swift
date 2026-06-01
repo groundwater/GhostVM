@@ -176,6 +176,16 @@ struct CLI {
                     throw VMError.message("Missing value for --disk.")
                 }
                 opts.diskGiB = try parseBytes(from: arguments[index], defaultUnit: 1 << 30) >> 30
+            case "--disk-format":
+                index += 1
+                guard index < arguments.count else {
+                    throw VMError.message("Missing value for --disk-format.")
+                }
+                guard let format = DiskImageFormat(rawValue: arguments[index].lowercased()),
+                      format == .sparseFile || format == .asif else {
+                    throw VMError.message("Invalid value for --disk-format. Use 'sparse-file' or 'asif'.")
+                }
+                opts.diskImageFormat = format
             case "--restore-image":
                 index += 1
                 guard index < arguments.count else {
@@ -465,7 +475,7 @@ Usage: vmctl <command> [options]
 Commands:
   list                                   List VMs and their state
   socket <bundle-path>                   Get socket path for running VM
-  init <bundle-path> [--cpus N] [--memory GiB] [--disk GiB] [--restore-image PATH] [--shared-folder PATH] [--writable]
+  init <bundle-path> [--cpus N] [--memory GiB] [--disk GiB] [--disk-format sparse-file|asif] [--restore-image PATH] [--shared-folder PATH] [--writable]
   install <bundle-path>
   start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]
   stop <bundle-path>

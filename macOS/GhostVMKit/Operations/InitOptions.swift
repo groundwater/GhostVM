@@ -6,6 +6,7 @@ public struct InitOptions {
     public var memoryGiB: UInt64
     public var diskGiB: UInt64
     public var restoreImagePath: String?
+    public var diskImageFormat: DiskImageFormat
     public var sharedFolderPath: String?
     public var sharedFolderWritable: Bool
     public var sharedFolders: [SharedFolderConfig]
@@ -16,6 +17,7 @@ public struct InitOptions {
         memoryGiB: UInt64 = 8,
         diskGiB: UInt64 = 256,
         restoreImagePath: String? = nil,
+        diskImageFormat: DiskImageFormat = .defaultForCurrentHost,
         sharedFolderPath: String? = nil,
         sharedFolderWritable: Bool = false,
         sharedFolders: [SharedFolderConfig] = [],
@@ -25,6 +27,7 @@ public struct InitOptions {
         self.memoryGiB = memoryGiB
         self.diskGiB = diskGiB
         self.restoreImagePath = restoreImagePath
+        self.diskImageFormat = diskImageFormat
         self.sharedFolderPath = sharedFolderPath
         self.sharedFolderWritable = sharedFolderWritable
         self.sharedFolders = sharedFolders
