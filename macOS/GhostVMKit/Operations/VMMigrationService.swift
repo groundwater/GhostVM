@@ -11,6 +11,7 @@ public final class VMMigrationService: NSObject {
         case sourceNotFound
         case diskNotFound
         case destinationMatchesSource
+        case destinationAlreadyExists
         case asifCreationFailed(Int32, String)
         case moveFailed(String)
         case cancelled
@@ -21,6 +22,7 @@ public final class VMMigrationService: NSObject {
             case .sourceNotFound: return "Source VM bundle not found"
             case .diskNotFound: return "Source disk.img not found"
             case .destinationMatchesSource: return "Choose a different destination for the migrated VM"
+            case .destinationAlreadyExists: return "Choose a destination that does not already exist"
             case .asifCreationFailed(let code, let detail):
                 return detail.isEmpty ? "Failed to create ASIF image (exit \(code))" : detail
             case .moveFailed(let msg): return "Failed to finalize migration: \(msg)"
@@ -56,7 +58,7 @@ public final class VMMigrationService: NSObject {
     ///
     /// - Parameters:
     ///   - source: URL of the existing .GhostVM bundle
-    ///   - destination: URL for the new .GhostVM bundle (must not be the source)
+    ///   - destination: URL for the new .GhostVM bundle (must not exist)
     ///   - progressHandler: Called with (fractionCompleted, statusMessage)
     ///   - outputHandler: Called with each line of diskutil output for terminal display
     public func migrate(
@@ -198,11 +200,8 @@ public final class VMMigrationService: NSObject {
 
         if isCancelled { cleanup(tempDir); throw MigrationError.cancelled }
 
-        // Atomic move: remove destination if it exists, then move temp → destination
+        // Atomic move into the destination validated before migration started.
         progressHandler(0.95, "Finalizing...")
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
         do {
             try fileManager.moveItem(at: tempDir, to: destination)
         } catch {
@@ -234,5 +233,6 @@ public final class VMMigrationService: NSObject {
         if let sourceID, let destinationID, sourceID.isEqual(destinationID) {
             throw MigrationError.destinationMatchesSource
         }
+        throw MigrationError.destinationAlreadyExists
     }
 }

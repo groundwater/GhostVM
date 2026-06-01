@@ -16,7 +16,7 @@ final class VMMigrationServiceTests: XCTestCase {
         }
     }
 
-    func testCancelDoesNotRemoveChosenDestination() throws {
+    func testRejectsExistingDestinationWithoutRemovingIt() throws {
         let root = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }
 
@@ -30,10 +30,10 @@ final class VMMigrationServiceTests: XCTestCase {
         XCTAssertThrowsError(try service.migrate(
             source: source,
             destination: destination,
-            progressHandler: { _, _ in service.cancel() }
+            progressHandler: { _, _ in XCTFail("Migration should fail before starting work") }
         )) { error in
-            guard case VMMigrationService.MigrationError.cancelled = error else {
-                return XCTFail("Expected cancelled, got \(error)")
+            guard case VMMigrationService.MigrationError.destinationAlreadyExists = error else {
+                return XCTFail("Expected destinationAlreadyExists, got \(error)")
             }
         }
 
