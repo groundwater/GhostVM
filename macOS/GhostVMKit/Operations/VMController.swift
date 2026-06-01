@@ -574,10 +574,11 @@ public final class VMController {
             throw VMError.message("VM '\(sourceName)' is not installed. Only installed VMs can be cloned.")
         }
 
-        // Source must not be running
-        guard !isVMProcessRunning(layout: sourceLayout) else {
-            throw VMError.message("VM '\(sourceName)' is running. Stop it before cloning.")
-        }
+        // Cloning a running VM is allowed. clonefile() produces a crash-consistent
+        // copy of the disk (equivalent to sudden power loss), which macOS recovers
+        // from on boot via its journaled filesystem. The clone also gets a fresh
+        // machine identifier, MAC address, and cleared per-instance state below, so
+        // there is no identity collision or state leakage with the running source.
 
         // Create new bundle in the same parent directory
         let parentDir = bundleURL.deletingLastPathComponent()
@@ -606,6 +607,27 @@ public final class VMController {
                 if result == -1 {
                     let err = String(cString: strerror(errno))
                     throw VMError.message("Clone failed for \(source.lastPathComponent): \(err). This volume may not support copy-on-write. Move your VMs to an APFS volume.")
+                }
+            }
+
+            // Clone the Helper directory (per-VM helper app + GhostTools.dmg) so the
+            // clone is self-contained when launched directly via its Dock icon, which
+            // does not re-provision the helper. clonefile() copies directories
+            // recursively on APFS. The helper app bundle is named after the source VM,
+            // so rename it to match the clone (mirrors renameVM()).
+            let sourceHelperDir = sourceLayout.helperDirectoryURL
+            if fileManager.fileExists(atPath: sourceHelperDir.path) {
+                let destHelperDir = newLayout.helperDirectoryURL
+                if Darwin.clonefile(sourceHelperDir.path, destHelperDir.path, 0) == -1 {
+                    let err = String(cString: strerror(errno))
+                    throw VMError.message("Clone failed for Helper directory: \(err). This volume may not support copy-on-write. Move your VMs to an APFS volume.")
+                }
+                let clonedHelperApp = destHelperDir.appendingPathComponent(
+                    sourceLayout.helperAppURL(vmName: sourceName).lastPathComponent)
+                let destHelperApp = newLayout.helperAppURL(vmName: trimmed)
+                if clonedHelperApp.path != destHelperApp.path,
+                   fileManager.fileExists(atPath: clonedHelperApp.path) {
+                    try fileManager.moveItem(at: clonedHelperApp, to: destHelperApp)
                 }
             }
 
@@ -1071,6 +1093,51 @@ public final class VMController {
 
     public func discardSuspend(name: String) throws {
         try discardSuspend(bundleURL: bundleURL(for: name))
+    }
+
+    /// Suspend a running helper-backed VM by asking its helper process to save state.
+    /// Reuses the existing `com.ghostvm.helper.suspend.<hash>` notification that the
+    /// helper already listens for, then blocks until the helper exits and the saved
+    /// suspend state is verified on disk.
+    public func suspendVM(bundleURL: URL, timeout: TimeInterval = 300) throws {
+        let standardized = bundleURL.standardizedFileURL
+        let layout = try layoutForExistingBundle(at: standardized)
+        let entry = try loadEntry(for: standardized)
+        let vmName = displayName(for: standardized)
+
+        guard let pid = entry.runningPID else {
+            print(entry.isSuspended ? "VM '\(vmName)' is already suspended." : "VM '\(vmName)' does not appear to be running.")
+            return
+        }
+
+        let bundlePathHash = standardized.path.stableHash
+        print("Sending suspend request to VM '\(vmName)' (PID \(pid)).")
+        DistributedNotificationCenter.default().postNotificationName(
+            NSNotification.Name("com.ghostvm.helper.suspend.\(bundlePathHash)"),
+            object: nil,
+            userInfo: nil,
+            deliverImmediately: true
+        )
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if kill(pid, 0) != 0 {
+                let config = try VMConfigStore(layout: layout).load()
+                guard config.isSuspended, fileManager.fileExists(atPath: layout.suspendStateURL.path) else {
+                    throw VMError.message("VM '\(vmName)' exited before saving suspended state.")
+                }
+                removeVMLock(at: layout.pidFileURL)
+                print("VM '\(vmName)' suspended.")
+                return
+            }
+            Thread.sleep(forTimeInterval: 1)
+        }
+
+        throw VMError.message("Timed out waiting for VM '\(vmName)' to suspend.")
+    }
+
+    public func suspendVM(name: String, timeout: TimeInterval = 300) throws {
+        try suspendVM(bundleURL: bundleURL(for: name), timeout: timeout)
     }
 
     // MARK: - CLI Start/Resume (blocking)
