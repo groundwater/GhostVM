@@ -801,7 +801,7 @@ struct CreateVMDemoView: View {
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
-                .frame(maxWidth: 260)
+                .frame(maxWidth: 260, alignment: .leading)
                 .accessibilityIdentifier("createVM.diskFormatPicker")
             }
             HStack(alignment: .top, spacing: 12) {
@@ -897,7 +897,7 @@ struct CreateVMDemoView: View {
                 .tag("__manage_restore__")
         }
         .labelsHidden()
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onChange(of: restoreSelectionBinding.wrappedValue) { oldValue, newValue in
             if newValue == "__manage_restore__" {
                 DispatchQueue.main.async {
