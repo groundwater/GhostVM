@@ -544,7 +544,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         "\(shellEscape(vmctlPath())) shell --name \(shellEscape(vmName))"
     }
 
-    @objc private func openTerminal() {
+    @objc func openTerminal() {
         // AppleScript's `do script` opens a new Terminal window and runs the
         // command in it directly. Cleaner than writing a self-deleting temp
         // script to disk and `open -a Terminal`-ing it.
@@ -564,7 +564,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         try? process.run()
     }
 
-    @objc private func copyVmctlCommand() {
+    @objc func copyVmctlCommand() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(vmctlCommand(), forType: .string)
     }
