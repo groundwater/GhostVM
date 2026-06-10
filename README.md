@@ -38,7 +38,7 @@ GhostVM is a native macOS app for creating and managing macOS virtual machines o
 - **Self-Contained Bundles** — Each workspace is a portable `.GhostVM` folder
 - **Snapshots & Clones** — Checkpoint and clone instantly with APFS copy-on-write
 - **Deep Host Integration** — Clipboard, files, folders, and automatic port forwarding
-- **Scriptable** — Full CLI (`vmctl`) and Unix socket API for automation
+- **Scriptable** — Full CLI (`ghostvm`) and Unix socket API for automation
 
 ## Installation
 
@@ -56,22 +56,22 @@ GhostVM is a native macOS app for creating and managing macOS virtual machines o
 
 ## CLI Usage
 
-The `vmctl` command-line tool provides full control over GhostVM virtual machines:
+The `ghostvm` command-line tool provides full control over GhostVM virtual machines:
 
 ```bash
 # Create and install a macOS VM
-vmctl init ~/VMs/dev.GhostVM --cpus 6 --memory 16 --disk 128
-vmctl install ~/VMs/dev.GhostVM
-vmctl start ~/VMs/dev.GhostVM
+ghostvm init ~/VMs/dev.GhostVM --cpus 6 --memory 16 --disk 128
+ghostvm install ~/VMs/dev.GhostVM
+ghostvm start ~/VMs/dev.GhostVM
 
 # Manage snapshots
-vmctl snapshot ~/VMs/dev.GhostVM create clean-state
-vmctl snapshot ~/VMs/dev.GhostVM revert clean-state
+ghostvm snapshot ~/VMs/dev.GhostVM create clean-state
+ghostvm snapshot ~/VMs/dev.GhostVM revert clean-state
 
 # Remote commands (requires GhostTools in guest)
-vmctl remote --name dev exec uname -a
-vmctl remote --name dev clipboard get
-vmctl remote --name dev apps
+ghostvm remote --name dev exec uname -a
+ghostvm remote --name dev clipboard get
+ghostvm remote --name dev apps
 ```
 
 <details>
@@ -111,7 +111,7 @@ make app
 | Target | Description |
 |--------|-------------|
 | `make app` | Build GhostVM.app |
-| `make cli` | Build vmctl CLI |
+| `make cli` | Build ghostvm CLI |
 | `make test` | Run unit tests |
 | `make run` | Build and run attached to terminal |
 | `make launch` | Build and launch detached |

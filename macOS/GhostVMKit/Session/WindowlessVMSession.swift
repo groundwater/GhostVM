@@ -52,7 +52,7 @@ public final class WindowlessVMSession: NSObject, VZVirtualMachineDelegate {
         self.layout = layout
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
         let configuration = try builder.makeConfiguration(headless: headless, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
-        self.vmQueue = DispatchQueue(label: "vmctl.windowless.\(name)")
+        self.vmQueue = DispatchQueue(label: "ghostvm.windowless.\(name)")
         self._virtualMachine = VZVirtualMachine(configuration: configuration, queue: vmQueue)
         super.init()
 

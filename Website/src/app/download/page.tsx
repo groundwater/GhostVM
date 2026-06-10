@@ -7,7 +7,7 @@ import DownloadButton from "@/components/DownloadButton";
 export const metadata: Metadata = {
   title: "Download GhostVM - Mac Virtual Machine for Apple Silicon",
   description:
-    "Download GhostVM for macOS. Free, open-source Mac virtual machine app for Apple Silicon (M1/M2/M3/M4). Includes GUI app and vmctl CLI.",
+    "Download GhostVM for macOS. Free, open-source Mac virtual machine app for Apple Silicon (M1/M2/M3/M4). Includes GUI app and ghostvm CLI.",
 };
 
 export default function DownloadPage() {
@@ -16,7 +16,7 @@ export default function DownloadPage() {
       <h1 className="text-4xl font-bold text-center mb-4">Download GhostVM</h1>
       <p className="text-center text-gray-600 dark:text-gray-400 mb-12 max-w-lg mx-auto">
         Get the latest release of GhostVM for macOS. Includes the GhostVM.app
-        and the vmctl command-line tool.
+        and the ghostvm command-line tool.
       </p>
 
       <div className="max-w-md mx-auto mb-12">

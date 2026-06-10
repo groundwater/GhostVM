@@ -40,7 +40,7 @@ export default function CreatingVMs() {
         </li>
         <li>
           You can create VMs using either the GUI app or the{" "}
-          <code>vmctl</code> CLI
+          <code>ghostvm</code> CLI
         </li>
       </ul>
 

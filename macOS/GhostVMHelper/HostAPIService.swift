@@ -5,7 +5,7 @@ import GhostVMKit
 @preconcurrency import Virtualization
 
 /// Host-side HTTP API served over a Unix domain socket.
-/// vmctl connects here. Requests are proxied to GhostTools in the guest
+/// ghostvm connects here. Requests are proxied to GhostTools in the guest
 /// (including screenshot and batch automation paths).
 final class HostAPIService {
     private let connectionSlots = DispatchSemaphore(value: 64)
@@ -200,11 +200,11 @@ final class HostAPIService {
 
             let cleanPath = request.path.components(separatedBy: "?").first ?? request.path
             if cleanPath == "/api/v1/shell" {
-                await handleShellProxy(vmctlFD: fd, request: request)
+                await handleShellProxy(ghostvmFD: fd, request: request)
                 return
             }
             if cleanPath == "/api/v1/vsock-connect" {
-                await handleVsockConnectProxy(vmctlFD: fd, headers: request.headers)
+                await handleVsockConnectProxy(ghostvmFD: fd, headers: request.headers)
                 return
             }
 
@@ -224,12 +224,12 @@ final class HostAPIService {
 
     // MARK: - Shell Proxy
 
-    /// Proxies a shell session: vmctl ↔ HostAPIService ↔ GhostTools (vsock).
+    /// Proxies a shell session: ghostvm ↔ HostAPIService ↔ GhostTools (vsock).
     /// Instead of request/response, switches to bidirectional byte bridging.
-    private func handleShellProxy(vmctlFD: Int32, request: HTTPRequestHead) async {
+    private func handleShellProxy(ghostvmFD: Int32, request: HTTPRequestHead) async {
         guard let client = client else {
-            try? Self.writeResponseSync(fd: vmctlFD, response: .error(.internalServerError, message: "Guest client not available"))
-            Darwin.close(vmctlFD)
+            try? Self.writeResponseSync(fd: ghostvmFD, response: .error(.internalServerError, message: "Guest client not available"))
+            Darwin.close(ghostvmFD)
             return
         }
 
@@ -241,8 +241,8 @@ final class HostAPIService {
             guestConnection = try await Self.connectRawWithTimeout(client: client, port: 5000, seconds: 10)
         } catch {
             NSLog("HostAPIService: Shell proxy failed to connect to guest: \(error)")
-            try? Self.writeResponseSync(fd: vmctlFD, response: .error(.internalServerError, message: "Failed to connect shell proxy"))
-            Darwin.close(vmctlFD)
+            try? Self.writeResponseSync(fd: ghostvmFD, response: .error(.internalServerError, message: "Failed to connect shell proxy"))
+            Darwin.close(ghostvmFD)
             return
         }
 
@@ -263,9 +263,9 @@ final class HostAPIService {
         } catch {
             NSLog("HostAPIService: Shell proxy failed to forward upgrade request to guest")
             Self.logTransportFailure("Shell proxy upgrade failed: \(error)")
-            try? Self.writeResponseSync(fd: vmctlFD, response: .error(.internalServerError, message: "Shell upgrade failed"))
+            try? Self.writeResponseSync(fd: ghostvmFD, response: .error(.internalServerError, message: "Shell upgrade failed"))
             guestConnection.close()
-            Darwin.close(vmctlFD)
+            Darwin.close(ghostvmFD)
             return
         }
 
@@ -274,47 +274,47 @@ final class HostAPIService {
         do {
             try await Self.runBlocking {
                 try HTTPCodec.writeResponseHead(
-                    fd: vmctlFD,
+                    fd: ghostvmFD,
                     status: upgraded.responseHead.status,
                     headers: upgraded.responseHead.headers
                 )
                 if !upgraded.prelude.isEmpty {
-                    try HTTPCodec.writeAll(fd: vmctlFD, data: upgraded.prelude)
+                    try HTTPCodec.writeAll(fd: ghostvmFD, data: upgraded.prelude)
                 }
             }
         } catch {
             Self.logTransportFailure("Shell proxy failed to relay guest upgrade response to client: \(error)")
             guestConnection.close()
-            Darwin.close(vmctlFD)
+            Darwin.close(ghostvmFD)
             return
         }
 
-        // Now bridge bidirectionally: vmctlFD ↔ guestFD
+        // Now bridge bidirectionally: ghostvmFD ↔ guestFD
         // Both sides are raw byte streams from this point on.
-        await Self.bridgeBytes(fdA: vmctlFD, fdB: guestFD, label: "shell")
+        await Self.bridgeBytes(fdA: ghostvmFD, fdB: guestFD, label: "shell")
         guestConnection.close()
-        Darwin.close(vmctlFD)
+        Darwin.close(ghostvmFD)
         NSLog("HostAPIService: Shell proxy session ended")
     }
 
     // MARK: - Generic Vsock Proxy
     //
-    // Bridges vmctl's unix-socket connection to a raw vsock connection at a
+    // Bridges ghostvm's unix-socket connection to a raw vsock connection at a
     // requested guest port. After the 101 response, both sides are pure bytes.
-    // Used by `vmctl vsock connect <port>` — netcat-style debugging tool.
+    // Used by `ghostvm vsock connect <port>` — netcat-style debugging tool.
 
-    private func handleVsockConnectProxy(vmctlFD: Int32, headers: HTTPHeaders) async {
+    private func handleVsockConnectProxy(ghostvmFD: Int32, headers: HTTPHeaders) async {
         guard let client = client else {
-            Self.writeShortError(fd: vmctlFD, status: 500, text: "Internal Server Error")
-            Darwin.close(vmctlFD)
+            Self.writeShortError(fd: ghostvmFD, status: 500, text: "Internal Server Error")
+            Darwin.close(ghostvmFD)
             return
         }
 
         // Required: Vsock-Port header.
         let portString = headers["Vsock-Port"]
         guard let portString = portString, let port = UInt32(portString) else {
-            Self.writeShortError(fd: vmctlFD, status: 400, text: "Missing or invalid Vsock-Port header")
-            Darwin.close(vmctlFD)
+            Self.writeShortError(fd: ghostvmFD, status: 400, text: "Missing or invalid Vsock-Port header")
+            Darwin.close(ghostvmFD)
             return
         }
 
@@ -325,18 +325,18 @@ final class HostAPIService {
             guestConnection = try await Self.connectRawWithTimeout(client: client, port: port, seconds: 10)
         } catch {
             NSLog("HostAPIService: vsock-connect failed to open port \(port): \(error)")
-            Self.writeShortError(fd: vmctlFD, status: 502, text: "Bad Gateway: \(error.localizedDescription)")
-            Darwin.close(vmctlFD)
+            Self.writeShortError(fd: ghostvmFD, status: 502, text: "Bad Gateway: \(error.localizedDescription)")
+            Darwin.close(ghostvmFD)
             return
         }
 
         let guestFD = guestConnection.fileDescriptor
         NSLog("HostAPIService: vsock-connect opened guest fd=\(guestFD) port=\(port)")
 
-        // Tell vmctl the bridge is up.
+        // Tell ghostvm the bridge is up.
         do {
             try Self.writeResponseSync(
-                fd: vmctlFD,
+                fd: ghostvmFD,
                 response: HTTPResponse(
                     status: .switchingProtocols,
                     headers: [
@@ -347,15 +347,15 @@ final class HostAPIService {
                 headOnly: true
             )
         } catch {
-            Self.logTransportFailure("vsock-connect failed to write 101 to vmctl: \(error)")
+            Self.logTransportFailure("vsock-connect failed to write 101 to ghostvm: \(error)")
             guestConnection.close()
-            Darwin.close(vmctlFD)
+            Darwin.close(ghostvmFD)
             return
         }
 
-        await Self.bridgeBytes(fdA: vmctlFD, fdB: guestFD, label: "vsock-connect(\(port))")
+        await Self.bridgeBytes(fdA: ghostvmFD, fdB: guestFD, label: "vsock-connect(\(port))")
         guestConnection.close()
-        Darwin.close(vmctlFD)
+        Darwin.close(ghostvmFD)
         NSLog("HostAPIService: vsock-connect(\(port)) session ended")
     }
 

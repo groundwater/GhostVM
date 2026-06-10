@@ -6,7 +6,7 @@ import Darwin
 import Glibc
 #endif
 
-/// Entry point and subcommand handlers for `vmctl remote`.
+/// Entry point and subcommand handlers for `ghostvm remote`.
 enum RemoteCommand {
 
     // MARK: - Entry Point
@@ -70,7 +70,7 @@ enum RemoteCommand {
             let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             resolvedPath = supportDir.appendingPathComponent("GhostVM/api/\(name).GhostVM.sock").path
         } else {
-            throw VMError.message("Must specify --socket <path> or --name <VMName>.\nUsage: vmctl remote --name <VMName> <subcommand> [args...]")
+            throw VMError.message("Must specify --socket <path> or --name <VMName>.\nUsage: ghostvm remote --name <VMName> <subcommand> [args...]")
         }
 
         // Validate socket exists
@@ -81,7 +81,7 @@ enum RemoteCommand {
         let client = UnixSocketClient(socketPath: resolvedPath)
 
         guard !args.isEmpty else {
-            throw VMError.message("Missing subcommand. Use 'vmctl remote --help' for usage.")
+            throw VMError.message("Missing subcommand. Use 'ghostvm remote --help' for usage.")
         }
 
         let subcommand = args.removeFirst()
@@ -108,7 +108,7 @@ enum RemoteCommand {
         case "--help", "-h", "help":
             showRemoteHelp()
         default:
-            throw VMError.message("Unknown remote subcommand '\(subcommand)'. Use 'vmctl remote --help' for usage.")
+            throw VMError.message("Unknown remote subcommand '\(subcommand)'. Use 'ghostvm remote --help' for usage.")
         }
     }
 
@@ -129,7 +129,7 @@ enum RemoteCommand {
 
     private static func handleExec(client: UnixSocketClient, arguments: [String]) throws {
         guard !arguments.isEmpty else {
-            throw VMError.message("Usage: vmctl remote exec <command> [args...]")
+            throw VMError.message("Usage: ghostvm remote exec <command> [args...]")
         }
 
         var args = arguments
@@ -171,7 +171,7 @@ enum RemoteCommand {
 
     private static func handleClipboard(client: UnixSocketClient, arguments: [String]) throws {
         guard !arguments.isEmpty else {
-            throw VMError.message("Usage: vmctl remote clipboard <get|set> [text]")
+            throw VMError.message("Usage: ghostvm remote clipboard <get|set> [text]")
         }
 
         var args = arguments
@@ -214,7 +214,7 @@ enum RemoteCommand {
 
         case "set":
             guard !args.isEmpty else {
-                throw VMError.message("Usage: vmctl remote clipboard set <text>")
+                throw VMError.message("Usage: ghostvm remote clipboard set <text>")
             }
             let text = args.joined(separator: " ")
             let resp = try client.request(
@@ -278,8 +278,8 @@ enum RemoteCommand {
 
     static func showRemoteHelp() {
         let help = """
-Usage: vmctl remote --name <VMName> [--json] <subcommand> [args...]
-       vmctl remote --socket <path> [--json] <subcommand> [args...]
+Usage: ghostvm remote --name <VMName> [--json] <subcommand> [args...]
+       ghostvm remote --socket <path> [--json] <subcommand> [args...]
 
 Flags:
   --socket <path>  Unix socket path (auto-detected if --name used)
@@ -295,11 +295,11 @@ Subcommands:
   interactive                                Start interactive REPL
 
 Examples:
-  vmctl remote --name MyVM health
-  vmctl remote --name MyVM exec ls -la
-  vmctl remote --name MyVM clipboard get
-  vmctl remote --name MyVM apps
-  vmctl remote --name MyVM interactive
+  ghostvm remote --name MyVM health
+  ghostvm remote --name MyVM exec ls -la
+  ghostvm remote --name MyVM clipboard get
+  ghostvm remote --name MyVM apps
+  ghostvm remote --name MyVM interactive
 """
         print(help)
     }

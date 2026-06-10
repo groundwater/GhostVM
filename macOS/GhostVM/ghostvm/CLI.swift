@@ -162,7 +162,7 @@ struct CLI {
 
     private func handleInit(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl init <bundle-path> [options]")
+            throw VMError.message("Usage: ghostvm init <bundle-path> [options]")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: false)
         var opts = InitOptions()
@@ -222,7 +222,7 @@ struct CLI {
 
     private func handleInstall(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl install <bundle-path>")
+            throw VMError.message("Usage: ghostvm install <bundle-path>")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
         try controller.installVM(bundleURL: bundleURL)
@@ -230,7 +230,7 @@ struct CLI {
 
     private func handleStart(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]")
+            throw VMError.message("Usage: ghostvm start <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]")
         }
         var headless = false
         var sharedFolderPath: String?
@@ -277,7 +277,7 @@ struct CLI {
 
     private func handleStop(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl stop <bundle-path>")
+            throw VMError.message("Usage: ghostvm stop <bundle-path>")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
         try controller.stopVM(bundleURL: bundleURL)
@@ -285,7 +285,7 @@ struct CLI {
 
     private func handleSuspend(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl suspend <bundle-path>")
+            throw VMError.message("Usage: ghostvm suspend <bundle-path>")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
         try controller.suspendVM(bundleURL: bundleURL)
@@ -293,7 +293,7 @@ struct CLI {
 
     private func handleClone(arguments: [String]) throws {
         guard arguments.count >= 2 else {
-            throw VMError.message("Usage: vmctl clone <source-bundle-path> <new-name>")
+            throw VMError.message("Usage: ghostvm clone <source-bundle-path> <new-name>")
         }
         let bundleURL = try resolveBundleURL(argument: arguments[0], mustExist: true)
         let newURL = try controller.cloneVM(bundleURL: bundleURL, newName: arguments[1])
@@ -302,7 +302,7 @@ struct CLI {
 
     private func handleStatus(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl status <bundle-path>")
+            throw VMError.message("Usage: ghostvm status <bundle-path>")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
         try controller.status(bundleURL: bundleURL)
@@ -310,7 +310,7 @@ struct CLI {
 
     private func handleSnapshot(arguments: [String]) throws {
         guard arguments.count >= 2 else {
-            throw VMError.message("Usage: vmctl snapshot <bundle-path> <list|create|revert|delete> [snapshot-name]")
+            throw VMError.message("Usage: ghostvm snapshot <bundle-path> <list|create|revert|delete> [snapshot-name]")
         }
         let bundleURL = try resolveBundleURL(argument: arguments[0], mustExist: true)
         let subcommand = arguments[1]
@@ -320,7 +320,7 @@ struct CLI {
             try controller.snapshotList(bundleURL: bundleURL)
         case "create", "revert", "delete":
             guard arguments.count >= 3 else {
-                throw VMError.message("Usage: vmctl snapshot <bundle-path> \(subcommand) <snapshot-name>")
+                throw VMError.message("Usage: ghostvm snapshot <bundle-path> \(subcommand) <snapshot-name>")
             }
             let snapshotName = arguments[2]
             try controller.snapshot(bundleURL: bundleURL, subcommand: subcommand, snapshotName: snapshotName)
@@ -331,7 +331,7 @@ struct CLI {
 
     private func handleResume(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl resume <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]")
+            throw VMError.message("Usage: ghostvm resume <bundle-path> [--headless] [--shared-folder PATH] [--writable|--read-only]")
         }
         var headless = false
         var sharedFolderPath: String?
@@ -378,7 +378,7 @@ struct CLI {
 
     private func handleDiscardSuspend(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl discard-suspend <bundle-path>")
+            throw VMError.message("Usage: ghostvm discard-suspend <bundle-path>")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
         try controller.discardSuspend(bundleURL: bundleURL)
@@ -386,7 +386,7 @@ struct CLI {
 
     private func handleSocket(arguments: [String]) throws {
         guard let bundleArg = arguments.first else {
-            throw VMError.message("Usage: vmctl socket <bundle-path>")
+            throw VMError.message("Usage: ghostvm socket <bundle-path>")
         }
         let bundleURL = try resolveBundleURL(argument: bundleArg, mustExist: true)
 
@@ -416,18 +416,18 @@ struct CLI {
 
     // MARK: - Helper App Launch
 
-    /// Find GhostVMHelper.app relative to the vmctl executable.
-    /// Searches: 1) Parent app bundle (when vmctl is embedded in GhostVM.app)
-    ///           2) Same directory as vmctl (standalone build)
+    /// Find GhostVMHelper.app relative to the ghostvm executable.
+    /// Searches: 1) Parent app bundle (when ghostvm is embedded in GhostVM.app)
+    ///           2) Same directory as ghostvm (standalone build)
     private func findHelperApp() -> URL? {
-        let vmctlURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        let ghostvmURL = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
 
-        // When embedded in GhostVM.app/Contents/PlugIns/Helpers/vmctl.app/Contents/MacOS/vmctl:
+        // When embedded in GhostVM.app/Contents/PlugIns/Helpers/GhostVmCli.app/Contents/MacOS/ghostvm:
         // Helper is a sibling at GhostVM.app/Contents/PlugIns/Helpers/GhostVMHelper.app
-        let helpersDir = vmctlURL
+        let helpersDir = ghostvmURL
             .deletingLastPathComponent()  // -> MacOS/
             .deletingLastPathComponent()  // -> Contents/
-            .deletingLastPathComponent()  // -> vmctl.app/
+            .deletingLastPathComponent()  // -> GhostVmCli.app/
             .deletingLastPathComponent()  // -> Helpers/
         let embeddedHelper = helpersDir
             .appendingPathComponent("GhostVMHelper.app")
@@ -435,8 +435,8 @@ struct CLI {
             return embeddedHelper
         }
 
-        // Standalone: same directory as vmctl
-        let standaloneHelper = vmctlURL
+        // Standalone: same directory as ghostvm
+        let standaloneHelper = ghostvmURL
             .deletingLastPathComponent()
             .appendingPathComponent("GhostVMHelper.app")
         if FileManager.default.fileExists(atPath: standaloneHelper.path) {
@@ -450,7 +450,7 @@ struct CLI {
     /// Copies the helper into the VM bundle, launches it, and waits for exit.
     private func launchViaHelper(bundleURL: URL) throws {
         guard let sourceHelper = findHelperApp() else {
-            throw VMError.message("GhostVMHelper.app not found. Use --headless or run vmctl from within GhostVM.app.")
+            throw VMError.message("GhostVMHelper.app not found. Use --headless or run ghostvm from within GhostVM.app.")
         }
 
         let helperManager = VMHelperBundleManager()
@@ -499,7 +499,7 @@ struct CLI {
 
     private func showHelp(exitCode: Int32) -> Never {
         let help = """
-Usage: vmctl <command> [options]
+Usage: ghostvm <command> [options]
 
 Commands:
   list                                   List VMs and their state
@@ -522,7 +522,7 @@ Commands:
 Remote flags:
   --json                                 Output JSON (default: human-readable if TTY)
 
-Remote subcommands (use 'vmctl remote --help' for full details):
+Remote subcommands (use 'ghostvm remote --help' for full details):
   health                                      Check VM connection
   exec <command> [args...]                    Run command in guest
   clipboard get | set <text>                  Guest clipboard
@@ -530,28 +530,28 @@ Remote subcommands (use 'vmctl remote --help' for full details):
   interactive                                 Start interactive REPL
 
 Examples:
-  vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
-  vmctl install ~/VMs/sandbox.GhostVM
-  vmctl start ~/VMs/sandbox.GhostVM                    # GUI
-  vmctl start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
-  vmctl start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
-  vmctl stop ~/VMs/sandbox.GhostVM
-  vmctl suspend ~/VMs/sandbox.GhostVM                  # Save state and suspend
-  vmctl status ~/VMs/sandbox.GhostVM
-  vmctl resume ~/VMs/sandbox.GhostVM                   # Resume from suspended state
-  vmctl discard-suspend ~/VMs/sandbox.GhostVM          # Discard suspended state
-  vmctl clone ~/VMs/sandbox.GhostVM sandbox-clone      # Clone VM (instant, APFS COW)
-  vmctl snapshot ~/VMs/sandbox.GhostVM list
-  vmctl snapshot ~/VMs/sandbox.GhostVM create clean
-  vmctl snapshot ~/VMs/sandbox.GhostVM revert clean
-  vmctl snapshot ~/VMs/sandbox.GhostVM delete clean
-  vmctl socket ~/VMs/sandbox.GhostVM                   # Get socket path for running VM
-  vmctl remote --socket $(vmctl socket Aria) interactive  # Use with command substitution
-  vmctl remote --name MyVM health
-  vmctl remote --name MyVM exec ls -la
-  vmctl remote --name MyVM clipboard get
-  vmctl remote --name MyVM apps
-  vmctl remote --name MyVM interactive
+  ghostvm init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+  ghostvm install ~/VMs/sandbox.GhostVM
+  ghostvm start ~/VMs/sandbox.GhostVM                    # GUI
+  ghostvm start ~/VMs/sandbox.GhostVM --headless         # headless (SSH after setup)
+  ghostvm start ~/VMs/sandbox.GhostVM --shared-folder ~/Projects --writable
+  ghostvm stop ~/VMs/sandbox.GhostVM
+  ghostvm suspend ~/VMs/sandbox.GhostVM                  # Save state and suspend
+  ghostvm status ~/VMs/sandbox.GhostVM
+  ghostvm resume ~/VMs/sandbox.GhostVM                   # Resume from suspended state
+  ghostvm discard-suspend ~/VMs/sandbox.GhostVM          # Discard suspended state
+  ghostvm clone ~/VMs/sandbox.GhostVM sandbox-clone      # Clone VM (instant, APFS COW)
+  ghostvm snapshot ~/VMs/sandbox.GhostVM list
+  ghostvm snapshot ~/VMs/sandbox.GhostVM create clean
+  ghostvm snapshot ~/VMs/sandbox.GhostVM revert clean
+  ghostvm snapshot ~/VMs/sandbox.GhostVM delete clean
+  ghostvm socket ~/VMs/sandbox.GhostVM                   # Get socket path for running VM
+  ghostvm remote --socket $(ghostvm socket Aria) interactive  # Use with command substitution
+  ghostvm remote --name MyVM health
+  ghostvm remote --name MyVM exec ls -la
+  ghostvm remote --name MyVM clipboard get
+  ghostvm remote --name MyVM apps
+  ghostvm remote --name MyVM interactive
 
 Notes:
   - After installation, enable Remote Login (SSH) inside the guest for convenient headless access.

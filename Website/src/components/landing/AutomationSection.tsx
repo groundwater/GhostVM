@@ -1,17 +1,17 @@
 const terminalLines = [
-  { prompt: true, text: "vmctl init ~/VMs/dev.GhostVM --cpus 6 --memory 16" },
+  { prompt: true, text: "ghostvm init ~/VMs/dev.GhostVM --cpus 6 --memory 16" },
   { prompt: false, text: "Initialized macOS VM 'dev' at ~/VMs/dev.GhostVM." },
   { prompt: false, text: "" },
-  { prompt: true, text: "vmctl install ~/VMs/dev.GhostVM" },
+  { prompt: true, text: "ghostvm install ~/VMs/dev.GhostVM" },
   { prompt: false, text: "Installation completed successfully." },
   { prompt: false, text: "" },
-  { prompt: true, text: "vmctl start ~/VMs/dev.GhostVM --headless" },
+  { prompt: true, text: "ghostvm start ~/VMs/dev.GhostVM --headless" },
   { prompt: false, text: "VM 'dev' is running. Press Ctrl-C to stop." },
   { prompt: false, text: "" },
-  { prompt: true, text: "vmctl snapshot ~/VMs/dev.GhostVM create clean-install" },
+  { prompt: true, text: "ghostvm snapshot ~/VMs/dev.GhostVM create clean-install" },
   { prompt: false, text: "Snapshot 'clean-install' created for 'dev'." },
   { prompt: false, text: "" },
-  { prompt: true, text: "vmctl stop ~/VMs/dev.GhostVM" },
+  { prompt: true, text: "ghostvm stop ~/VMs/dev.GhostVM" },
   { prompt: false, text: "VM 'dev' stopped." },
 ];
 
@@ -60,7 +60,7 @@ export default function AutomationSection() {
             </h2>
             <p className="text-gray-600 dark:text-gray-400 mb-6">
               Every action in the GUI is also available from the terminal via{" "}
-              <code className="text-sm bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">vmctl</code>.
+              <code className="text-sm bg-gray-100 dark:bg-gray-800 px-1.5 py-0.5 rounded">ghostvm</code>.
               Create, start, snapshot, and manage workspaces
               programmatically.
             </p>

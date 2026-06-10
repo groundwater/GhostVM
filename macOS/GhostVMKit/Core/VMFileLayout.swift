@@ -14,7 +14,7 @@ public final class VMFileLayout {
     public var hardwareModelURL: URL { bundleURL.appendingPathComponent("HardwareModel.bin") }
     public var machineIdentifierURL: URL { bundleURL.appendingPathComponent("MachineIdentifier.bin") }
     public var auxiliaryStorageURL: URL { bundleURL.appendingPathComponent("AuxiliaryStorage.bin") }
-    public var pidFileURL: URL { bundleURL.appendingPathComponent("vmctl.pid") }
+    public var pidFileURL: URL { bundleURL.appendingPathComponent("ghostvm.pid") }
     public var snapshotsDirectoryURL: URL { bundleURL.appendingPathComponent("Snapshots") }
     public var suspendStateURL: URL { bundleURL.appendingPathComponent("suspend.vzvmsave") }
     // MARK: - Helper App Bundle

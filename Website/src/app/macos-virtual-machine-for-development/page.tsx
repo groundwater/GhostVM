@@ -298,13 +298,13 @@ export default function MacOSVirtualMachineForDevelopment() {
         <h3>1. Create the VM</h3>
         <CodeBlock language="bash">
           {`# Create a new macOS VM with 6 CPUs, 16GB RAM, 128GB disk
-vmctl init ~/VMs/dev.GhostVM --cpus 6 --memory 16 --disk 128
+ghostvm init ~/VMs/dev.GhostVM --cpus 6 --memory 16 --disk 128
 
 # Install macOS from a restore image
-vmctl install ~/VMs/dev.GhostVM
+ghostvm install ~/VMs/dev.GhostVM
 
 # Start the VM
-vmctl start ~/VMs/dev.GhostVM`}
+ghostvm start ~/VMs/dev.GhostVM`}
         </CodeBlock>
 
         <h3>2. Set Up Your Dev Environment</h3>
@@ -326,8 +326,8 @@ brew install node python go rust`}
           always return to this state:
         </p>
         <CodeBlock language="bash">
-          {`vmctl stop ~/VMs/dev.GhostVM
-vmctl snapshot ~/VMs/dev.GhostVM create dev-ready`}
+          {`ghostvm stop ~/VMs/dev.GhostVM
+ghostvm snapshot ~/VMs/dev.GhostVM create dev-ready`}
         </CodeBlock>
 
         <h3>4. Clone for New Projects</h3>
@@ -345,7 +345,7 @@ vmctl snapshot ~/VMs/dev.GhostVM create dev-ready`}
           Use shared folders to access project files from your host:
         </p>
         <CodeBlock language="bash">
-          {`vmctl start ~/VMs/dev.GhostVM --headless \\
+          {`ghostvm start ~/VMs/dev.GhostVM --headless \\
   --shared-folder ~/Projects/my-app --read-only`}
         </CodeBlock>
 

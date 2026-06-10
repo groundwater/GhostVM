@@ -511,7 +511,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
 
         menu.addItem(.separator())
 
-        let copyItem = NSMenuItem(title: "Copy vmctl Command", action: #selector(copyVmctlCommand), keyEquivalent: "")
+        let copyItem = NSMenuItem(title: "Copy ghostvm Command", action: #selector(copyGhostvmCommand), keyEquivalent: "")
         copyItem.target = self
         copyItem.image = NSImage(systemSymbolName: "doc.on.doc", accessibilityDescription: nil)
         menu.addItem(copyItem)
@@ -521,17 +521,17 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         return item
     }
 
-    /// Resolve the full path to the vmctl binary.
-    /// vmctl.app is copied as a sibling of the helper .app in the VM bundle's Helper/ directory.
-    private func vmctlPath() -> String {
+    /// Resolve the full path to the ghostvm binary.
+    /// GhostVmCli.app is copied as a sibling of the helper .app in the VM bundle's Helper/ directory.
+    private func ghostvmPath() -> String {
         let helperBundle = Bundle.main.bundlePath // .../Helper/<VMName>.app
         let helperDir = (helperBundle as NSString).deletingLastPathComponent // .../Helper/
-        let vmctl = (helperDir as NSString).appendingPathComponent("vmctl.app/Contents/MacOS/vmctl")
-        if FileManager.default.fileExists(atPath: vmctl) {
-            return vmctl
+        let ghostvm = (helperDir as NSString).appendingPathComponent("GhostVmCli.app/Contents/MacOS/ghostvm")
+        if FileManager.default.fileExists(atPath: ghostvm) {
+            return ghostvm
         }
-        NSLog("HelperToolbar: vmctl not found at \(vmctl)")
-        return "vmctl"
+        NSLog("HelperToolbar: ghostvm not found at \(ghostvm)")
+        return "ghostvm"
     }
 
     /// Shell-escape a string by wrapping in single quotes and escaping embedded single quotes.
@@ -539,16 +539,16 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
-    /// Full vmctl shell command with properly escaped paths.
-    private func vmctlCommand() -> String {
-        "\(shellEscape(vmctlPath())) shell --name \(shellEscape(vmName))"
+    /// Full ghostvm shell command with properly escaped paths.
+    private func ghostvmCommand() -> String {
+        "\(shellEscape(ghostvmPath())) shell --name \(shellEscape(vmName))"
     }
 
     @objc private func openTerminal() {
         // AppleScript's `do script` opens a new Terminal window and runs the
         // command in it directly. Cleaner than writing a self-deleting temp
         // script to disk and `open -a Terminal`-ing it.
-        let command = vmctlCommand()
+        let command = ghostvmCommand()
         let escaped = command
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -564,9 +564,9 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         try? process.run()
     }
 
-    @objc private func copyVmctlCommand() {
+    @objc private func copyGhostvmCommand() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(vmctlCommand(), forType: .string)
+        NSPasteboard.general.setString(ghostvmCommand(), forType: .string)
     }
 
     private func makeCaptureKeysItem() -> NSToolbarItem {

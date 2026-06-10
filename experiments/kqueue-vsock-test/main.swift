@@ -8,7 +8,7 @@
 //
 // Usage:
 //   1. Build & run in the guest:  swift main.swift
-//   2. From the host, connect:    vmctl remote --name <VM> exec /usr/bin/true
+//   2. From the host, connect:    ghostvm remote --name <VM> exec /usr/bin/true
 //      (or any other vsock connection to port 9999)
 //
 

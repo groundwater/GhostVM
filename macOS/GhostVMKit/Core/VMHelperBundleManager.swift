@@ -43,8 +43,8 @@ public final class VMHelperBundleManager {
         // Copy GhostTools.dmg as a sibling of the helper .app (not inside it)
         // so the signed bundle remains unmodified after copy.
         copyGhostToolsDMG(into: layout.helperDirectoryURL)
-        // Copy vmctl.app as a sibling too — used by the Terminal toolbar item.
-        copyVmctlApp(into: layout.helperDirectoryURL)
+        // Copy GhostVmCli.app as a sibling too — used by the Terminal toolbar item.
+        copyGhostvmApp(into: layout.helperDirectoryURL)
 
         // Rename to VM-named .app folder for Dock/CMD+TAB label
         try fileManager.moveItem(at: tempHelperURL, to: finalHelperURL)
@@ -121,20 +121,20 @@ public final class VMHelperBundleManager {
         try? fileManager.copyItem(at: dmgURL, to: destURL)
     }
 
-    /// Copies vmctl.app from the main GhostVM.app bundle into the helper directory
-    /// so `vmctl shell` is available from the VM bundle.
-    /// Fails silently if vmctl.app is not found.
-    private func copyVmctlApp(into helperDirectoryURL: URL) {
+    /// Copies GhostVmCli.app from the main GhostVM.app bundle into the helper directory
+    /// so `ghostvm shell` is available from the VM bundle.
+    /// Fails silently if GhostVmCli.app is not found.
+    private func copyGhostvmApp(into helperDirectoryURL: URL) {
         guard let mainBundleURL = Bundle.main.bundleURL as URL? else { return }
-        let vmctlSource = mainBundleURL
-            .appendingPathComponent("Contents/PlugIns/Helpers/vmctl.app")
-        guard fileManager.fileExists(atPath: vmctlSource.path) else { return }
+        let ghostvmSource = mainBundleURL
+            .appendingPathComponent("Contents/PlugIns/Helpers/GhostVmCli.app")
+        guard fileManager.fileExists(atPath: ghostvmSource.path) else { return }
 
-        let destURL = helperDirectoryURL.appendingPathComponent("vmctl.app")
+        let destURL = helperDirectoryURL.appendingPathComponent("GhostVmCli.app")
         if fileManager.fileExists(atPath: destURL.path) {
             try? fileManager.removeItem(at: destURL)
         }
-        try? fileManager.copyItem(at: vmctlSource, to: destURL)
+        try? fileManager.copyItem(at: ghostvmSource, to: destURL)
         stripExtendedAttributes(from: destURL)
     }
 

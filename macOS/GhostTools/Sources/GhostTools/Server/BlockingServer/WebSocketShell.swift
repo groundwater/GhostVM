@@ -5,7 +5,7 @@ import os
 
 /// Server-side WebSocket "shell" endpoint. Performs the WS handshake on a
 /// blocking fd, spawns a login PTY, and bridges WS frames ↔ PTY bytes using
-/// thread-per-direction blocking I/O. Mirrors the host-side vmctl shell
+/// thread-per-direction blocking I/O. Mirrors the host-side ghostvm shell
 /// code exactly — including the WS frame format we already know works.
 enum WebSocketShell {
 
