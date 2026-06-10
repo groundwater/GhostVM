@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>com.apple.application-identifier</key>
-	<string>3FGZQE8AW3.org.ghostvm.vmctl</string>
+	<string>3FGZQE8AW3.org.ghostvm.ghostvm</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>3FGZQE8AW3</string>
 	<key>com.apple.security.virtualization</key>

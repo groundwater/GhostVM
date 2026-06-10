@@ -5,16 +5,16 @@ import GhostVMKit
 import Darwin
 #endif
 
-/// `vmctl vsock connect <port>` — opens a raw vsock connection to the guest
-/// on the given port and bridges it to vmctl's stdin/stdout. Netcat for vsock.
+/// `ghostvm vsock connect <port>` — opens a raw vsock connection to the guest
+/// on the given port and bridges it to ghostvm's stdin/stdout. Netcat for vsock.
 ///
 /// Usage:
-///   vmctl vsock connect --name MyVM <port>
-///   vmctl vsock connect --socket /path/to/sock <port>
+///   ghostvm vsock connect --name MyVM <port>
+///   ghostvm vsock connect --socket /path/to/sock <port>
 ///
 /// Pipe-friendly:
-///   vmctl vsock connect --name MyVM 5004 | dd of=/dev/null bs=1M
-///   dd if=/dev/zero bs=1M count=100 | vmctl vsock connect --name MyVM 5004
+///   ghostvm vsock connect --name MyVM 5004 | dd of=/dev/null bs=1M
+///   dd if=/dev/zero bs=1M count=100 | ghostvm vsock connect --name MyVM 5004
 ///
 /// Half-close semantics (matches nc):
 ///   ^D / stdin EOF → SHUT_WR on the unix socket → helper SHUT_WRs the vsock
@@ -30,7 +30,7 @@ enum VsockCommand {
         // First positional after parsing flags is the subcommand: `connect`.
         guard !args.isEmpty else {
             showHelp()
-            throw VMError.message("Missing subcommand. Try `vmctl vsock connect <port>`.")
+            throw VMError.message("Missing subcommand. Try `ghostvm vsock connect <port>`.")
         }
 
         var socketPath: String?
@@ -58,13 +58,13 @@ enum VsockCommand {
 
         guard let sub = positional.first else {
             showHelp()
-            throw VMError.message("Missing subcommand. Try `vmctl vsock connect <port>`.")
+            throw VMError.message("Missing subcommand. Try `ghostvm vsock connect <port>`.")
         }
 
         switch sub {
         case "connect":
             guard positional.count >= 2, let port = UInt32(positional[1]) else {
-                throw VMError.message("Usage: vmctl vsock connect <port>")
+                throw VMError.message("Usage: ghostvm vsock connect <port>")
             }
             try runConnect(port: port, socketPath: socketPath, vmName: vmName)
         default:
@@ -222,15 +222,15 @@ enum VsockCommand {
     private static func showHelp() {
         let text = """
         Usage:
-          vmctl vsock connect --name <VMName> <port>
-          vmctl vsock connect --socket <path>  <port>
+          ghostvm vsock connect --name <VMName> <port>
+          ghostvm vsock connect --socket <path>  <port>
 
         Opens a raw vsock connection to the guest on the given port, bridged
-        to vmctl's stdin and stdout (netcat-style). Use shell pipes for I/O:
+        to ghostvm's stdin and stdout (netcat-style). Use shell pipes for I/O:
 
-          vmctl vsock connect --name MyVM 5004 | dd of=/dev/null bs=1M
-          dd if=/dev/zero bs=1M count=100 | vmctl vsock connect -n MyVM 5004
-          printf 'GET / HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n' | vmctl vsock connect -n MyVM 5000
+          ghostvm vsock connect --name MyVM 5004 | dd of=/dev/null bs=1M
+          dd if=/dev/zero bs=1M count=100 | ghostvm vsock connect -n MyVM 5004
+          printf 'GET / HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n' | ghostvm vsock connect -n MyVM 5000
 
         Options:
           --name, -n <VMName>    Resolve helper socket from VM name.

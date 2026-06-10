@@ -721,7 +721,7 @@ public final class VMController {
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: config)
         let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: true, runtimeSharedFolder: nil)
 
-        let vmQueue = DispatchQueue(label: "vmctl.install.\(vmName)")
+        let vmQueue = DispatchQueue(label: "ghostvm.install.\(vmName)")
         let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
 
         let installer: VZMacOSInstaller = vmQueue.sync {
@@ -910,7 +910,7 @@ public final class VMController {
                 print("State: running (PID \(runningPID!))")
             }
         } else if config.isSuspended {
-            print("State: suspended (use 'vmctl resume' to continue)")
+            print("State: suspended (use 'ghostvm resume' to continue)")
         } else {
             print("State: stopped")
         }
@@ -922,7 +922,7 @@ public final class VMController {
         if config.installed {
             print("Installed build: \(config.lastInstallBuild ?? "unknown") (\(config.lastInstallVersion ?? "unknown")), last install: \(config.lastInstallDate?.description ?? "unknown")")
         } else {
-            print("Installation status: not installed (run 'vmctl install \(bundleURL.path)')")
+            print("Installation status: not installed (run 'ghostvm install \(bundleURL.path)')")
         }
     }
 
@@ -1148,7 +1148,7 @@ public final class VMController {
         let vmName = displayName(for: bundleURL)
 
         if session.wasSuspended {
-            print("VM '\(vmName)' has a saved suspend state. Use 'vmctl resume' to restore it, or 'vmctl discard-suspend' to discard it.")
+            print("VM '\(vmName)' has a saved suspend state. Use 'ghostvm resume' to restore it, or 'ghostvm discard-suspend' to discard it.")
             throw VMError.message("VM '\(vmName)' is suspended.")
         }
 

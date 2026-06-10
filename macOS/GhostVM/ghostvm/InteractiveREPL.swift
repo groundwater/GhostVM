@@ -2,7 +2,7 @@ import Foundation
 import CEditLine
 import GhostVMKit
 
-/// Interactive REPL for `vmctl remote interactive`.
+/// Interactive REPL for `ghostvm remote interactive`.
 /// Uses libedit (CEditLine) for readline/history support.
 enum InteractiveREPL {
 

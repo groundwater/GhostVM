@@ -6,11 +6,11 @@ import CryptoKit
 import Darwin
 #endif
 
-/// `vmctl shell` — opens an interactive PTY session on the guest VM via WebSocket.
+/// `ghostvm shell` — opens an interactive PTY session on the guest VM via WebSocket.
 ///
 /// Usage:
-///   vmctl shell --name MyVM
-///   vmctl shell --socket /path/to/sock
+///   ghostvm shell --name MyVM
+///   ghostvm shell --socket /path/to/sock
 ///
 /// Protocol:
 ///   1. HTTP/1.1 Upgrade to WebSocket on /api/v1/shell?cols=N&rows=N
@@ -36,7 +36,7 @@ enum ShellCommand {
                 showHelp()
                 return
             } else {
-                throw VMError.message("Unknown argument: \(args[0])\nUsage: vmctl shell --name <VMName>")
+                throw VMError.message("Unknown argument: \(args[0])\nUsage: ghostvm shell --name <VMName>")
             }
         }
 
@@ -48,7 +48,7 @@ enum ShellCommand {
             let supportDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             resolvedPath = supportDir.appendingPathComponent("GhostVM/api/\(name).GhostVM.sock").path
         } else {
-            throw VMError.message("Must specify --socket <path> or --name <VMName>.\nUsage: vmctl shell --name <VMName>")
+            throw VMError.message("Must specify --socket <path> or --name <VMName>.\nUsage: ghostvm shell --name <VMName>")
         }
 
         guard FileManager.default.fileExists(atPath: resolvedPath) else {
@@ -56,7 +56,7 @@ enum ShellCommand {
         }
 
         guard isatty(STDIN_FILENO) != 0 else {
-            throw VMError.message("vmctl shell requires a terminal (stdin must be a TTY)")
+            throw VMError.message("ghostvm shell requires a terminal (stdin must be a TTY)")
         }
 
         // Get terminal size
@@ -207,8 +207,8 @@ enum ShellCommand {
 
     private static func showHelp() {
         let help = """
-        Usage: vmctl shell --name <VMName>
-               vmctl shell --socket <path>
+        Usage: ghostvm shell --name <VMName>
+               ghostvm shell --socket <path>
 
         Options:
           --name <VMName>      VM name (resolves socket from VM bundle)
@@ -218,7 +218,7 @@ enum ShellCommand {
         Uses WebSocket for bidirectional PTY streaming.
 
         Examples:
-          vmctl shell --name MyVM
+          ghostvm shell --name MyVM
         """
         print(help)
     }

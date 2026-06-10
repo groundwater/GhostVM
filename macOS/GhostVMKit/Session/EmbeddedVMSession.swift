@@ -51,7 +51,7 @@ public final class EmbeddedVMSession: NSObject, NSWindowDelegate, VZVirtualMachi
         self.layout = layout
         let builder = VMConfigurationBuilder(layout: layout, storedConfig: storedConfig)
         let configuration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: runtimeSharedFolder)
-        self.vmQueue = DispatchQueue(label: "vmctl.embedded.\(name)")
+        self.vmQueue = DispatchQueue(label: "ghostvm.embedded.\(name)")
         self.virtualMachine = VZVirtualMachine(configuration: configuration, queue: vmQueue)
         let ui = EmbeddedVMSession.makeWindowAndView(name: name)
         self.window = ui.window

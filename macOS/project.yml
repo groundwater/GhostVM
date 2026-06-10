@@ -58,11 +58,11 @@ targets:
         DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
 
-  vmctl:
+  GhostVmCli:
     type: application
     platform: macOS
     sources:
-      - path: GhostVM/vmctl
+      - path: GhostVM/ghostvm
         excludes:
           - "CEditLine"
     dependencies:
@@ -72,17 +72,18 @@ targets:
       - package: GhostHTTP
     settings:
       base:
-        PRODUCT_NAME: vmctl
-        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.vmctl
+        PRODUCT_NAME: GhostVmCli
+        EXECUTABLE_NAME: ghostvm
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSBackgroundOnly: YES
         SWIFT_VERSION: "5.0"
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_IDENTITY: "Apple Development"
-        CODE_SIGN_ENTITLEMENTS: GhostVM/vmctl/entitlements.plist
+        CODE_SIGN_ENTITLEMENTS: GhostVM/ghostvm/entitlements.plist
         DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
-        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhostVM/vmctl/CEditLine"
+        SWIFT_INCLUDE_PATHS: "$(SRCROOT)/GhostVM/ghostvm/CEditLine"
         OTHER_LDFLAGS:
           - "-ledit"
         LD_RUNPATH_SEARCH_PATHS:
@@ -128,8 +129,8 @@ targets:
     sources:
       - path: GhostVM
         excludes:
-          - "vmctl"
-          - "vmctl.swift"
+          - "ghostvm"
+          - "ghostvm.swift"
           - "*.plist"
     resources:
       - path: build/xcode/GhostTools.dmg
@@ -138,7 +139,7 @@ targets:
       - target: GhostVMKit
         embed: true
       - package: GhostHTTP
-      - target: vmctl
+      - target: GhostVmCli
         embed: true
         codeSign: true
         copy:

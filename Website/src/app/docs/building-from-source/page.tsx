@@ -87,7 +87,7 @@ make app`}
           </tr>
           <tr>
             <td><code>make cli</code></td>
-            <td>Build the <code>vmctl</code> CLI tool</td>
+            <td>Build the <code>ghostvm</code> CLI tool</td>
           </tr>
           <tr>
             <td><code>make generate</code></td>

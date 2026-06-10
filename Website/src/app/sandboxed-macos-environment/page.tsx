@@ -295,15 +295,15 @@ export default function SandboxedMacOSEnvironment() {
 
         <CodeBlock language="bash">
           {`# Create a new VM
-vmctl init ~/VMs/dev-template.GhostVM --cpus 4 --memory 8 --disk 64
-vmctl install ~/VMs/dev-template.GhostVM
-vmctl start ~/VMs/dev-template.GhostVM
+ghostvm init ~/VMs/dev-template.GhostVM --cpus 4 --memory 8 --disk 64
+ghostvm install ~/VMs/dev-template.GhostVM
+ghostvm start ~/VMs/dev-template.GhostVM
 
 # Install your tools inside the VM, then shut down
-vmctl stop ~/VMs/dev-template.GhostVM
+ghostvm stop ~/VMs/dev-template.GhostVM
 
 # Create a "clean" snapshot
-vmctl snapshot ~/VMs/dev-template.GhostVM create clean-state`}
+ghostvm snapshot ~/VMs/dev-template.GhostVM create clean-state`}
         </CodeBlock>
 
         <h3>2. Clone for Each Untrusted Project</h3>
@@ -327,7 +327,7 @@ vmctl snapshot ~/VMs/dev-template.GhostVM create clean-state`}
 
         <CodeBlock language="bash">
           {`# Start with a shared folder
-vmctl start ~/VMs/untrusted-project.GhostVM --headless \\
+ghostvm start ~/VMs/untrusted-project.GhostVM --headless \\
   --shared-folder ~/Projects/client-repo --read-only`}
         </CodeBlock>
 
@@ -339,7 +339,7 @@ vmctl start ~/VMs/untrusted-project.GhostVM --headless \\
 
         <CodeBlock language="bash">
           {`# Option A: Revert to clean state
-vmctl snapshot ~/VMs/untrusted-project.GhostVM revert clean-state
+ghostvm snapshot ~/VMs/untrusted-project.GhostVM revert clean-state
 
 # Option B: Delete the VM entirely
 rm -rf ~/VMs/untrusted-project.GhostVM`}

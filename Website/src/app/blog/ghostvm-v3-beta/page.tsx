@@ -62,7 +62,7 @@ export default function GhostVMV3BetaPost() {
 
       {/* ── Interactive Terminal ─────────────────────────────── */}
 
-      <h2>vmctl shell</h2>
+      <h2>ghostvm shell</h2>
 
       <p>
         Full PTY session into any running VM. Connects over virtio-vsock &mdash;
@@ -70,7 +70,7 @@ export default function GhostVMV3BetaPost() {
       </p>
 
       <CodeBlock language="bash">
-        {`$ vmctl shell ~/VMs/dev.GhostVM
+        {`$ ghostvm shell ~/VMs/dev.GhostVM
 Connecting to 'dev' via vsock...
 
 dev ~ % whoami

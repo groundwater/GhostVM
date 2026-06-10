@@ -20,7 +20,7 @@ export default function MacOSVMs() {
 
       <h2>Step 1: Initialize the VM bundle</h2>
       <CodeBlock language="bash">
-        {`vmctl init ~/VMs/sandbox.GhostVM \\
+        {`ghostvm init ~/VMs/sandbox.GhostVM \\
   --cpus 6 \\
   --memory 16 \\
   --disk 128 \\
@@ -70,14 +70,14 @@ export default function MacOSVMs() {
       </table>
 
       <h2>Step 2: Install macOS</h2>
-      <CodeBlock language="bash">{`vmctl install ~/VMs/sandbox.GhostVM`}</CodeBlock>
+      <CodeBlock language="bash">{`ghostvm install ~/VMs/sandbox.GhostVM`}</CodeBlock>
       <p>
         This installs macOS from the restore image onto the VM&apos;s disk.
         Installation takes several minutes and shows progress.
       </p>
 
       <h2>Step 3: Start the VM</h2>
-      <CodeBlock language="bash">{`vmctl start ~/VMs/sandbox.GhostVM`}</CodeBlock>
+      <CodeBlock language="bash">{`ghostvm start ~/VMs/sandbox.GhostVM`}</CodeBlock>
 
       <Callout variant="info" title="Restore Image Discovery">
         If you don&apos;t specify <code>--restore-image</code>, GhostVM

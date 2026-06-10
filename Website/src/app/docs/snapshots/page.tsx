@@ -22,24 +22,24 @@ export default function Snapshots() {
       <h2>CLI Usage</h2>
 
       <h3>List Snapshots</h3>
-      <CodeBlock language="bash">{`vmctl snapshot ~/VMs/dev.GhostVM list`}</CodeBlock>
+      <CodeBlock language="bash">{`ghostvm snapshot ~/VMs/dev.GhostVM list`}</CodeBlock>
 
       <h3>Create a Snapshot</h3>
-      <CodeBlock language="bash">{`vmctl snapshot ~/VMs/dev.GhostVM create clean-state`}</CodeBlock>
+      <CodeBlock language="bash">{`ghostvm snapshot ~/VMs/dev.GhostVM create clean-state`}</CodeBlock>
       <Callout variant="info">
         Creating a snapshot copies the full disk image, so it may take a while
         for large disks. The VM should be stopped before creating a snapshot.
       </Callout>
 
       <h3>Revert to a Snapshot</h3>
-      <CodeBlock language="bash">{`vmctl snapshot ~/VMs/dev.GhostVM revert clean-state`}</CodeBlock>
+      <CodeBlock language="bash">{`ghostvm snapshot ~/VMs/dev.GhostVM revert clean-state`}</CodeBlock>
       <Callout variant="warning">
         Reverting replaces the current disk image and saved state with the
         snapshot. Current state will be lost.
       </Callout>
 
       <h3>Delete a Snapshot</h3>
-      <CodeBlock language="bash">{`vmctl snapshot ~/VMs/dev.GhostVM delete clean-state`}</CodeBlock>
+      <CodeBlock language="bash">{`ghostvm snapshot ~/VMs/dev.GhostVM delete clean-state`}</CodeBlock>
 
       <h2>GUI Usage</h2>
       <p>

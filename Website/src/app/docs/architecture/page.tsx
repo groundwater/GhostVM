@@ -4,7 +4,7 @@ import PrevNextNav from "@/components/docs/PrevNextNav";
 export const metadata: Metadata = {
   title: "Architecture - How GhostVM Works on Apple Silicon",
   description:
-    "GhostVM architecture: main app, helper processes, vmctl CLI, GhostTools agent, and virtio-vsock services. Built on Apple's Virtualization.framework.",
+    "GhostVM architecture: main app, helper processes, ghostvm CLI, GhostTools agent, and virtio-vsock services. Built on Apple's Virtualization.framework.",
 };
 
 export default function Architecture() {
@@ -54,7 +54,7 @@ export default function Architecture() {
         </li>
       </ul>
 
-      <h3>vmctl (CLI)</h3>
+      <h3>ghostvm (CLI)</h3>
       <p>
         A command-line tool that provides the same capabilities as the GUI. Uses
         GhostVMKit for all VM operations. Supports headless operation for

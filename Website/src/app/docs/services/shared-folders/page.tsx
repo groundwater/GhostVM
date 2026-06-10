@@ -23,10 +23,10 @@ export default function SharedFolders() {
       <h3>Via CLI</h3>
       <CodeBlock language="bash">
         {`# When creating a VM
-vmctl init ~/VMs/dev.GhostVM --shared-folder ~/Projects --writable
+ghostvm init ~/VMs/dev.GhostVM --shared-folder ~/Projects --writable
 
 # When starting a VM (headless mode)
-vmctl start ~/VMs/dev.GhostVM --headless --shared-folder ~/Projects --read-only`}
+ghostvm start ~/VMs/dev.GhostVM --headless --shared-folder ~/Projects --read-only`}
       </CodeBlock>
 
       <h3>Via GUI</h3>

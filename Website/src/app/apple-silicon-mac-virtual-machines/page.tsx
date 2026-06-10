@@ -364,16 +364,16 @@ export default function AppleSiliconMacVirtualMachines() {
 # Available from Apple or via the GhostVM Restore Images window
 
 # Create a new VM
-vmctl init ~/VMs/my-vm.GhostVM \\
+ghostvm init ~/VMs/my-vm.GhostVM \\
   --cpus 4 \\
   --memory 8 \\
   --disk 64
 
 # Install macOS
-vmctl install ~/VMs/my-vm.GhostVM
+ghostvm install ~/VMs/my-vm.GhostVM
 
 # Start the VM
-vmctl start ~/VMs/my-vm.GhostVM`}
+ghostvm start ~/VMs/my-vm.GhostVM`}
         </CodeBlock>
 
         <h3>Running Multiple VMs</h3>

@@ -287,7 +287,7 @@ final class VMFileLayoutTests: XCTestCase {
         XCTAssertEqual(layout.hardwareModelURL.path, "/Users/test/VMs/MyVM.GhostVM/HardwareModel.bin")
         XCTAssertEqual(layout.machineIdentifierURL.path, "/Users/test/VMs/MyVM.GhostVM/MachineIdentifier.bin")
         XCTAssertEqual(layout.auxiliaryStorageURL.path, "/Users/test/VMs/MyVM.GhostVM/AuxiliaryStorage.bin")
-        XCTAssertEqual(layout.pidFileURL.path, "/Users/test/VMs/MyVM.GhostVM/vmctl.pid")
+        XCTAssertEqual(layout.pidFileURL.path, "/Users/test/VMs/MyVM.GhostVM/ghostvm.pid")
         XCTAssertEqual(layout.snapshotsDirectoryURL.path, "/Users/test/VMs/MyVM.GhostVM/Snapshots")
     }
 

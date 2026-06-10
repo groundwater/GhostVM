@@ -292,17 +292,17 @@ export default function GhostVMForAIAgents() {
         </p>
         <CodeBlock language="bash">
           {`# Create a VM with development-ready specs
-vmctl init ~/VMs/agent-template.GhostVM --cpus 4 --memory 8 --disk 64
-vmctl install ~/VMs/agent-template.GhostVM
+ghostvm init ~/VMs/agent-template.GhostVM --cpus 4 --memory 8 --disk 64
+ghostvm install ~/VMs/agent-template.GhostVM
 
 # Start it and install your tools
-vmctl start ~/VMs/agent-template.GhostVM
+ghostvm start ~/VMs/agent-template.GhostVM
 
 # Inside the VM: install Xcode CLI, Homebrew, Node, Python, etc.
 # Then shut down and snapshot
 
-vmctl stop ~/VMs/agent-template.GhostVM
-vmctl snapshot ~/VMs/agent-template.GhostVM create ready`}
+ghostvm stop ~/VMs/agent-template.GhostVM
+ghostvm snapshot ~/VMs/agent-template.GhostVM create ready`}
         </CodeBlock>
 
         <h3>2. Clone for Each Agent Session</h3>
@@ -325,11 +325,11 @@ cp -c ~/VMs/agent-template.GhostVM ~/VMs/agent-session-001.GhostVM`}
         </p>
         <CodeBlock language="bash">
           {`# Share only the project folder, read-only
-vmctl start ~/VMs/agent-session-001.GhostVM --headless \\
+ghostvm start ~/VMs/agent-session-001.GhostVM --headless \\
   --shared-folder ~/Projects/my-app --read-only
 
 # Or read-write if the agent needs to modify files
-vmctl start ~/VMs/agent-session-001.GhostVM --headless \\
+ghostvm start ~/VMs/agent-session-001.GhostVM --headless \\
   --shared-folder ~/Projects/my-app`}
         </CodeBlock>
 
@@ -347,10 +347,10 @@ vmctl start ~/VMs/agent-session-001.GhostVM --headless \\
         </p>
         <CodeBlock language="bash">
           {`# Create a checkpoint
-vmctl snapshot ~/VMs/agent-session-001.GhostVM create before-refactor
+ghostvm snapshot ~/VMs/agent-session-001.GhostVM create before-refactor
 
 # If things go wrong
-vmctl snapshot ~/VMs/agent-session-001.GhostVM revert before-refactor`}
+ghostvm snapshot ~/VMs/agent-session-001.GhostVM revert before-refactor`}
         </CodeBlock>
 
         <h3>6. Clean Up</h3>
@@ -360,7 +360,7 @@ vmctl snapshot ~/VMs/agent-session-001.GhostVM revert before-refactor`}
         </p>
         <CodeBlock language="bash">
           {`# Option A: Restore to clean state for reuse
-vmctl snapshot ~/VMs/agent-session-001.GhostVM revert ready
+ghostvm snapshot ~/VMs/agent-session-001.GhostVM revert ready
 
 # Option B: Delete the VM entirely
 rm -rf ~/VMs/agent-session-001.GhostVM`}

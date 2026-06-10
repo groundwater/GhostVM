@@ -1628,7 +1628,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let client = GhostClient(virtualMachine: vm, vmQueue: queue)
         self.ghostClient = client
 
-        // 1b. Host API service (Unix domain socket for vmctl)
+        // 1b. Host API service (Unix domain socket for ghostvm)
         let apiService = HostAPIService(vmName: vmName)
         apiService.start(client: client, vmWindow: self.window)
         self.hostAPIService = apiService

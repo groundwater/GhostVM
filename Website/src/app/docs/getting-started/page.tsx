@@ -60,13 +60,13 @@ export default function GettingStarted() {
       <h3>Using the CLI</h3>
       <CodeBlock language="bash">
         {`# Create a macOS VM
-vmctl init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
+ghostvm init ~/VMs/sandbox.GhostVM --cpus 6 --memory 16 --disk 128
 
 # Install macOS from a restore image
-vmctl install ~/VMs/sandbox.GhostVM
+ghostvm install ~/VMs/sandbox.GhostVM
 
 # Start the VM
-vmctl start ~/VMs/sandbox.GhostVM`}
+ghostvm start ~/VMs/sandbox.GhostVM`}
       </CodeBlock>
 
       <Callout variant="info" title="Restore Images">
