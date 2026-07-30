@@ -61,6 +61,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var healthCheckService: HealthCheckService?
     private var autoPortMapService: AutoPortMapService?
     private var hostAPIService: HostAPIService?
+    private var containerBridgeService: ContainerBridgeService?
     private var bridgeMonitorService: BridgeMonitorService?
     private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
@@ -1633,6 +1634,16 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         apiService.start(client: client, vmWindow: self.window)
         self.hostAPIService = apiService
 
+        // 1c. Container bridge: guest-initiated vsock control listener (port 5004).
+        // Experimental global gate — enable with:
+        //   defaults write org.ghostvm.ghostvm.helper HostContainersEnabled -bool true
+        if UserDefaults.standard.bool(forKey: "HostContainersEnabled") {
+            NSLog("GhostVMHelper: HostContainersEnabled=true — starting container bridge listener on vsock port \(ContainerBridgeConstants.port)")
+            let bridge = ContainerBridgeService(vm: vm, vmQueue: queue, vmHash: String(vmBundleURL.path.stableHash))
+            bridge.start()
+            self.containerBridgeService = bridge
+        }
+
         // 2. Persistent health check (vsock port 5002)
         let hcService = HealthCheckService()
         hcService.start(client: client)
@@ -1838,6 +1849,9 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         eventStreamService?.stop()
         eventStreamService = nil
+
+        containerBridgeService?.stop()
+        containerBridgeService = nil
 
         hostAPIService?.stop()
         hostAPIService = nil

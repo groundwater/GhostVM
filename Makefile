@@ -195,7 +195,7 @@ launch: app
 # Run unit tests
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
-	swift test --package-path macOS/GhostTools --filter AsyncVSockIOTests
+	swift test --package-path macOS/GhostTools
 
 # Run UI tests (excludes screenshot-capture tests; use 'make capture' for those)
 uitest: $(XCODE_PROJECT)
@@ -262,14 +262,16 @@ tools: ghosttools-icon
 	@echo "Building GhostTools..."
 	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
-	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
+	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/release/ghost-container"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
 	@# Assemble .app bundle
 	@rm -rf "$(GHOSTTOOLS_APP)"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/MacOS"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
+	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
+	vtool -set-build-version macos 14.0 15.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container"
 	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@# Generate release notes from git log since last tag
 	@LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null); \
@@ -290,8 +292,13 @@ debug-tools:
 	vtool -set-build-version macos 14.0 15.0 -replace \
 		-output $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug \
 		$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools
+	vtool -set-build-version macos 14.0 15.0 -replace \
+		-output $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug \
+		$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container
 	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug
+	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug
 	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug"
+	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug"
 	@echo "Copy to guest and use: lldb GhostTools-debug"
 
 # Generate GhostTools .icns from source PNG
@@ -351,6 +358,9 @@ dmg: tools
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	@# Include ghost-container at DMG root level for direct testing from mounted volume
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/ghost-container"
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
 		-hfs \
@@ -512,7 +522,9 @@ dist:
 	@mkdir -p "$(DIST_DIR)/ghosttools-stage"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(DIST_DIR)/ghosttools-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(DIST_DIR)/ghosttools-stage/"
 	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
+	codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/ghost-container"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
 	hdiutil makehybrid -o "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" \
 		-hfs -hfs-volume-name "GhostTools" \
