@@ -1,0 +1,5 @@
+framework module GhostHTTP3 {
+    umbrella header "GhostHTTP3.h"
+    export *
+    module * { export * }
+}
