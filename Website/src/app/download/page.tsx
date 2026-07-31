@@ -47,7 +47,7 @@ export default function DownloadPage() {
             </li>
             <li className="flex items-center gap-2">
               <Monitor className="w-4 h-4" />
-              macOS 15 Sequoia or later
+              macOS 26 Tahoe or later
             </li>
           </ul>
         </div>
@@ -57,7 +57,7 @@ export default function DownloadPage() {
             Build from Source
           </h3>
           <div className="text-sm text-gray-600 dark:text-gray-400 space-y-2">
-            <p>Requires Xcode 15+ and XcodeGen:</p>
+            <p>Requires Xcode 26+ and XcodeGen:</p>
             <pre className="terminal-text bg-gray-100 dark:bg-gray-900 rounded-lg p-3 overflow-x-auto text-xs">
               <code>
                 {`brew install xcodegen

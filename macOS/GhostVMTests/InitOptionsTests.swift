@@ -12,6 +12,7 @@ final class InitOptionsTests: XCTestCase {
         XCTAssertNil(options.sharedFolderPath)
         XCTAssertFalse(options.sharedFolderWritable)
         XCTAssertTrue(options.sharedFolders.isEmpty)
+        XCTAssertFalse(options.hostContainersEnabled)
     }
 
     func testCustomValues() {
@@ -22,7 +23,8 @@ final class InitOptionsTests: XCTestCase {
             restoreImagePath: "/path/to/restore.ipsw",
             diskImageFormat: .sparseFile,
             sharedFolderPath: "/Users/test/shared",
-            sharedFolderWritable: true
+            sharedFolderWritable: true,
+            hostContainersEnabled: true
         )
         XCTAssertEqual(options.cpus, 8)
         XCTAssertEqual(options.memoryGiB, 16)
@@ -31,5 +33,6 @@ final class InitOptionsTests: XCTestCase {
         XCTAssertEqual(options.restoreImagePath, "/path/to/restore.ipsw")
         XCTAssertEqual(options.sharedFolderPath, "/Users/test/shared")
         XCTAssertTrue(options.sharedFolderWritable)
+        XCTAssertTrue(options.hostContainersEnabled)
     }
 }

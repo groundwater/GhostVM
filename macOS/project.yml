@@ -2,8 +2,8 @@ name: GhostVM
 options:
   bundleIdPrefix: org.ghostvm
   deploymentTarget:
-    macOS: "15.0"
-  xcodeVersion: "15.4"
+    macOS: "26.0"
+  xcodeVersion: "26.0"
 
 packages:
   Sparkle:
@@ -11,6 +11,9 @@ packages:
     from: "2.6.0"
   GhostHTTP:
     path: ../Packages/GhostHTTP
+  Containerization:
+    url: https://github.com/apple/containerization.git
+    exactVersion: "0.40.1"
 
 settings:
   base:
@@ -45,6 +48,7 @@ targets:
       base:
         PRODUCT_NAME: GhostVMKit
         PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvmkit
+        SKIP_INSTALL: YES
         GENERATE_INFOPLIST_FILE: YES
         DEFINES_MODULE: YES
         SWIFT_VERSION: "5.0"
@@ -74,6 +78,7 @@ targets:
       base:
         PRODUCT_NAME: vmctl
         PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.vmctl
+        SKIP_INSTALL: YES
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_LSBackgroundOnly: YES
         SWIFT_VERSION: "5.0"
@@ -107,10 +112,19 @@ targets:
       - target: GhostVMKit
         embed: true
       - package: GhostHTTP
+      - target: GhostVMContainerRuntime
+        embed: true
+        codeSign: true
+      - target: GhostVMImageFetch
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
     settings:
       base:
         PRODUCT_NAME: GhostVMHelper
         PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper
+        SKIP_INSTALL: YES
         INFOPLIST_FILE: ../build/generated-plists/GhostVMHelper-Info.plist
         GENERATE_INFOPLIST_FILE: NO
         SWIFT_VERSION: "5.0"
@@ -119,8 +133,125 @@ targets:
         CODE_SIGN_IDENTITY: "Apple Development"
         DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
         ENABLE_HARDENED_RUNTIME: YES
+        EMBEDDED_CONTENT_CONTAINS_SWIFT: YES
         LD_RUNPATH_SEARCH_PATHS:
           - "@executable_path/../Frameworks"
+    postBuildScripts:
+      - name: Embed Container Helper Swift Libraries
+        basedOnDependencyAnalysis: false
+        script: |
+          SWIFT_STDLIB_TOOL="${TOOLCHAIN_DIR}/usr/bin/swift-stdlib-tool"
+          RUNTIME="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/XPCServices/ghostvm-container-runtime.xpc/Contents/MacOS/ghostvm-container-runtime"
+          FETCHER="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/ghostvm-image-fetch"
+          FRAMEWORKS="${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/Frameworks"
+          mkdir -p "${FRAMEWORKS}"
+          for CANDIDATE in "${TOOLCHAIN_DIR}"/usr/lib/swift-*/macosx; do
+            if [ -f "${CANDIDATE}/libswiftCompatibilitySpan.dylib" ]; then
+              SWIFT_LIBS="${CANDIDATE}"
+            fi
+          done
+          test -n "${SWIFT_LIBS:-}"
+          if [ -n "${EXPANDED_CODE_SIGN_IDENTITY:-}" ]; then
+            "${SWIFT_STDLIB_TOOL}" --copy --scan-executable "${RUNTIME}" --scan-executable "${FETCHER}" --platform "${PLATFORM_NAME}" --source-libraries "${SWIFT_LIBS}" --destination "${FRAMEWORKS}" --sign "${EXPANDED_CODE_SIGN_IDENTITY}"
+          else
+            "${SWIFT_STDLIB_TOOL}" --copy --scan-executable "${RUNTIME}" --scan-executable "${FETCHER}" --platform "${PLATFORM_NAME}" --source-libraries "${SWIFT_LIBS}" --destination "${FRAMEWORKS}"
+          fi
+          rm -f "${FRAMEWORKS}/libswiftCompatibilitySpan.dylib.original"
+
+  GhostVMContainerRuntime:
+    type: xpc-service
+    platform: macOS
+    sources:
+      - path: GhostVMContainerRuntime
+        excludes:
+          - "Info.plist"
+          - "entitlements.plist"
+    dependencies:
+      - target: GhostVMKit
+        link: true
+        embed: false
+      - package: Containerization
+        product: Containerization
+      - package: Containerization
+        product: ContainerizationOCI
+      - package: Containerization
+        product: ContainerizationOS
+      - package: Containerization
+        product: ContainerizationExtras
+    settings:
+      base:
+        PRODUCT_NAME: ghostvm-container-runtime
+        # Provisioning constraint: the runtime reuses the helper's
+        # org.ghostvm.ghostvm.helper application identifier / vmnet Developer ID
+        # provisioning profile (already authorized) as a deliberate duplicate
+        # identity for this testable DMG. Do not change without a new profile.
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.helper
+        SKIP_INSTALL: YES
+        INFOPLIST_FILE: GhostVMContainerRuntime/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_ENTITLEMENTS: GhostVMContainerRuntime/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/../Frameworks"
+          - "@executable_path/../../../../Frameworks"
+
+  GhostVMImageFetch:
+    type: tool
+    platform: macOS
+    sources:
+      - path: GhostVMImageFetch
+    dependencies:
+      - package: Containerization
+        product: Containerization
+      - package: Containerization
+        product: ContainerizationArchive
+      - package: Containerization
+        product: ContainerizationExtras
+      - package: Containerization
+        product: ContainerizationOCI
+    settings:
+      base:
+        PRODUCT_NAME: ghostvm-image-fetch
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.image-fetch
+        SKIP_INSTALL: YES
+        SWIFT_VERSION: "6.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_HARDENED_RUNTIME: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "@executable_path/Frameworks"
+          - "@executable_path/../Frameworks"
+
+  GhostVMFS:
+    type: extensionkit-extension
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: GhostVMFS
+        excludes:
+          - "*.plist"
+    dependencies:
+      - sdk: FSKit.framework
+      - sdk: ExtensionFoundation.framework
+    settings:
+      base:
+        PRODUCT_NAME: GhostVMFS
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm.fs
+        SKIP_INSTALL: YES
+        INFOPLIST_FILE: ../build/generated-plists/GhostVMFS-Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: GhostVMFS/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.0"
 
   GhostVM:
     type: application
@@ -150,11 +281,15 @@ targets:
         copy:
           destination: plugins
           subpath: Helpers
+      - target: GhostVMFS
+        embed: true
+        codeSign: true
       - package: Sparkle
     settings:
       base:
         PRODUCT_NAME: GhostVM
         PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostvm
+        SKIP_INSTALL: NO
         INFOPLIST_FILE: ../build/generated-plists/GhostVM-Info.plist
         CODE_SIGN_ENTITLEMENTS: GhostVM/entitlements.plist
         CODE_SIGN_STYLE: Automatic

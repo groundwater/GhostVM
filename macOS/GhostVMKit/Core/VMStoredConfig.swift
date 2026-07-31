@@ -42,6 +42,8 @@ public struct VMStoredConfig: Codable {
     public var portForwards: [PortForwardConfig]
     // Network configuration (NAT vs bridged)
     public var networkConfig: NetworkConfig?
+    // Allows this VM to request host-backed containers.
+    public var hostContainersEnabled: Bool
     // Icon mode: nil = static (icon.png), "dynamic" = mirror guest foreground app
     public var iconMode: String?
     // Persisted VM window state
@@ -76,6 +78,7 @@ public struct VMStoredConfig: Codable {
         case macAddress
         case portForwards
         case networkConfig
+        case hostContainersEnabled
         case iconMode
         case windowWidth
         case windowHeight
@@ -109,6 +112,7 @@ public struct VMStoredConfig: Codable {
         macAddress: String? = nil,
         portForwards: [PortForwardConfig] = [],
         networkConfig: NetworkConfig? = nil,
+        hostContainersEnabled: Bool = false,
         iconMode: String? = nil,
         windowWidth: Double? = nil,
         windowHeight: Double? = nil,
@@ -140,6 +144,7 @@ public struct VMStoredConfig: Codable {
         self.macAddress = macAddress
         self.portForwards = portForwards
         self.networkConfig = networkConfig
+        self.hostContainersEnabled = hostContainersEnabled
         self.iconMode = iconMode
         self.windowWidth = windowWidth
         self.windowHeight = windowHeight
@@ -175,6 +180,7 @@ public struct VMStoredConfig: Codable {
         // Port forwards - defaults to empty for backwards compatibility
         portForwards = try container.decodeIfPresent([PortForwardConfig].self, forKey: .portForwards) ?? []
         networkConfig = try container.decodeIfPresent(NetworkConfig.self, forKey: .networkConfig)
+        hostContainersEnabled = try container.decodeIfPresent(Bool.self, forKey: .hostContainersEnabled) ?? false
         iconMode = try container.decodeIfPresent(String.self, forKey: .iconMode)
         windowWidth = try container.decodeIfPresent(Double.self, forKey: .windowWidth)
         windowHeight = try container.decodeIfPresent(Double.self, forKey: .windowHeight)

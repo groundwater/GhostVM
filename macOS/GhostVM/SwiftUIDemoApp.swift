@@ -739,6 +739,7 @@ struct CreateVMDemoView: View {
     @State private var diskImageFormat: DiskImageFormat = .defaultForCurrentHost
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
+    @State private var hostContainersEnabled = false
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
     @State private var isCreating: Bool = false
@@ -834,6 +835,14 @@ struct CreateVMDemoView: View {
 
             labeledRow("Network") {
                 NetworkSettingsView(networkConfig: $networkConfig)
+            }
+
+            labeledRow("Containers") {
+                HostContainerSettingsView(
+                    isEnabled: $hostContainersEnabled,
+                    networkMode: networkConfig.mode,
+                    accessibilityIdentifier: "createVM.hostContainersToggle"
+                )
             }
 
             Spacer(minLength: 8)
@@ -1009,6 +1018,7 @@ struct CreateVMDemoView: View {
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
         opts.networkConfig = networkConfig
+        opts.hostContainersEnabled = hostContainersEnabled && networkConfig.mode == .nat
 
         isCreating = true
 
@@ -1411,6 +1421,7 @@ struct EditVMView: View {
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
     @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
+    @State private var hostContainersEnabled = false
     @State private var diskGiB: String = ""
     @State private var customIcon: NSImage?
     @State private var customIconChanged: Bool = false
@@ -1508,6 +1519,14 @@ struct EditVMView: View {
 
                         labeledRow("Network") {
                             NetworkSettingsView(networkConfig: $networkConfig)
+                        }
+
+                        labeledRow("Containers") {
+                            HostContainerSettingsView(
+                                isEnabled: $hostContainersEnabled,
+                                networkMode: networkConfig.mode,
+                                accessibilityIdentifier: "editVM.hostContainersToggle"
+                            )
                         }
 
                         if networkConfig.mode == .nat {
@@ -1804,6 +1823,8 @@ struct EditVMView: View {
 
                     // Load network config
                     self.networkConfig = config.networkConfig ?? NetworkConfig.defaultConfig
+                    self.hostContainersEnabled = config.hostContainersEnabled
+                        && self.networkConfig.mode == .nat
 
                     // Load icon mode
                     self.isDynamicIconMode = config.iconMode == "stack"
@@ -1865,6 +1886,7 @@ struct EditVMView: View {
                     storedConfig.iconMode = nil
                 }
                 storedConfig.networkConfig = networkConfig
+                storedConfig.hostContainersEnabled = hostContainersEnabled && networkConfig.mode == .nat
                 try store.save(storedConfig)
 
                 // Save or remove custom icon

@@ -141,6 +141,63 @@ public struct FSListResponse: Codable {
     }
 }
 
+public enum GuestFileType: String, Codable, Equatable, Sendable {
+    case file
+    case directory
+    case symbolicLink
+    case other
+}
+
+public struct GuestFileMetadata: Codable, Equatable, Sendable {
+    public let name: String
+    public let type: GuestFileType
+    public let size: UInt64
+    public let mode: UInt32
+    public let uid: UInt32
+    public let gid: UInt32
+    public let inode: UInt64
+    public let device: UInt64
+    public let linkCount: UInt32
+    public let modifiedSeconds: Int
+    public let modifiedNanoseconds: Int32
+
+    public init(
+        name: String,
+        type: GuestFileType,
+        size: UInt64,
+        mode: UInt32,
+        uid: UInt32,
+        gid: UInt32,
+        inode: UInt64,
+        device: UInt64,
+        linkCount: UInt32,
+        modifiedSeconds: Int,
+        modifiedNanoseconds: Int32
+    ) {
+        self.name = name
+        self.type = type
+        self.size = size
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.inode = inode
+        self.device = device
+        self.linkCount = linkCount
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+    }
+}
+
+public struct GuestDirectoryMetadata: Codable, Equatable, Sendable {
+    public let path: String
+    public let entries: [GuestFileMetadata]
+
+    public init(path: String, entries: [GuestFileMetadata]) {
+        self.path = path
+        self.entries = entries
+    }
+}
+
 // MARK: - Accessibility Types
 
 /// Frame rectangle for accessibility elements

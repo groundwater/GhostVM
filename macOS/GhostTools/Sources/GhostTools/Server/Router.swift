@@ -60,7 +60,7 @@ final class Router: @unchecked Sendable {
             return handleFrontmostApp(request)
         } else if path == "/api/v1/apps" || path.hasPrefix("/api/v1/apps/") {
             return handleApps(request: request, body: body)
-        } else if path == "/api/v1/fs" || path == "/api/v1/fs/mkdir" || path == "/api/v1/fs/delete" || path == "/api/v1/fs/move" {
+        } else if path == "/api/v1/fs" || path.hasPrefix("/api/v1/fs/") {
             return handleFS(request: request, body: body)
         } else if path == "/api/v1/exec" {
             return handleExec(request: request, body: body)
@@ -553,6 +553,43 @@ final class Router: @unchecked Sendable {
             let queryPath = parseQuery(request.path, key: "path") ?? NSHomeDirectory()
             return listDirectory(at: queryPath)
         }
+
+        if path == "/api/v1/fs/metadata" && request.method == .GET {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return metadata(at: queryPath)
+        }
+
+        if path == "/api/v1/fs/list" && request.method == .GET {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return listDirectoryMetadata(at: queryPath)
+        }
+
+        if path == "/api/v1/fs/read" && request.method == .GET {
+            guard
+                let queryPath = parseQuery(request.path, key: "path"),
+                let offsetValue = parseQuery(request.path, key: "offset"),
+                let offset = UInt64(offsetValue),
+                let lengthValue = parseQuery(request.path, key: "length"),
+                let length = Int(lengthValue),
+                length >= 0,
+                length <= 1024 * 1024
+            else {
+                return HTTPResponse.error(.badRequest, message: "Valid path, offset, and length are required")
+            }
+            return readFile(at: queryPath, offset: offset, length: length)
+        }
+
+        if path == "/api/v1/fs/readlink" && request.method == .GET {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return readSymbolicLink(at: queryPath)
+        }
+
         guard request.method == .POST else {
             return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
         }
@@ -623,6 +660,102 @@ final class Router: @unchecked Sendable {
         } catch {
             return HTTPResponse.error(.internalServerError, message: "list failed: \(error.localizedDescription)")
         }
+    }
+
+    private func metadata(at path: String) -> HTTPResponse {
+        do {
+            return HTTPResponse.json(try JSONEncoder().encode(try fileMetadata(at: path)))
+        } catch let error as POSIXError where error.code == .ENOENT {
+            return HTTPResponse.error(.notFound, message: "Path not found")
+        } catch let error as POSIXError where error.code == .EACCES {
+            return HTTPResponse.error(.forbidden, message: "Access denied")
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to read metadata: \(error.localizedDescription)")
+        }
+    }
+
+    private func listDirectoryMetadata(at path: String) -> HTTPResponse {
+        do {
+            let names = try FileManager.default.contentsOfDirectory(atPath: path)
+            let entries = try names.sorted().map { name in
+                try fileMetadata(at: (path as NSString).appendingPathComponent(name))
+            }
+            return HTTPResponse.json(try JSONEncoder().encode(GuestDirectoryMetadata(path: path, entries: entries)))
+        } catch let error as POSIXError where error.code == .ENOENT {
+            return HTTPResponse.error(.notFound, message: "Path not found")
+        } catch let error as POSIXError where error.code == .EACCES {
+            return HTTPResponse.error(.forbidden, message: "Access denied")
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to list directory: \(error.localizedDescription)")
+        }
+    }
+
+    private func readFile(at path: String, offset: UInt64, length: Int) -> HTTPResponse {
+        do {
+            let metadata = try fileMetadata(at: path)
+            guard metadata.type == .file else {
+                return HTTPResponse.error(.badRequest, message: "Path is not a regular file")
+            }
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? handle.close() }
+            try handle.seek(toOffset: offset)
+            let data = try handle.read(upToCount: length) ?? Data()
+            return HTTPResponse(
+                status: .ok,
+                headers: ["Content-Type": "application/octet-stream"],
+                body: .bytes(data)
+            )
+        } catch let error as POSIXError where error.code == .ENOENT {
+            return HTTPResponse.error(.notFound, message: "Path not found")
+        } catch let error as POSIXError where error.code == .EACCES {
+            return HTTPResponse.error(.forbidden, message: "Access denied")
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to read file: \(error.localizedDescription)")
+        }
+    }
+
+    private func readSymbolicLink(at path: String) -> HTTPResponse {
+        do {
+            let target = try FileManager.default.destinationOfSymbolicLink(atPath: path)
+            return HTTPResponse(
+                status: .ok,
+                headers: ["Content-Type": "text/plain; charset=utf-8"],
+                body: .bytes(Data(target.utf8))
+            )
+        } catch let error as POSIXError where error.code == .ENOENT {
+            return HTTPResponse.error(.notFound, message: "Path not found")
+        } catch {
+            return HTTPResponse.error(.internalServerError, message: "Failed to read symbolic link: \(error.localizedDescription)")
+        }
+    }
+
+    private func fileMetadata(at path: String) throws -> GuestFileMetadata {
+        var info = stat()
+        guard Darwin.lstat(path, &info) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        let type: GuestFileType
+        switch info.st_mode & S_IFMT {
+        case S_IFREG: type = .file
+        case S_IFDIR: type = .directory
+        case S_IFLNK: type = .symbolicLink
+        default: type = .other
+        }
+
+        return GuestFileMetadata(
+            name: URL(fileURLWithPath: path).lastPathComponent,
+            type: type,
+            size: UInt64(max(0, info.st_size)),
+            mode: UInt32(info.st_mode),
+            uid: info.st_uid,
+            gid: info.st_gid,
+            inode: info.st_ino,
+            device: UInt64(info.st_dev),
+            linkCount: UInt32(info.st_nlink),
+            modifiedSeconds: info.st_mtimespec.tv_sec,
+            modifiedNanoseconds: Int32(info.st_mtimespec.tv_nsec)
+        )
     }
 
     // MARK: - Exec
@@ -824,4 +957,30 @@ final class RouterBatchTracker: @unchecked Sendable {
 /// domains, so a captured `var` would warn).
 final class LaunchResult: @unchecked Sendable {
     var success: Bool = false
+}
+
+enum GuestFileType: String, Codable {
+    case file
+    case directory
+    case symbolicLink
+    case other
+}
+
+struct GuestFileMetadata: Codable {
+    let name: String
+    let type: GuestFileType
+    let size: UInt64
+    let mode: UInt32
+    let uid: UInt32
+    let gid: UInt32
+    let inode: UInt64
+    let device: UInt64
+    let linkCount: UInt32
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int32
+}
+
+struct GuestDirectoryMetadata: Codable {
+    let path: String
+    let entries: [GuestFileMetadata]
 }

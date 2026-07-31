@@ -19,6 +19,10 @@ public protocol GhostClientProtocol {
 
     // File system
     func listDirectory(path: String) async throws -> FSListResponse
+    func fileMetadata(path: String) async throws -> GuestFileMetadata
+    func listDirectoryMetadata(path: String) async throws -> GuestDirectoryMetadata
+    func readFile(path: String, offset: UInt64, length: Int) async throws -> Data
+    func readSymbolicLink(path: String) async throws -> String
     func mkdir(path: String) async throws
     func deleteFile(path: String) async throws
     func moveFile(from: String, to: String) async throws

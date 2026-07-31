@@ -7,7 +7,7 @@ import { siteConfig } from "@/config/site";
 export const metadata: Metadata = {
   title: "Build GhostVM from Source - Xcode Setup Guide",
   description:
-    "Build GhostVM from source with Xcode 15+ and XcodeGen. Clone the repo, generate project, and compile the app. Contributor guide for Mac developers.",
+    "Build GhostVM from source with Xcode 26+ and XcodeGen. Clone the repo, generate project, and compile the app. Contributor guide for Mac developers.",
 };
 
 export default function BuildingFromSource() {
@@ -20,8 +20,8 @@ export default function BuildingFromSource() {
 
       <h2>Prerequisites</h2>
       <ul>
-        <li>macOS 15+ (Sequoia) on Apple Silicon (M1 or later)</li>
-        <li>Xcode 15+</li>
+        <li>macOS 26+ (Tahoe) on Apple Silicon (M1 or later)</li>
+        <li>Xcode 26+</li>
         <li>
           <a href="https://github.com/yonaskolb/XcodeGen">XcodeGen</a>
         </li>

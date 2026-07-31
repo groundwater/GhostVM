@@ -65,6 +65,10 @@ final class MockGhostClient: GhostClientProtocol {
 
     // MARK: - File system stubs
     func listDirectory(path: String) async throws -> FSListResponse { throw MockError.notImplemented }
+    func fileMetadata(path: String) async throws -> GuestFileMetadata { throw MockError.notImplemented }
+    func listDirectoryMetadata(path: String) async throws -> GuestDirectoryMetadata { throw MockError.notImplemented }
+    func readFile(path: String, offset: UInt64, length: Int) async throws -> Data { throw MockError.notImplemented }
+    func readSymbolicLink(path: String) async throws -> String { throw MockError.notImplemented }
     func mkdir(path: String) async throws {}
     func deleteFile(path: String) async throws {}
     func moveFile(from: String, to: String) async throws {}

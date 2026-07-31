@@ -39,6 +39,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var virtualMachine: VZVirtualMachine?
     private var vmQueue: DispatchQueue?
     private var layout: VMFileLayout?
+    private var sharedVmnetNetwork: SharedVmnetNetwork?
+    private var hostContainersEnabled = false
     private var pendingWindowStateSaveWorkItem: DispatchWorkItem?
     private var shouldEnterFullScreenOnShow = false
     private let windowConfigQueue = DispatchQueue(label: "org.ghostvm.helper.windowConfig", qos: .utility)
@@ -61,6 +63,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
     private var healthCheckService: HealthCheckService?
     private var autoPortMapService: AutoPortMapService?
     private var hostAPIService: HostAPIService?
+    private var guestFileSystemBridgeService: GuestFileSystemBridgeService?
+    private var containerBridgeService: ContainerBridgeService?
     private var bridgeMonitorService: BridgeMonitorService?
     private var autoPortMapCancellable: AnyCancellable?
     private var fileTransferCancellable: AnyCancellable?
@@ -1333,9 +1337,44 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 try store.save(config)
             }
 
+            // Container-enabled NAT VMs own one vmnet network shared by the
+            // macOS guest and every container launched for this VM.
+            let networkConfig = config.networkConfig ?? NetworkConfig.defaultConfig
+            hostContainersEnabled = config.hostContainersEnabled && networkConfig.mode == .nat
+            if hostContainersEnabled {
+                guard let vmMACAddress = config.macAddress else {
+                    throw VMError.message("NAT networking requires a persistent VM MAC address.")
+                }
+                let networkIdentifier = String(vmBundleURL.path.stableHash)
+                let sharedNetwork = try SharedVmnetNetwork(
+                    networkIdentifier: networkIdentifier,
+                    vmMACAddress: vmMACAddress,
+                    preferredIPv4Subnet: networkConfig.vmnetIPv4Subnet
+                )
+                sharedVmnetNetwork = sharedNetwork
+                if networkConfig.vmnetIPv4Subnet != sharedNetwork.ipv4Subnet {
+                    var updatedNetworkConfig = networkConfig
+                    updatedNetworkConfig.vmnetIPv4Subnet = sharedNetwork.ipv4Subnet
+                    config.networkConfig = updatedNetworkConfig
+                    config.modifiedAt = Date()
+                    try store.save(config)
+                }
+                NSLog(
+                    "GhostVMHelper: Created shared vmnet network %@ (%@, gateway %@)",
+                    networkIdentifier,
+                    sharedNetwork.ipv4Subnet,
+                    sharedNetwork.ipv4Gateway
+                )
+            }
+
             // Build VM configuration
             let builder = VMConfigurationBuilder(layout: layout!, storedConfig: config)
-            let vmConfiguration = try builder.makeConfiguration(headless: false, connectSerialToStandardIO: false, runtimeSharedFolder: nil)
+            let vmConfiguration = try builder.makeConfiguration(
+                headless: false,
+                connectSerialToStandardIO: false,
+                runtimeSharedFolder: nil,
+                natNetworkAttachment: sharedVmnetNetwork?.attachment
+            )
 
             // Create VM
             vmQueue = DispatchQueue(label: "ghostvm.helper.\(vmName)")
@@ -1617,6 +1656,8 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
             ownsLock = false
         }
         vmView?.virtualMachine = nil
+        sharedVmnetNetwork?.close()
+        sharedVmnetNetwork = nil
     }
 
     // MARK: - Services
@@ -1632,6 +1673,35 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
         let apiService = HostAPIService(vmName: vmName)
         apiService.start(client: client, vmWindow: self.window)
         self.hostAPIService = apiService
+
+        // 1c. Container bridge: guest-initiated vsock control listener (port 5004).
+        if hostContainersEnabled {
+            NSLog("GhostVMHelper: host containers enabled — starting container bridge listener on vsock port \(ContainerBridgeConstants.port)")
+            let fileSystemBridge = GuestFileSystemBridgeService()
+            do {
+                try fileSystemBridge.start(client: client)
+                self.guestFileSystemBridgeService = fileSystemBridge
+                if let debugPath = UserDefaults.standard.string(forKey: "GuestFilesystemExportPath") {
+                    let resource = try fileSystemBridge.registerExport(guestPath: debugPath)
+                    NSLog("GhostVMHelper: Debug guest filesystem resource: \(resource.resourceURL.absoluteString)")
+                }
+            } catch {
+                NSLog("GhostVMHelper: Failed to start guest filesystem bridge: \(error.localizedDescription)")
+            }
+            if let sharedNetwork = sharedVmnetNetwork {
+                let bridge = ContainerBridgeService(
+                    vm: vm,
+                    vmQueue: queue,
+                    vmHash: String(vmBundleURL.path.stableHash),
+                    sharedNetwork: sharedNetwork,
+                    fileSystemBridge: fileSystemBridge
+                )
+                bridge.start()
+                self.containerBridgeService = bridge
+            } else {
+                NSLog("GhostVMHelper: Container bridge requires a shared vmnet network")
+            }
+        }
 
         // 2. Guest health polling via the unified HTTP server on vsock port 5000
         let hcService = HealthCheckService()
@@ -1838,6 +1908,12 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
         eventStreamService?.stop()
         eventStreamService = nil
+
+        containerBridgeService?.stop()
+        containerBridgeService = nil
+
+        guestFileSystemBridgeService?.stop()
+        guestFileSystemBridgeService = nil
 
         hostAPIService?.stop()
         hostAPIService = nil
@@ -2324,6 +2400,17 @@ private func formattedBuildDate(from version: String) -> String? {
 
 // which PortForwardListener handles gracefully.
 signal(SIGPIPE, SIG_IGN)
+
+if CommandLine.arguments.contains("--container-runtime-xpc-self-test") {
+    do {
+        try ContainerRuntimeXPCClient.ping()
+        print("GhostVMContainerRuntime XPC: ready")
+        exit(0)
+    } catch {
+        FileHandle.standardError.write(Data("GhostVMContainerRuntime XPC: \(error.localizedDescription)\n".utf8))
+        exit(1)
+    }
+}
 
 MainActor.assumeIsolated {
     let app = HelperApplication.shared

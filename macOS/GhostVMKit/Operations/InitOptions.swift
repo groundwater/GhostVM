@@ -11,6 +11,7 @@ public struct InitOptions {
     public var sharedFolderWritable: Bool
     public var sharedFolders: [SharedFolderConfig]
     public var networkConfig: NetworkConfig?
+    public var hostContainersEnabled: Bool
 
     public init(
         cpus: Int = 4,
@@ -21,7 +22,8 @@ public struct InitOptions {
         sharedFolderPath: String? = nil,
         sharedFolderWritable: Bool = false,
         sharedFolders: [SharedFolderConfig] = [],
-        networkConfig: NetworkConfig? = nil
+        networkConfig: NetworkConfig? = nil,
+        hostContainersEnabled: Bool = false
     ) {
         self.cpus = cpus
         self.memoryGiB = memoryGiB
@@ -32,5 +34,6 @@ public struct InitOptions {
         self.sharedFolderWritable = sharedFolderWritable
         self.sharedFolders = sharedFolders
         self.networkConfig = networkConfig
+        self.hostContainersEnabled = hostContainersEnabled
     }
 }

@@ -22,7 +22,7 @@ export default function DownloadCTA() {
         <div className="flex flex-col sm:flex-row items-center justify-center gap-6 mt-8 text-ghost-200 text-sm">
           <div className="flex items-center gap-2">
             <Monitor className="w-4 h-4" />
-            macOS 15+ (Sequoia)
+            macOS 26+ (Tahoe)
           </div>
           <div className="flex items-center gap-2">
             <Cpu className="w-4 h-4" />

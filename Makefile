@@ -10,9 +10,10 @@ GHOSTTOOLS_SIGN_ID ?= $(CODESIGN_ID)
 APP_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_App_Distribution.provisionprofile
 HELPER_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_Helper_Distribution.provisionprofile
 VMCTL_PROVISIONING_PROFILE ?= .var/profiles/vmctl_command_line.provisionprofile
+FSKIT_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_FS_Distribution.provisionprofile
 
-# Inject build timestamp into patch version during development builds.
-# Set to 0 for production releases (make dist does this automatically).
+# Inject the build timestamp into the patch version.
+# Set to 0 only when a canonical release version is explicitly required.
 INJECT_TIMESTAMP ?= 1
 BUILD_TIMESTAMP := $(shell date +%Y%m%d%H%M%S)
 APP_SKIP_XCODE_SIGNING ?= 0
@@ -30,15 +31,18 @@ PLIST_GEN_DIR = build/generated-plists
 PLIST_GHOSTVM_TEMPLATE = macOS/GhostVM/VMApp-Info.template.plist
 PLIST_HELPER_TEMPLATE  = macOS/GhostVMHelper/Info.template.plist
 PLIST_TOOLS_TEMPLATE   = macOS/GhostTools/Sources/GhostTools/Resources/Info.template.plist
+PLIST_FSKIT_TEMPLATE   = macOS/GhostVMFS/Info.template.plist
 
 PLIST_GHOSTVM = $(PLIST_GEN_DIR)/GhostVM-Info.plist
 PLIST_HELPER  = $(PLIST_GEN_DIR)/GhostVMHelper-Info.plist
 PLIST_TOOLS   = $(PLIST_GEN_DIR)/GhostTools-Info.plist
+PLIST_FSKIT   = $(PLIST_GEN_DIR)/GhostVMFS-Info.plist
 
 BASE_VERSION := $(strip $(shell cat "$(VERSION_FILE)" 2>/dev/null))
 ifeq ($(BASE_VERSION),)
 $(error Missing $(VERSION_FILE). Create it with a version like 1.85.0)
 endif
+BASE_MAJOR_MINOR := $(word 1,$(subst ., ,$(BASE_VERSION))).$(word 2,$(subst ., ,$(BASE_VERSION)))
 
 .PHONY: all cli app clean help run launch generate test uitest framework dist debug-dmg tools debug-tools dmg ghosttools-icon ghostvm-icon debug debug-export website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist
 
@@ -55,7 +59,8 @@ render-plists:
 	@for ITEM in \
 		"$(PLIST_GHOSTVM_TEMPLATE):$(PLIST_GHOSTVM)" \
 		"$(PLIST_HELPER_TEMPLATE):$(PLIST_HELPER)" \
-		"$(PLIST_TOOLS_TEMPLATE):$(PLIST_TOOLS)"; do \
+		"$(PLIST_TOOLS_TEMPLATE):$(PLIST_TOOLS)" \
+		"$(PLIST_FSKIT_TEMPLATE):$(PLIST_FSKIT)"; do \
 		TEMPLATE="$${ITEM%%:*}"; \
 		OUT="$${ITEM#*:}"; \
 		cp "$$TEMPLATE" "$$OUT"; \
@@ -66,7 +71,7 @@ render-plists:
 prepare-app-plists: render-plists
 ifeq ($(INJECT_TIMESTAMP),1)
 	@echo "Injecting build timestamp $(BUILD_TIMESTAMP) into GhostVM and GhostVMHelper..."
-	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)"; do \
+	@for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)" "$(PLIST_FSKIT)"; do \
 		MAJOR_MINOR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST" | sed 's/\.[^.]*$$//'); \
 		plutil -replace CFBundleShortVersionString -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
 		plutil -replace CFBundleVersion -string "$$MAJOR_MINOR.$(BUILD_TIMESTAMP)" "$$PLIST"; \
@@ -92,12 +97,25 @@ framework: $(XCODE_PROJECT)
 
 # Build the vmctl CLI (depends on framework)
 cli: $(XCODE_PROJECT)
+ifeq ($(APP_SKIP_XCODE_SIGNING),1)
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme vmctl \
+		-configuration $(XCODE_CONFIG) \
+		-derivedDataPath $(BUILD_DIR) \
+		CODE_SIGN_STYLE=Manual \
+		CODE_SIGN_IDENTITY=- \
+		DEVELOPMENT_TEAM= \
+		CODE_SIGNING_ALLOWED=NO \
+		CODE_SIGNING_REQUIRED=NO \
+		build
+else
 	xcodebuild -project $(XCODE_PROJECT) \
 		-scheme vmctl \
 		-configuration $(XCODE_CONFIG) \
 		-derivedDataPath $(BUILD_DIR) \
 		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
+endif
 	@echo "vmctl built at: $(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/vmctl.app/Contents/MacOS/vmctl"
 
 # Build the SwiftUI app via xcodebuild (includes GhostTools.dmg)
@@ -247,7 +265,7 @@ launch: app
 # Run unit tests
 test: $(XCODE_PROJECT)
 	xcodebuild test -project $(XCODE_PROJECT) -scheme GhostVMTests -destination 'platform=macOS'
-	swift test --package-path macOS/GhostTools --filter AsyncVSockIOTests
+	swift test --package-path macOS/GhostTools
 
 # Run UI tests (excludes screenshot-capture tests; use 'make capture' for those)
 uitest: $(XCODE_PROJECT)
@@ -308,20 +326,24 @@ GHOSTTOOLS_DIR = macOS/GhostTools
 GHOSTTOOLS_BUILD_DIR = $(BUILD_DIR)/GhostTools
 GHOSTTOOLS_APP = $(GHOSTTOOLS_BUILD_DIR)/GhostTools.app
 GHOSTTOOLS_DMG = $(BUILD_DIR)/GhostTools.dmg
+# Virtualization.framework rejects compressed UDIF images as storage attachments.
+GHOSTTOOLS_DMG_FORMAT = UDRW
 
 # Build GhostTools guest agent (.app bundle, signed)
 tools: ghosttools-icon
 	@echo "Building GhostTools..."
 	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
-	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools"
+	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/release/ghost-container"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
 	@# Assemble .app bundle
 	@rm -rf "$(GHOSTTOOLS_APP)"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/MacOS"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
+	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
+	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container"
 	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@# Generate release notes from git log since last tag
 	@LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null); \
@@ -342,8 +364,13 @@ debug-tools:
 	vtool -set-build-version macos 26.0 26.0 -replace \
 		-output $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug \
 		$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools
+	vtool -set-build-version macos 26.0 26.0 -replace \
+		-output $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug \
+		$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container
 	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug
+	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug
 	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug"
+	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug"
 	@echo "Copy to guest and use: lldb GhostTools-debug"
 
 # Generate GhostTools .icns from source PNG
@@ -403,10 +430,14 @@ dmg: tools
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	@# Include ghost-container at DMG root level for direct testing from mounted volume
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/ghost-container"
 	@rm -f "$(GHOSTTOOLS_DMG)"
-	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
-		-hfs -hfs-volume-name "GhostTools" \
-		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	hdiutil create -volname "GhostTools" \
+		-srcfolder "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage" \
+		-ov -format $(GHOSTTOOLS_DMG_FORMAT) "$(GHOSTTOOLS_DMG)"
+	@xattr -c "$(GHOSTTOOLS_DMG)"
 	@echo "GhostTools.dmg created at: $(GHOSTTOOLS_DMG)"
 
 # Sparkle tools for signing updates
@@ -427,7 +458,8 @@ sparkle-tools: $(SPARKLE_TOOLS_DIR)/bin/sign_update
 # Distribution settings
 DIST_DIR = build/dist
 DMG_NAME = GhostVM
-VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo "dev")
+VERSION ?= $(BASE_MAJOR_MINOR).$(BUILD_TIMESTAMP)
+NOTARY_KEYCHAIN_PROFILE ?=
 
 # Auto-detect Developer ID Application identity for distribution
 DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
@@ -436,7 +468,7 @@ DIST_CODESIGN_ID := $(shell security find-identity -v -p codesigning | grep "Dev
 # Note: If you get "Operation not permitted", grant Terminal Full Disk Access in
 # System Preferences > Privacy & Security > Full Disk Access
 dist:
-	$(MAKE) app cli INJECT_TIMESTAMP=0 APP_SKIP_XCODE_SIGNING=1
+	$(MAKE) app cli INJECT_TIMESTAMP=1 BUILD_TIMESTAMP=$(BUILD_TIMESTAMP) APP_SKIP_XCODE_SIGNING=1
 	@# Verify we have a real signing identity for distribution
 	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
 		echo "Error: No 'Developer ID Application' identity found in keychain."; \
@@ -445,14 +477,14 @@ dist:
 		exit 1; \
 	fi
 	@# Verify notarization credentials are set
-	@if [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; then \
-		echo "ERROR: Notarization requires NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD"; \
-		echo "Set these in a .env file or as environment variables."; \
+	@if [ -z "$(NOTARY_KEYCHAIN_PROFILE)" ] && { [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; }; then \
+		echo "ERROR: Notarization requires NOTARY_KEYCHAIN_PROFILE or Apple ID credentials."; \
+		echo "Set a keychain profile, or NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD."; \
 		exit 1; \
 	fi
 	@# Verify provisioning profile certificates match the signing identity (AMFI rejects
 	@# apps where the profile cert doesn't match the signing cert, even if entitlements match)
-	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE) $(VMCTL_PROVISIONING_PROFILE)
+	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE) $(VMCTL_PROVISIONING_PROFILE) $(FSKIT_PROVISIONING_PROFILE)
 	@echo "Creating distribution DMG (version $(VERSION))..."
 	@echo "Signing with: $(DIST_CODESIGN_ID)"
 	@rm -rf "$(DIST_DIR)"
@@ -470,6 +502,9 @@ dist:
 		test -f "$(HELPER_PROVISIONING_PROFILE)" || (echo "ERROR: HELPER_PROVISIONING_PROFILE not found: $(HELPER_PROVISIONING_PROFILE)" && exit 1); \
 		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/embedded.provisionprofile"; \
 	fi
+	@if [ -n "$(HELPER_PROVISIONING_PROFILE)" ]; then \
+		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/ghostvm-container-runtime.xpc/Contents/embedded.provisionprofile"; \
+	fi
 	@if /usr/libexec/PlistBuddy -c "Print :com.apple.vm.networking" macOS/GhostVM/entitlements.plist >/dev/null 2>&1 && [ -z "$(APP_PROVISIONING_PROFILE)" ]; then \
 		echo "ERROR: APP_PROVISIONING_PROFILE is required for macOS/GhostVM/entitlements.plist (com.apple.vm.networking present)"; \
 		exit 1; \
@@ -486,6 +521,12 @@ dist:
 		test -f "$(VMCTL_PROVISIONING_PROFILE)" || (echo "ERROR: VMCTL_PROVISIONING_PROFILE not found: $(VMCTL_PROVISIONING_PROFILE)" && exit 1); \
 		cp "$(VMCTL_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/embedded.provisionprofile"; \
 	fi
+	@if [ -z "$(FSKIT_PROVISIONING_PROFILE)" ]; then \
+		echo "ERROR: FSKIT_PROVISIONING_PROFILE is required for the GhostVMFS extension"; \
+		exit 1; \
+	fi
+	@test -f "$(FSKIT_PROVISIONING_PROFILE)" || (echo "ERROR: FSKIT_PROVISIONING_PROFILE not found: $(FSKIT_PROVISIONING_PROFILE)" && exit 1)
+	cp "$(FSKIT_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/embedded.provisionprofile"
 	@# --- Inside-out code signing for notarization ---
 	@echo "Signing nested components (inside-out)..."
 	@# 1. Sign all embedded frameworks (GhostVMKit, NIO, etc.) in GhostVMHelper.app
@@ -500,6 +541,34 @@ dist:
 		if [ -f "$$dylib" ]; then \
 			echo "  Signing $$(basename $$dylib) (in Helper)"; \
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@# 1c. Sign Debug dylibs and standalone container helpers
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/MacOS/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib) (in Helper)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@if [ -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/Helpers/ghostvm-image-fetch" ]; then \
+		echo "  Signing ghostvm-image-fetch"; \
+		codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" \
+			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/Helpers/ghostvm-image-fetch"; \
+	fi
+	@# Sign the runtime XPC service explicitly (entitlements + helper profile) BEFORE the
+	@# generic XPC loop so the later generic re-sign cannot strip its vmnet entitlements.
+	@if [ -d "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/ghostvm-container-runtime.xpc" ]; then \
+		echo "  Signing ghostvm-container-runtime.xpc"; \
+		codesign --force --options runtime --timestamp \
+			--entitlements macOS/GhostVMContainerRuntime/entitlements.plist \
+			-s "$(DIST_CODESIGN_ID)" \
+			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/ghostvm-container-runtime.xpc"; \
+	fi
+	@# Sign remaining (ordinary) XPC services generically, skipping the runtime XPC
+	@for xpc in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/"*.xpc; do \
+		if [ -d "$$xpc" ] && [ "$$(basename "$$xpc")" != "ghostvm-container-runtime.xpc" ]; then \
+			echo "  Signing $$(basename $$xpc) (in Helper)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$xpc"; \
 		fi; \
 	done
 	@# 2. Sign GhostVMHelper.app (with its own entitlements)
@@ -539,6 +608,18 @@ dist:
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
 		fi; \
 	done
+	@# 4b. Sign the FSKit extension before signing its containing app.
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/MacOS/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib) (in GhostVMFS)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@echo "  Signing GhostVMFS.appex"
+	codesign --force --options runtime --timestamp \
+		--entitlements macOS/GhostVMFS/entitlements.plist \
+		-s "$(DIST_CODESIGN_ID)" \
+		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex"
 	@# 5. Sign vmctl.app (frameworks, then the bundle itself with entitlements)
 	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/Frameworks/"*.framework; do \
 		if [ -d "$$fw" ]; then \
@@ -547,6 +628,12 @@ dist:
 		fi; \
 	done
 	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/Frameworks/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib) (in vmctl)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/MacOS/"*.dylib; do \
 		if [ -f "$$dylib" ]; then \
 			echo "  Signing $$(basename $$dylib) (in vmctl)"; \
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
@@ -563,13 +650,22 @@ dist:
 	@mkdir -p "$(DIST_DIR)/ghosttools-stage"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(DIST_DIR)/ghosttools-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(DIST_DIR)/ghosttools-stage/"
 	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
+	codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/ghost-container"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
-	hdiutil makehybrid -o "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" \
-		-hfs -hfs-volume-name "GhostTools" \
-		"$(DIST_DIR)/ghosttools-stage"
+	hdiutil create -volname "GhostTools" \
+		-srcfolder "$(DIST_DIR)/ghosttools-stage" \
+		-ov -format $(GHOSTTOOLS_DMG_FORMAT) "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
+	@xattr -c "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
 	@rm -rf "$(DIST_DIR)/ghosttools-stage"
 	@# 6. Sign the main app bundle (top-level, with entitlements)
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/MacOS/"*.dylib; do \
+		if [ -f "$$dylib" ]; then \
+			echo "  Signing $$(basename $$dylib) (in $(APP_NAME))"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
 	@echo "  Signing $(APP_NAME).app"
 	codesign --force --options runtime --timestamp \
 		--entitlements macOS/GhostVM/entitlements.plist \
@@ -590,11 +686,15 @@ dist:
 	codesign --force --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "DMG signed with: $(DIST_CODESIGN_ID)"
 	@# --- Notarization ---
-	xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
-		--apple-id "$(NOTARY_APPLE_ID)" \
-		--team-id "$(NOTARY_TEAM_ID)" \
-		--password "$(NOTARY_PASSWORD)" \
-		--wait
+	@if [ -n "$(NOTARY_KEYCHAIN_PROFILE)" ]; then \
+		xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
+			--keychain-profile "$(NOTARY_KEYCHAIN_PROFILE)" --wait; \
+	else \
+		xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg" \
+			--apple-id "$(NOTARY_APPLE_ID)" \
+			--team-id "$(NOTARY_TEAM_ID)" \
+			--password "$(NOTARY_PASSWORD)" --wait; \
+	fi
 	xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "Distribution created: $(DIST_DIR)/$(DMG_NAME)-$(VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/MacOS/vmctl"
@@ -605,12 +705,14 @@ dist:
 debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	@# Build GhostTools (debug)
 	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=1 BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
-	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools"
+	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c debug
 	@rm -rf "$(GHOSTTOOLS_APP)"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/MacOS" "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
+	@cp "$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
+	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container"
 	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_APP)/Contents/Resources/"
 	codesign --force --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_APP)"
@@ -619,10 +721,12 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
+	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/ghost-container"
 	@rm -f "$(GHOSTTOOLS_DMG)"
-	hdiutil makehybrid -o "$(GHOSTTOOLS_DMG)" \
-		-hfs -hfs-volume-name "GhostTools" \
-		"$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	hdiutil create -volname "GhostTools" \
+		-srcfolder "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage" \
+		-ov -format $(GHOSTTOOLS_DMG_FORMAT) "$(GHOSTTOOLS_DMG)"
 	@# Build app + cli (debug)
 	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=1 BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
 	xcodebuild -project $(XCODE_PROJECT) -scheme $(APP_NAME) -configuration Debug -derivedDataPath $(BUILD_DIR) \
@@ -666,6 +770,7 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	@if [ -n "$(HELPER_PROVISIONING_PROFILE)" ]; then \
 		test -f "$(HELPER_PROVISIONING_PROFILE)" || (echo "ERROR: HELPER_PROVISIONING_PROFILE not found: $(HELPER_PROVISIONING_PROFILE)" && exit 1); \
 		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/embedded.provisionprofile"; \
+		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/ghostvm-container-runtime.xpc/Contents/embedded.provisionprofile"; \
 	fi
 	@if [ -n "$(APP_PROVISIONING_PROFILE)" ]; then \
 		test -f "$(APP_PROVISIONING_PROFILE)" || (echo "ERROR: APP_PROVISIONING_PROFILE not found: $(APP_PROVISIONING_PROFILE)" && exit 1); \
@@ -690,6 +795,22 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 		if [ -e "$$dylib" ]; then \
 			echo "  Signing $$(basename $$dylib) (in GhostVMHelper)"; \
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	@# Sign the runtime XPC service explicitly (entitlements + helper profile) BEFORE the
+	@# helper so its vmnet entitlements are not stripped by a later generic re-sign.
+	@if [ -d "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/ghostvm-container-runtime.xpc" ]; then \
+		echo "  Signing ghostvm-container-runtime.xpc"; \
+		codesign --force --options runtime --timestamp \
+			--entitlements macOS/GhostVMContainerRuntime/entitlements.plist \
+			-s "$(DIST_CODESIGN_ID)" \
+			"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/ghostvm-container-runtime.xpc"; \
+	fi
+	@# Sign remaining (ordinary) XPC services in the helper generically
+	@for xpc in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/XPCServices/"*.xpc; do \
+		if [ -e "$$xpc" ] && [ "$$(basename "$$xpc")" != "ghostvm-container-runtime.xpc" ]; then \
+			echo "  Signing $$(basename $$xpc) (in Helper)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$xpc"; \
 		fi; \
 	done
 	codesign --force --options runtime --timestamp \
@@ -747,9 +868,9 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	@xattr -cr "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
-	hdiutil makehybrid -o "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" \
-		-hfs -hfs-volume-name "GhostTools" \
-		"$(DIST_DIR)/ghosttools-stage"
+	hdiutil create -volname "GhostTools" \
+		-srcfolder "$(DIST_DIR)/ghosttools-stage" \
+		-ov -format $(GHOSTTOOLS_DMG_FORMAT) "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
 	@rm -rf "$(DIST_DIR)/ghosttools-stage"
 	@# Strip xattrs and sign main app MacOS dylibs then bundle
 	@xattr -cr "$(DIST_DIR)/dmg-stage/$(APP_NAME).app"
@@ -799,7 +920,7 @@ website-build:
 # Bump canonical app version used to render generated plists
 # Usage: make bump VERSION=1.2.0
 bump:
-	@if [ -z "$(VERSION)" ] || [ "$(VERSION)" = "$$(git describe --tags --always 2>/dev/null || echo dev)" ]; then \
+	@if [ -z "$(VERSION)" ] || [ "$(VERSION)" = "$(BASE_MAJOR_MINOR).$(BUILD_TIMESTAMP)" ]; then \
 		echo "Usage: make bump VERSION=x.y.z"; exit 1; \
 	fi
 	@echo "Bumping canonical version to $(VERSION)..."
@@ -812,7 +933,7 @@ bump:
 check-version:
 	@BASE="$$(cat "$(VERSION_FILE)")"; \
 	echo "Canonical version: $$BASE"; \
-	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)" "$(PLIST_TOOLS)"; do \
+	for PLIST in "$(PLIST_GHOSTVM)" "$(PLIST_HELPER)" "$(PLIST_TOOLS)" "$(PLIST_FSKIT)"; do \
 		if [ -f "$$PLIST" ]; then \
 			CUR=$$(plutil -extract CFBundleShortVersionString raw "$$PLIST"); \
 			echo "  $$(basename "$$PLIST"): $$CUR"; \
@@ -848,7 +969,7 @@ help:
 	@echo "  make sparkle-sign  - Sign DMG for Sparkle auto-updates"
 	@echo "  make website  - Run Next.js dev server (Website/)"
 	@echo "  make website-build - Build Next.js site for production"
-	@echo "  make bump VERSION=x.y.z - Bump version in all 3 targets"
+	@echo "  make bump VERSION=x.y.z - Bump version in all versioned targets"
 	@echo "  make check-version     - Verify all targets have the same version"
 	@echo "  make clean    - Remove build artifacts and generated project"
 	@echo ""
@@ -856,7 +977,7 @@ help:
 	@echo "  DEVELOPMENT_TEAM - Apple Developer team ID (via .env file, see .env.example)"
 	@echo "  CODESIGN_ID   - Code signing identity (default: Apple Development)"
 	@echo "  XCODE_CONFIG  - Xcode build configuration (default: Release)"
-	@echo "  VERSION       - Version for DMG (default: git describe)"
+	@echo "  VERSION       - Version for DMG (default: MAJOR.MINOR.YYYYMMDDHHMMSS)"
 	@echo ""
 	@echo "Notarization (via .env file or environment):"
 	@echo "  NOTARY_APPLE_ID  - Apple ID for notarization"

@@ -11,7 +11,7 @@
 <p align="center">
   <img src="https://img.shields.io/github/v/release/groundwater/GhostVM?style=flat-square&label=Latest&color=5D5CDE" alt="Latest Release">
   &nbsp;
-  <img src="https://img.shields.io/badge/Platform-macOS%2015%2B-blue?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/Platform-macOS%2026%2B-blue?style=flat-square" alt="Platform">
   &nbsp;
   <img src="https://img.shields.io/badge/Architecture-Apple%20Silicon-orange?style=flat-square" alt="Architecture">
 </p>
@@ -52,7 +52,7 @@ GhostVM is a native macOS app for creating and managing macOS virtual machines o
 2. Open the DMG and drag **GhostVM.app** to your Applications folder
 3. Launch GhostVM and create your first workspace
 
-**Requirements:** macOS 15+ (Sequoia) on Apple Silicon (M1 or later)
+**Requirements:** macOS 26+ (Tahoe) on Apple Silicon (M1 or later)
 
 ## CLI Usage
 
@@ -95,7 +95,7 @@ vmctl remote --name dev apps
 
 ## Building from Source
 
-**Requirements:** Xcode 15+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
+**Requirements:** Xcode 26+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 ```bash
 brew install xcodegen

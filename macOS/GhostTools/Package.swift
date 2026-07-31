@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v15)
     ],
     products: [
-        .executable(name: "GhostTools", targets: ["GhostTools"])
+        .executable(name: "GhostTools", targets: ["GhostTools"]),
+        .executable(name: "ghost-container", targets: ["ghost-container"])
     ],
     dependencies: [
         .package(path: "../../Packages/GhostHTTP")
@@ -29,11 +30,19 @@ let package = Package(
                 .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "../../build/generated-plists/GhostTools-Info.plist"], .when(configuration: .release))
             ]
         ),
+        .executableTarget(
+            name: "ghost-container",
+            dependencies: []
+        ),
         .testTarget(
             name: "GhostToolsTests",
             dependencies: [
                 "GhostTools",
             ]
+        ),
+        .testTarget(
+            name: "GhostContainerTests",
+            dependencies: ["ghost-container"]
         )
     ]
 )

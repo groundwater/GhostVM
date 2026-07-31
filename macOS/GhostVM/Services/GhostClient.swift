@@ -262,6 +262,72 @@ public final class GhostClient: GhostClientProtocol {
         throw GhostClientError.notConnected
     }
 
+    public func fileMetadata(path: String) async throws -> GuestFileMetadata {
+        let response = try await sendGuestFilesystemRequest(path: "/api/v1/fs/metadata", guestPath: path)
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+        return try JSONDecoder().decode(GuestFileMetadata.self, from: response.body)
+    }
+
+    public func listDirectoryMetadata(path: String) async throws -> GuestDirectoryMetadata {
+        let response = try await sendGuestFilesystemRequest(path: "/api/v1/fs/list", guestPath: path)
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+        return try JSONDecoder().decode(GuestDirectoryMetadata.self, from: response.body)
+    }
+
+    public func readFile(path: String, offset: UInt64, length: Int) async throws -> Data {
+        guard length >= 0, length <= 1024 * 1024 else {
+            throw GhostClientError.connectionFailed("Filesystem read length exceeds 1 MiB")
+        }
+        let encodedPath = Self.encodeQueryValue(path)
+        guard let vm = virtualMachine else {
+            throw GhostClientError.notConnected
+        }
+        let response = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/fs/read?path=\(encodedPath)&offset=\(offset)&length=\(length)",
+            body: nil
+        )
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200 else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+        return response.body
+    }
+
+    public func readSymbolicLink(path: String) async throws -> String {
+        let response = try await sendGuestFilesystemRequest(path: "/api/v1/fs/readlink", guestPath: path)
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200, let target = String(data: response.body, encoding: .utf8) else {
+            throw GhostClientError.invalidResponse(statusCode)
+        }
+        return target
+    }
+
+    private func sendGuestFilesystemRequest(path endpoint: String, guestPath: String) async throws -> HTTPBufferedResponse {
+        guard let vm = virtualMachine else {
+            throw GhostClientError.notConnected
+        }
+        return try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "\(endpoint)?path=\(Self.encodeQueryValue(guestPath))",
+            body: nil
+        )
+    }
+
+    private static func encodeQueryValue(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
     /// Create a directory in the guest
     public func mkdir(path: String) async throws {
         let body = try JSONEncoder().encode(["path": path])

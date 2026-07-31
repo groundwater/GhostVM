@@ -23,7 +23,7 @@ export default function GettingStarted() {
 
       <h2>Requirements</h2>
       <ul>
-        <li>macOS 15+ (Sequoia) on Apple Silicon (M1 or later)</li>
+        <li>macOS 26+ (Tahoe) on Apple Silicon (M1 or later)</li>
       </ul>
 
       <h2>Installation</h2>
