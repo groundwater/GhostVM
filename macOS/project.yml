@@ -11,6 +11,12 @@ packages:
     from: "2.6.0"
   GhostHTTP:
     path: ../Packages/GhostHTTP
+  SwiftCertificates:
+    url: https://github.com/apple/swift-certificates.git
+    from: "1.19.4"
+  SwiftCrypto:
+    url: https://github.com/apple/swift-crypto.git
+    from: "3.15.1"
   Containerization:
     url: https://github.com/apple/containerization.git
     exactVersion: "0.40.1"
@@ -35,8 +41,142 @@ schemes:
     test:
       targets:
         - GhostVMTests
+  GhostFile:
+    build:
+      targets:
+        GhostFile: all
+    run:
+      config: Debug
+  GhostFileTests:
+    build:
+      targets:
+        GhostFileTests: test
+    test:
+      targets:
+        - GhostFileTests
+
+aggregateTargets:
+  GhostHTTP3Framework:
+    settings:
+      base:
+        PRODUCT_NAME: GhostHTTP3Framework
+    buildScripts:
+      - name: Build GhostHTTP3 arm64 framework
+        runOnlyWhenInstalling: false
+        showEnvVars: false
+        outputFiles:
+          - $(SRCROOT)/GhostHTTP3/.build/artifacts/GhostHTTP3.framework/Versions/A/GhostHTTP3
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/GhostHTTP3/scripts/ensure-framework.sh"
 
 targets:
+  GhostFileFS:
+    type: extensionkit-extension
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: GhostFileFS
+        excludes:
+          - "*.plist"
+      - path: GhostFileShared
+    dependencies:
+      - sdk: FSKit.framework
+      - sdk: ExtensionFoundation.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - target: GhostHTTP3Framework
+      - framework: GhostHTTP3/.build/artifacts/GhostHTTP3.framework
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_NAME: GhostFileFS
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostfile.fs
+        SKIP_INSTALL: YES
+        INFOPLIST_FILE: GhostFileFS/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: GhostFileFS/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_APP_SANDBOX: YES
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.0"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+
+  GhostFile:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: GhostFile
+        excludes:
+          - "*.plist"
+      - path: GhostFileShared
+      - path: GhostFileFS/GhostFileHTTPClient.swift
+    dependencies:
+      - package: GhostHTTP
+      - package: SwiftCertificates
+        product: X509
+      - package: SwiftCrypto
+        product: Crypto
+      - sdk: FSKit.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - target: GhostHTTP3Framework
+      - framework: GhostHTTP3/.build/artifacts/GhostHTTP3.framework
+        embed: true
+        codeSign: true
+      - target: GhostFileFS
+        embed: true
+        codeSign: true
+    settings:
+      base:
+        PRODUCT_NAME: GhostFile
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostfile
+        SKIP_INSTALL: NO
+        INFOPLIST_FILE: GhostFile/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        CODE_SIGN_ENTITLEMENTS: GhostFile/entitlements.plist
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "Apple Development"
+        DEVELOPMENT_TEAM: ${DEVELOPMENT_TEAM}
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        SWIFT_VERSION: "5.0"
+        SWIFT_EMIT_LOC_STRINGS: NO
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+      configs:
+        Debug:
+          ONLY_ACTIVE_ARCH: YES
+
+  GhostFileTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GhostFileTests
+    dependencies:
+      - target: GhostFile
+      - package: GhostHTTP
+      - target: GhostHTTP3Framework
+      - framework: GhostHTTP3/.build/artifacts/GhostHTTP3.framework
+        link: true
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.ghostvm.ghostfile.tests
+        GENERATE_INFOPLIST_FILE: YES
+        SWIFT_VERSION: "5.0"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@loader_path/../../../../../Frameworks"
+          - "@loader_path/Frameworks"
+
   GhostVMKit:
     type: framework
     platform: macOS

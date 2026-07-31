@@ -38,13 +38,17 @@ PLIST_HELPER  = $(PLIST_GEN_DIR)/GhostVMHelper-Info.plist
 PLIST_TOOLS   = $(PLIST_GEN_DIR)/GhostTools-Info.plist
 PLIST_FSKIT   = $(PLIST_GEN_DIR)/GhostVMFS-Info.plist
 
+# GhostHTTP3 arm64 dynamic framework (built via Rust/quiche)
+GHOSTHTTP3_DIR = macOS/GhostHTTP3
+GHOSTHTTP3_FRAMEWORK = $(GHOSTHTTP3_DIR)/.build/artifacts/GhostHTTP3.framework
+
 BASE_VERSION := $(strip $(shell cat "$(VERSION_FILE)" 2>/dev/null))
 ifeq ($(BASE_VERSION),)
 $(error Missing $(VERSION_FILE). Create it with a version like 1.85.0)
 endif
 BASE_MAJOR_MINOR := $(word 1,$(subst ., ,$(BASE_VERSION))).$(word 2,$(subst ., ,$(BASE_VERSION)))
 
-.PHONY: all cli app clean help run launch generate test uitest framework dist debug-dmg tools debug-tools dmg ghosttools-icon ghostvm-icon debug debug-export website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist
+.PHONY: all cli app clean help run launch ghostfile run-ghostfile test-ghostfile generate test uitest framework dist debug-dmg tools debug-tools dmg ghosttools-icon ghostvm-icon debug debug-export website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist ghosthttp3-framework
 
 all: help
 
@@ -261,6 +265,41 @@ run: debug
 # Build and launch the app (detached)
 launch: app
 	open "$(BUILD_DIR)/Build/Products/$(XCODE_CONFIG)/$(APP_NAME).app"
+
+# Build the GhostHTTP3 arm64 dynamic framework if not already built.
+ghosthttp3-framework:
+	@"$(GHOSTHTTP3_DIR)/scripts/ensure-framework.sh"
+
+# Build the standalone GhostFile network filesystem demo and its FSKit extension.
+ghostfile: $(XCODE_PROJECT) ghosthttp3-framework
+	@if [ -z "$(DEVELOPMENT_TEAM)" ]; then \
+		echo "ERROR: DEVELOPMENT_TEAM is required to sign GhostFileFS.appex"; \
+		echo "Set it in .env or run: make ghostfile DEVELOPMENT_TEAM=YOUR_TEAM_ID"; \
+		exit 1; \
+	fi
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme GhostFile \
+		-configuration Debug \
+		-derivedDataPath $(BUILD_DIR) \
+		-allowProvisioningUpdates \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
+		build
+
+run-ghostfile: ghostfile
+	open -n "$(BUILD_DIR)/Build/Products/Debug/GhostFile.app"
+
+test-ghostfile: $(XCODE_PROJECT) ghosthttp3-framework
+	@if [ -z "$(DEVELOPMENT_TEAM)" ]; then \
+		echo "ERROR: DEVELOPMENT_TEAM is required to sign the GhostFile test host and FSKit extension"; \
+		echo "Set it in .env or run: make test-ghostfile DEVELOPMENT_TEAM=YOUR_TEAM_ID"; \
+		exit 1; \
+	fi
+	xcodebuild test -project $(XCODE_PROJECT) \
+		-scheme GhostFileTests \
+		-destination 'platform=macOS' \
+		-derivedDataPath $(BUILD_DIR) \
+		-allowProvisioningUpdates \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)"
 
 # Run unit tests
 test: $(XCODE_PROJECT)
@@ -955,6 +994,10 @@ help:
 	@echo "  make debug-export - Debug build ad-hoc signed (no Xcode needed on target)"
 	@echo "  make run      - Build and run attached to terminal"
 	@echo "  make launch   - Build and launch detached"
+	@echo "  make ghostfile - Build GhostFile.app and its FSKit extension"
+	@echo "  make ghosthttp3-framework - Build the GhostHTTP3 arm64 dynamic framework"
+	@echo "  make run-ghostfile - Build and launch another GhostFile instance"
+	@echo "  make test-ghostfile - Run GhostFile protocol and server tests"
 	@echo "  make test     - Run unit tests"
 	@echo "  make uitest   - Run UI tests"
 	@echo "  make capture     - Capture raw screenshots from UI tests → build/screenshots/"
