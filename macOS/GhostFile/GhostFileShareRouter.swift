@@ -114,12 +114,38 @@ final class GhostFileShareRouter: @unchecked Sendable {
                 let entries = try names.map { name in
                     try fileMetadata(at: url.appendingPathComponent(name, isDirectory: false))
                 }
+                var inlineContents: [GhostFileInlineContent] = []
+                var inlineByteCount = 0
+                for entry in entries where entry.type == .file
+                    && entry.size <= UInt64(GhostFileProtocol.maximumInlineFileLength) {
+                    guard inlineContents.count < GhostFileProtocol.maximumInlineDirectoryFileCount else {
+                        break
+                    }
+                    let length = Int(entry.size)
+                    guard inlineByteCount + length <= GhostFileProtocol.maximumInlineDirectoryLength else {
+                        continue
+                    }
+                    let childURL = url.appendingPathComponent(entry.name, isDirectory: false)
+                    let data = try Data(contentsOf: childURL, options: .mappedIfSafe)
+                    let currentMetadata = try fileMetadata(at: childURL)
+                    guard data.count == length, currentMetadata.etag == entry.etag else { continue }
+                    inlineContents.append(GhostFileInlineContent(
+                        name: entry.name,
+                        etag: entry.etag,
+                        data: data
+                    ))
+                    inlineByteCount += data.count
+                }
                 let listing = GhostFileDirectoryListing(
                     path: relativePath,
                     verifier: directoryVerifier(entries),
-                    entries: entries
+                    entries: entries,
+                    inlineContents: inlineContents.isEmpty ? nil : inlineContents
                 )
-                return json(listing, headers: ["ETag": "\"dir-\(String(listing.verifier, radix: 16))\""])
+                return json(listing, headers: [
+                    "Cache-Control": "private, max-age=5",
+                    "ETag": "\"dir-\(String(listing.verifier, radix: 16))\"",
+                ])
 
             case (.GET, "content"):
                 let metadata = try fileMetadata(at: url)
@@ -219,6 +245,12 @@ final class GhostFileShareRouter: @unchecked Sendable {
             objectID: objectID,
             modifiedSeconds: modifiedSeconds,
             modifiedNanoseconds: modifiedNanoseconds,
+            accessedSeconds: Int64(info.st_atimespec.tv_sec),
+            accessedNanoseconds: Int32(info.st_atimespec.tv_nsec),
+            changedSeconds: Int64(info.st_ctimespec.tv_sec),
+            changedNanoseconds: Int32(info.st_ctimespec.tv_nsec),
+            birthSeconds: Int64(info.st_birthtimespec.tv_sec),
+            birthNanoseconds: Int32(info.st_birthtimespec.tv_nsec),
             etag: "\"node-\(String(etagValue, radix: 16))\""
         )
     }

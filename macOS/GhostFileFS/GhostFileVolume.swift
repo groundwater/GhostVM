@@ -69,7 +69,7 @@ final class GhostFileVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOp
         let item = try ghostItem(item)
         let metadata = try await client.metadata(path: item.relativePath)
         item.update(metadata: metadata)
-        return attributes(for: item)
+        return attributes(for: item, request: request)
     }
 
     func setAttributes(_ newAttributes: FSItem.SetAttributesRequest, on item: FSItem) async throws -> FSItem.Attributes {
@@ -186,7 +186,7 @@ final class GhostFileVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOp
                     itemType: itemType(metadata.type),
                     itemID: identifier(for: child),
                     nextCookie: FSDirectoryCookie(UInt64(cursor + 1)),
-                    attributes: requestedAttributes == nil ? nil : attributes(for: child)
+                    attributes: requestedAttributes.map { attributes(for: child, request: $0) }
                 )
             }
             guard packed else { break }
@@ -245,23 +245,55 @@ final class GhostFileVolume: FSVolume, FSVolume.Operations, FSVolume.ReadWriteOp
         itemLock.unlock()
     }
 
-    private func attributes(for item: GhostFileItem) -> FSItem.Attributes {
+    private func attributes(
+        for item: GhostFileItem,
+        request: FSItem.GetAttributesRequest? = nil
+    ) -> FSItem.Attributes {
         let metadata = item.metadata
         let result = FSItem.Attributes()
-        result.type = itemType(metadata.type)
-        result.mode = metadata.mode
-        result.uid = metadata.uid
-        result.gid = metadata.gid
-        result.linkCount = 1
-        result.size = metadata.size
-        result.allocSize = metadata.size
-        result.fileID = identifier(for: item)
-        result.parentID = item.parentID
-        result.modifyTime = timespec(
-            tv_sec: Int(metadata.modifiedSeconds),
-            tv_nsec: Int(metadata.modifiedNanoseconds)
+        func wanted(_ attribute: FSItem.Attribute) -> Bool {
+            request?.isAttributeWanted(attribute) ?? true
+        }
+        if wanted(.type) { result.type = itemType(metadata.type) }
+        if wanted(.mode) { result.mode = metadata.mode }
+        if wanted(.uid) { result.uid = metadata.uid }
+        if wanted(.gid) { result.gid = metadata.gid }
+        if wanted(.linkCount) { result.linkCount = 1 }
+        if wanted(.flags) { result.flags = 0 }
+        if wanted(.size) { result.size = metadata.size }
+        if wanted(.allocSize) { result.allocSize = metadata.size }
+        if wanted(.fileID) { result.fileID = identifier(for: item) }
+        if wanted(.parentID) { result.parentID = item.parentID }
+
+        let modifyTime = timestamp(
+            seconds: metadata.modifiedSeconds,
+            nanoseconds: metadata.modifiedNanoseconds
         )
+        let accessTime = timestamp(
+            seconds: metadata.accessedSeconds ?? metadata.modifiedSeconds,
+            nanoseconds: metadata.accessedNanoseconds ?? metadata.modifiedNanoseconds
+        )
+        let changeTime = timestamp(
+            seconds: metadata.changedSeconds ?? metadata.modifiedSeconds,
+            nanoseconds: metadata.changedNanoseconds ?? metadata.modifiedNanoseconds
+        )
+        let birthTime = timestamp(
+            seconds: metadata.birthSeconds ?? metadata.modifiedSeconds,
+            nanoseconds: metadata.birthNanoseconds ?? metadata.modifiedNanoseconds
+        )
+        if wanted(.modifyTime) { result.modifyTime = modifyTime }
+        if wanted(.accessTime) { result.accessTime = accessTime }
+        if wanted(.changeTime) { result.changeTime = changeTime }
+        if wanted(.birthTime) { result.birthTime = birthTime }
+        if wanted(.addedTime) { result.addedTime = birthTime }
+        if wanted(.backupTime) { result.backupTime = timespec() }
+        if wanted(.supportsLimitedXAttrs) { result.supportsLimitedXAttrs = false }
+        if wanted(.inhibitKernelOffloadedIO) { result.inhibitKernelOffloadedIO = false }
         return result
+    }
+
+    private func timestamp(seconds: Int64, nanoseconds: Int32) -> timespec {
+        timespec(tv_sec: Int(seconds), tv_nsec: Int(nanoseconds))
     }
 
     private func identifier(for item: GhostFileItem) -> FSItem.Identifier {

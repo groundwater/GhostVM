@@ -4,6 +4,44 @@ import XCTest
 @testable import GhostFile
 
 final class GhostFileHTTP3IntegrationTests: XCTestCase {
+    func testSmallFileInlineCacheExpiresAndRefreshes() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-cache-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        let fileURL = fixture.appendingPathComponent("tiny.txt")
+        try Data("before".utf8).write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "quic-cache-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileCacheIntegration",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey)
+        )
+        let listing = try await client.directory(path: "")
+        XCTAssertEqual(listing.inlineContents?.first(where: { $0.name == "tiny.txt" })?.data, Data("before".utf8))
+
+        try Data("after!".utf8).write(to: fileURL, options: .atomic)
+        let cachedContents = try await client.read(path: "tiny.txt", offset: 0, length: 64)
+        XCTAssertEqual(cachedContents, Data("before".utf8))
+
+        try await Task.sleep(for: .milliseconds(5_100))
+        let refreshed = try await client.metadata(path: "tiny.txt")
+        XCTAssertEqual(refreshed.size, 6)
+        let refreshedContents = try await client.read(path: "tiny.txt", offset: 0, length: 64)
+        XCTAssertEqual(refreshedContents, Data("after!".utf8))
+    }
+
     func testBulkTransferBenchmarkWhenRequested() async throws {
         let environment = ProcessInfo.processInfo.environment
         guard environment["GHOSTFILE_RUN_BULK_BENCHMARK"] == "1" else {

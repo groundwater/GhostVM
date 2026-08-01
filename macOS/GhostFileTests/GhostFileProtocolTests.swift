@@ -86,6 +86,23 @@ final class GhostFileShareRouterTests: XCTestCase {
         let listing = try JSONDecoder().decode(GhostFileDirectoryListing.self, from: bodyData(listingResponse))
         XCTAssertEqual(listing.entries.map(\.name), ["folder", "sample.txt"])
         XCTAssertNotEqual(listing.verifier, 0)
+        XCTAssertEqual(listing.inlineContents?.map(\.name), ["sample.txt"])
+        XCTAssertEqual(listing.inlineContents?.first?.data, Data("abcdefghij".utf8))
+        XCTAssertEqual(listing.inlineContents?.first?.etag, listing.entries.last?.etag)
+    }
+
+    func testDirectoryListingBoundsInlineContent() throws {
+        let oversized = Data(repeating: 0x41, count: GhostFileProtocol.maximumInlineFileLength + 1)
+        try oversized.write(to: directory.appendingPathComponent("oversized.bin"))
+
+        let listingResponse = router.route(request(
+            method: .GET,
+            path: operationPath("directory", relativePath: "")
+        ))
+        XCTAssertEqual(listingResponse.status, .ok)
+        let listing = try JSONDecoder().decode(GhostFileDirectoryListing.self, from: bodyData(listingResponse))
+        XCTAssertTrue(listing.entries.contains(where: { $0.name == "oversized.bin" }))
+        XCTAssertFalse(listing.inlineContents?.contains(where: { $0.name == "oversized.bin" }) ?? false)
     }
 
     func testRangeReadStreamsOnlyRequestedBytes() throws {

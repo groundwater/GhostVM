@@ -8,6 +8,9 @@ enum GhostFileProtocol {
     static let alpn = "h3"
     static let transport = "http3"
     static let maximumReadLength = 1024 * 1024
+    static let maximumInlineFileLength = 64 * 1024
+    static let maximumInlineDirectoryLength = 512 * 1024
+    static let maximumInlineDirectoryFileCount = 256
 
     static func shareBasePath(id: UUID) -> String {
         "/v1/shares/\(id.uuidString.lowercased())"
@@ -47,13 +50,74 @@ struct GhostFileMetadata: Codable, Equatable, Sendable {
     let objectID: UInt64
     let modifiedSeconds: Int64
     let modifiedNanoseconds: Int32
+    let accessedSeconds: Int64?
+    let accessedNanoseconds: Int32?
+    let changedSeconds: Int64?
+    let changedNanoseconds: Int32?
+    let birthSeconds: Int64?
+    let birthNanoseconds: Int32?
     let etag: String
+
+    init(
+        name: String,
+        type: GhostFileNodeType,
+        size: UInt64,
+        mode: UInt32,
+        uid: UInt32,
+        gid: UInt32,
+        objectID: UInt64,
+        modifiedSeconds: Int64,
+        modifiedNanoseconds: Int32,
+        accessedSeconds: Int64? = nil,
+        accessedNanoseconds: Int32? = nil,
+        changedSeconds: Int64? = nil,
+        changedNanoseconds: Int32? = nil,
+        birthSeconds: Int64? = nil,
+        birthNanoseconds: Int32? = nil,
+        etag: String
+    ) {
+        self.name = name
+        self.type = type
+        self.size = size
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.objectID = objectID
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+        self.accessedSeconds = accessedSeconds
+        self.accessedNanoseconds = accessedNanoseconds
+        self.changedSeconds = changedSeconds
+        self.changedNanoseconds = changedNanoseconds
+        self.birthSeconds = birthSeconds
+        self.birthNanoseconds = birthNanoseconds
+        self.etag = etag
+    }
 }
 
 struct GhostFileDirectoryListing: Codable, Equatable, Sendable {
     let path: String
     let verifier: UInt64
     let entries: [GhostFileMetadata]
+    let inlineContents: [GhostFileInlineContent]?
+
+    init(
+        path: String,
+        verifier: UInt64,
+        entries: [GhostFileMetadata],
+        inlineContents: [GhostFileInlineContent]? = nil
+    ) {
+        self.path = path
+        self.verifier = verifier
+        self.entries = entries
+        self.inlineContents = inlineContents
+    }
+}
+
+struct GhostFileInlineContent: Codable, Equatable, Sendable {
+    let name: String
+    let etag: String
+    let data: Data
 }
 
 struct GhostFileErrorPayload: Codable, Equatable, Sendable {

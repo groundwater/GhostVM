@@ -7,6 +7,7 @@ import Network
 
 struct GhostFileHTTP3Client: Sendable {
     private let transport: GhostFileHTTP3Transport
+    private let cache = GhostFileResponseCache()
 
     init(resourceURL: URL) throws {
         guard resourceURL.scheme == GhostFileProtocol.urlScheme,
@@ -34,18 +35,33 @@ struct GhostFileHTTP3Client: Sendable {
     }
 
     func metadata(path: String) async throws -> GhostFileMetadata {
-        try await decode(GhostFileMetadata.self, operation: "metadata", relativePath: path)
+        if let cached = await cache.metadata(path: path) { return cached }
+        let metadata = try await decode(GhostFileMetadata.self, operation: "metadata", relativePath: path)
+        await cache.store(metadata: metadata, path: path)
+        return metadata
     }
 
     func directory(path: String) async throws -> GhostFileDirectoryListing {
-        try await decode(GhostFileDirectoryListing.self, operation: "directory", relativePath: path)
+        if let cached = await cache.directory(path: path) { return cached }
+        let listing = try await decode(
+            GhostFileDirectoryListing.self,
+            operation: "directory",
+            relativePath: path
+        )
+        await cache.store(listing: listing, path: path)
+        return listing
     }
 
     func read(path: String, offset: UInt64, length: Int) async throws -> Data {
         guard length >= 0, length <= GhostFileProtocol.maximumReadLength else {
             throw fs_errorForPOSIXError(EINVAL)
         }
-        return try await request(operation: "content", relativePath: path, offset: offset, length: length)
+        if let cached = await cache.content(path: path, offset: offset, length: length) {
+            return cached
+        }
+        let data = try await request(operation: "content", relativePath: path, offset: offset, length: length)
+        await cache.storeRead(data: data, path: path, offset: offset)
+        return data
     }
 
     func readSymbolicLink(path: String) async throws -> String {
@@ -102,6 +118,130 @@ struct GhostFileHTTP3Client: Sendable {
             throw fs_errorForPOSIXError(EIO)
         }
     }
+}
+
+private actor GhostFileResponseCache {
+    private struct Entry<Value: Sendable>: Sendable {
+        let value: Value
+        let storedAt: UInt64
+    }
+
+    private struct CachedContent: Sendable {
+        let data: Data
+        let etag: String
+    }
+
+    private static let metadataLifetime: UInt64 = 5_000_000_000
+    private static let directoryLifetime: UInt64 = 5_000_000_000
+    private static let contentLifetime: UInt64 = 5_000_000_000
+    private static let maximumMetadataCount = 32_768
+    private static let maximumDirectoryCount = 2_048
+    private static let maximumContentBytes = 64 * 1024 * 1024
+
+    private var metadataEntries: [String: Entry<GhostFileMetadata>] = [:]
+    private var directoryEntries: [String: Entry<GhostFileDirectoryListing>] = [:]
+    private var contentEntries: [String: Entry<CachedContent>] = [:]
+    private var contentBytes = 0
+
+    func metadata(path: String) -> GhostFileMetadata? {
+        fresh(metadataEntries[path], lifetime: Self.metadataLifetime)?.value
+    }
+
+    func directory(path: String) -> GhostFileDirectoryListing? {
+        fresh(directoryEntries[path], lifetime: Self.directoryLifetime)?.value
+    }
+
+    func content(path: String, offset: UInt64, length: Int) -> Data? {
+        guard let entry = fresh(contentEntries[path], lifetime: Self.contentLifetime) else {
+            removeContent(path: path)
+            return nil
+        }
+        if let metadata = fresh(metadataEntries[path], lifetime: Self.metadataLifetime)?.value,
+           metadata.etag != entry.value.etag {
+            removeContent(path: path)
+            return nil
+        }
+        guard offset <= UInt64(entry.value.data.count) else { return nil }
+        let start = Int(offset)
+        let end = min(entry.value.data.count, start + length)
+        return entry.value.data.subdata(in: start..<end)
+    }
+
+    func store(metadata: GhostFileMetadata, path: String) {
+        let now = Self.now
+        metadataEntries[path] = Entry(value: metadata, storedAt: now)
+        trimMetadataIfNeeded()
+    }
+
+    func store(listing: GhostFileDirectoryListing, path: String) {
+        let now = Self.now
+        directoryEntries[path] = Entry(value: listing, storedAt: now)
+        for metadata in listing.entries {
+            let childPath = path.isEmpty ? metadata.name : "\(path)/\(metadata.name)"
+            metadataEntries[childPath] = Entry(value: metadata, storedAt: now)
+        }
+        for inline in listing.inlineContents ?? [] {
+            guard inline.data.count <= GhostFileProtocol.maximumInlineFileLength else { continue }
+            let childPath = path.isEmpty ? inline.name : "\(path)/\(inline.name)"
+            guard metadataEntries[childPath]?.value.etag == inline.etag else { continue }
+            storeContent(inline.data, etag: inline.etag, path: childPath, storedAt: now)
+        }
+        trimMetadataIfNeeded()
+        trimDirectoriesIfNeeded()
+        trimContentIfNeeded()
+    }
+
+    func storeRead(data: Data, path: String, offset: UInt64) {
+        guard offset == 0,
+              data.count <= GhostFileProtocol.maximumInlineFileLength,
+              let metadata = fresh(metadataEntries[path], lifetime: Self.metadataLifetime)?.value,
+              metadata.size == UInt64(data.count) else { return }
+        storeContent(data, etag: metadata.etag, path: path, storedAt: Self.now)
+        trimContentIfNeeded()
+    }
+
+    private func fresh<Value: Sendable>(_ entry: Entry<Value>?, lifetime: UInt64) -> Entry<Value>? {
+        guard let entry, Self.now &- entry.storedAt <= lifetime else { return nil }
+        return entry
+    }
+
+    private func storeContent(_ data: Data, etag: String, path: String, storedAt: UInt64) {
+        if let previous = contentEntries[path] { contentBytes -= previous.value.data.count }
+        contentEntries[path] = Entry(value: CachedContent(data: data, etag: etag), storedAt: storedAt)
+        contentBytes += data.count
+    }
+
+    private func removeContent(path: String) {
+        if let removed = contentEntries.removeValue(forKey: path) {
+            contentBytes -= removed.value.data.count
+        }
+    }
+
+    private func trimMetadataIfNeeded() {
+        guard metadataEntries.count > Self.maximumMetadataCount else { return }
+        removeOldest(from: &metadataEntries, count: metadataEntries.count - Self.maximumMetadataCount)
+    }
+
+    private func trimDirectoriesIfNeeded() {
+        guard directoryEntries.count > Self.maximumDirectoryCount else { return }
+        removeOldest(from: &directoryEntries, count: directoryEntries.count - Self.maximumDirectoryCount)
+    }
+
+    private func trimContentIfNeeded() {
+        guard contentBytes > Self.maximumContentBytes else { return }
+        for (path, _) in contentEntries.sorted(by: { $0.value.storedAt < $1.value.storedAt }) {
+            removeContent(path: path)
+            if contentBytes <= Self.maximumContentBytes { break }
+        }
+    }
+
+    private func removeOldest<Value: Sendable>(from entries: inout [String: Entry<Value>], count: Int) {
+        for key in entries.sorted(by: { $0.value.storedAt < $1.value.storedAt }).prefix(count).map(\.key) {
+            entries.removeValue(forKey: key)
+        }
+    }
+
+    private static var now: UInt64 { DispatchTime.now().uptimeNanoseconds }
 }
 
 actor GhostFileHTTP3Transport {
