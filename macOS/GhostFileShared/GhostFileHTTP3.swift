@@ -4,6 +4,16 @@ import GhostHTTP3
 import Network
 
 final class GhostFileHTTP3Connection: @unchecked Sendable {
+    private static let maximumUDPPayloadSize: Int = {
+        guard let rawValue = ProcessInfo.processInfo.environment["GHOSTFILE_HTTP3_UDP_PAYLOAD_SIZE"],
+              let value = Int(rawValue), (1_200...65_527).contains(value) else {
+            return 1_350
+        }
+        return value
+    }()
+    private static let diagnosticsEnabled =
+        ProcessInfo.processInfo.environment["GHOSTFILE_HTTP3_DIAGNOSTICS"] == "1"
+
     enum Role {
         case client(serverName: String)
         case server(certificatePath: String, privateKeyPath: String)
@@ -36,11 +46,35 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
     private var http3Connection: OpaquePointer?
     private var currentEvent: OpaquePointer?
     private var pendingResponses: [UInt64: PendingHTTP3Response] = [:]
+    private var peerTerminatedResponseStreamIDs: [UInt64] = []
+    private var failedResponseStreamIDs: [UInt64] = []
     private var localAddress = sockaddr_in()
     private var peerAddress = sockaddr_in()
+    private let diagnosticRole: String
+    private var diagnosticStartedAt = DispatchTime.now().uptimeNanoseconds
+    private var diagnosticPumpCalls = 0
+    private var diagnosticStreamVisits = 0
+    private var diagnosticBodyAttempts = 0
+    private var diagnosticBodyBlocked = 0
+    private var diagnosticBodyAcceptedBytes = 0
+    private var diagnosticNextDatagramCalls = 0
+    private var diagnosticDatagrams = 0
+    private var diagnosticDatagramBytes = 0
+    private var diagnosticSendDone = 0
+    private var diagnosticFuturePacingPackets = 0
+    private var diagnosticFuturePacingNanoseconds: UInt64 = 0
+    private var diagnosticMaximumPacingNanoseconds: UInt64 = 0
+    private var diagnosticBatches = 0
+    private var diagnosticBatchPackets = 0
+    private var diagnosticProduceNanoseconds: UInt64 = 0
+    private var diagnosticNetworkNanoseconds: UInt64 = 0
 
     init(role: Role) throws {
         self.role = role
+        switch role {
+        case .client: diagnosticRole = "client"
+        case .server: diagnosticRole = "server"
+        }
         guard let quicConfiguration = quiche_config_new(UInt32(QUICHE_PROTOCOL_VERSION)) else {
             throw ConnectionError.configuration("Unable to create the QUIC configuration")
         }
@@ -56,13 +90,16 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
             throw ConnectionError.configuration("Unable to configure the HTTP/3 ALPN")
         }
         quiche_config_set_max_idle_timeout(quicConfiguration, 60_000)
-        quiche_config_set_max_recv_udp_payload_size(quicConfiguration, 1_350)
-        quiche_config_set_max_send_udp_payload_size(quicConfiguration, 1_350)
+        quiche_config_set_max_recv_udp_payload_size(quicConfiguration, Self.maximumUDPPayloadSize)
+        quiche_config_set_max_send_udp_payload_size(quicConfiguration, Self.maximumUDPPayloadSize)
         quiche_config_set_initial_max_data(quicConfiguration, 64 * 1024 * 1024)
         quiche_config_set_initial_max_stream_data_bidi_local(quicConfiguration, 2 * 1024 * 1024)
         quiche_config_set_initial_max_stream_data_bidi_remote(quicConfiguration, 2 * 1024 * 1024)
         quiche_config_set_initial_max_stream_data_uni(quicConfiguration, 2 * 1024 * 1024)
-        quiche_config_set_initial_max_streams_bidi(quicConfiguration, 256)
+        // Each GhostFile content response is capped at 1 MiB. Keep the maximum
+        // number of concurrent request streams aligned with the 64 MiB
+        // connection window so application-side response buffering is bounded.
+        quiche_config_set_initial_max_streams_bidi(quicConfiguration, 64)
         quiche_config_set_initial_max_streams_uni(quicConfiguration, 16)
         quiche_config_set_disable_active_migration(quicConfiguration, true)
         quiche_h3_config_set_qpack_max_table_capacity(http3Configuration, 4_096)
@@ -169,8 +206,9 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
 
     func nextDatagram() throws -> Data? {
         guard let quicConnection else { return nil }
+        if Self.diagnosticsEnabled { diagnosticNextDatagramCalls += 1 }
         try pumpResponseBodies()
-        var output = Data(count: 65_535)
+        var output = Data(count: Self.maximumUDPPayloadSize)
         var sendInfo = quiche_send_info()
         let length = output.withUnsafeMutableBytes { bytes in
             Int(quiche_conn_send(
@@ -180,12 +218,98 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
                 &sendInfo
             ))
         }
-        if length == Int(QUICHE_ERR_DONE.rawValue) { return nil }
+        if length == Int(QUICHE_ERR_DONE.rawValue) {
+            if Self.diagnosticsEnabled { diagnosticSendDone += 1 }
+            return nil
+        }
         guard length > 0 else {
             throw ConnectionError.connection("QUIC could not produce a UDP datagram (\(length))")
         }
         output.count = length
+        if Self.diagnosticsEnabled {
+            diagnosticDatagrams += 1
+            diagnosticDatagramBytes += length
+            var now = timespec()
+            clock_gettime(CLOCK_MONOTONIC, &now)
+            let nowNanoseconds = Int64(now.tv_sec) * 1_000_000_000 + Int64(now.tv_nsec)
+            let sendNanoseconds = Int64(sendInfo.at.tv_sec) * 1_000_000_000 + Int64(sendInfo.at.tv_nsec)
+            if sendNanoseconds > nowNanoseconds {
+                let delay = UInt64(sendNanoseconds - nowNanoseconds)
+                diagnosticFuturePacingPackets += 1
+                diagnosticFuturePacingNanoseconds += delay
+                diagnosticMaximumPacingNanoseconds = max(diagnosticMaximumPacingNanoseconds, delay)
+            }
+        }
         return output
+    }
+
+    func recordSendBatch(packetCount: Int, produceNanoseconds: UInt64, networkNanoseconds: UInt64) {
+        guard Self.diagnosticsEnabled else { return }
+        diagnosticBatches += 1
+        diagnosticBatchPackets += packetCount
+        diagnosticProduceNanoseconds += produceNanoseconds
+        diagnosticNetworkNanoseconds += networkNanoseconds
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now - diagnosticStartedAt >= 500_000_000, let quicConnection else { return }
+        var stats = quiche_stats()
+        quiche_conn_stats(quicConnection, &stats)
+        var path = quiche_path_stats()
+        let pathResult = quiche_conn_path_stats(quicConnection, 0, &path)
+        let elapsedMilliseconds = Double(now - diagnosticStartedAt) / 1_000_000
+        let averagePacingMicroseconds = diagnosticFuturePacingPackets == 0 ? 0 :
+            Double(diagnosticFuturePacingNanoseconds) / Double(diagnosticFuturePacingPackets) / 1_000
+        let message = String(format:
+            "GHOSTFILE_H3_DIAG role=%@ interval_ms=%.1f payload=%d batches=%d batch_packets=%d produce_ms=%.3f nw_wait_ms=%.3f datagrams=%d datagram_bytes=%d next_calls=%d send_done=%d pump_calls=%d stream_visits=%d body_attempts=%d body_blocked=%d body_accepted=%d pacing_future=%d pacing_avg_us=%.1f pacing_max_us=%.1f quic_sent=%zu quic_lost=%zu quic_retrans=%zu quic_lost_bytes=%llu flow_blocked=%llu stream_blocked=%llu path_ok=%d rtt_us=%.1f cwnd=%zu delivery_Bps=%llu pmtu=%zu",
+            diagnosticRole,
+            elapsedMilliseconds,
+            Self.maximumUDPPayloadSize,
+            diagnosticBatches,
+            diagnosticBatchPackets,
+            Double(diagnosticProduceNanoseconds) / 1_000_000,
+            Double(diagnosticNetworkNanoseconds) / 1_000_000,
+            diagnosticDatagrams,
+            diagnosticDatagramBytes,
+            diagnosticNextDatagramCalls,
+            diagnosticSendDone,
+            diagnosticPumpCalls,
+            diagnosticStreamVisits,
+            diagnosticBodyAttempts,
+            diagnosticBodyBlocked,
+            diagnosticBodyAcceptedBytes,
+            diagnosticFuturePacingPackets,
+            averagePacingMicroseconds,
+            Double(diagnosticMaximumPacingNanoseconds) / 1_000,
+            stats.sent,
+            stats.lost,
+            stats.retrans,
+            stats.lost_bytes,
+            stats.data_blocked_sent_count,
+            stats.stream_data_blocked_sent_count,
+            pathResult,
+            Double(path.rtt) / 1_000,
+            path.cwnd,
+            path.delivery_rate,
+            path.pmtu
+        )
+        NSLog("%@", message)
+        diagnosticStartedAt = now
+        diagnosticPumpCalls = 0
+        diagnosticStreamVisits = 0
+        diagnosticBodyAttempts = 0
+        diagnosticBodyBlocked = 0
+        diagnosticBodyAcceptedBytes = 0
+        diagnosticNextDatagramCalls = 0
+        diagnosticDatagrams = 0
+        diagnosticDatagramBytes = 0
+        diagnosticSendDone = 0
+        diagnosticFuturePacingPackets = 0
+        diagnosticFuturePacingNanoseconds = 0
+        diagnosticMaximumPacingNanoseconds = 0
+        diagnosticBatches = 0
+        diagnosticBatchPackets = 0
+        diagnosticProduceNanoseconds = 0
+        diagnosticNetworkNanoseconds = 0
     }
 
     func peerCertificateDER() -> Data? {
@@ -228,11 +352,67 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
     }
 
     func sendResponse(streamID: UInt64, headers: [(String, String)], body: Data) throws {
+        try beginResponse(streamID: streamID, headers: headers, contentLength: body.count)
+        guard !body.isEmpty else { return }
+        try appendResponseBody(streamID: streamID, data: body, isFinal: true)
+    }
+
+    func beginResponse(streamID: UInt64, headers: [(String, String)], contentLength: Int) throws {
         guard quicConnection != nil, http3Connection != nil else {
             throw ConnectionError.http3("The HTTP/3 connection is not ready")
         }
-        pendingResponses[streamID] = PendingHTTP3Response(headers: headers, body: body)
+        guard contentLength >= 0, pendingResponses[streamID] == nil else {
+            throw ConnectionError.http3("Invalid or duplicate HTTP/3 response")
+        }
+        pendingResponses[streamID] = PendingHTTP3Response(
+            headers: headers,
+            expectedBodyLength: contentLength
+        )
         try pumpResponses()
+    }
+
+    func appendResponseBody(streamID: UInt64, data: Data, isFinal: Bool) throws {
+        guard var pending = pendingResponses[streamID] else {
+            throw ConnectionError.http3("No pending HTTP/3 response for stream \(streamID)")
+        }
+        guard !pending.inputFinished,
+              pending.receivedBodyLength <= pending.expectedBodyLength - data.count else {
+            throw ConnectionError.http3("HTTP/3 response body exceeded its declared length")
+        }
+        pending.append(data)
+        if isFinal {
+            guard pending.receivedBodyLength == pending.expectedBodyLength else {
+                throw ConnectionError.http3("Incomplete HTTP/3 response body")
+            }
+            pending.inputFinished = true
+        }
+        pendingResponses[streamID] = pending
+        try pumpResponses()
+    }
+
+    func abandonResponse(streamID: UInt64) {
+        pendingResponses.removeValue(forKey: streamID)
+    }
+
+    func resetResponse(streamID: UInt64, errorCode: UInt64 = 0x010c) {
+        pendingResponses.removeValue(forKey: streamID)
+        guard let quicConnection else { return }
+        _ = quiche_conn_stream_shutdown(
+            quicConnection,
+            streamID,
+            QUICHE_SHUTDOWN_WRITE,
+            errorCode
+        )
+    }
+
+    func takePeerTerminatedResponseStreamIDs() -> [UInt64] {
+        defer { peerTerminatedResponseStreamIDs.removeAll(keepingCapacity: true) }
+        return peerTerminatedResponseStreamIDs
+    }
+
+    func takeFailedResponseStreamIDs() -> [UInt64] {
+        defer { failedResponseStreamIDs.removeAll(keepingCapacity: true) }
+        return failedResponseStreamIDs
     }
 
     func pollEvent() throws -> Event? {
@@ -365,7 +545,9 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
 
     private func pumpResponses() throws {
         guard let quicConnection, let http3Connection, !pendingResponses.isEmpty else { return }
+        if Self.diagnosticsEnabled { diagnosticPumpCalls += 1 }
         for streamID in Array(pendingResponses.keys) {
+            if Self.diagnosticsEnabled { diagnosticStreamVisits += 1 }
             guard var pending = pendingResponses[streamID] else { continue }
             if !pending.headersSent {
                 let managedHeaders = ManagedHTTP3Headers(pending.headers)
@@ -376,7 +558,7 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
                         streamID,
                         headers,
                         count,
-                        pending.body.isEmpty
+                        pending.expectedBodyLength == 0
                     )
                 }
                 if result == Int32(QUICHE_H3_ERR_STREAM_BLOCKED.rawValue) ||
@@ -384,20 +566,28 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
                     pendingResponses[streamID] = pending
                     continue
                 }
+                if Self.isPeerTerminatedStreamError(Int(result)) {
+                    pendingResponses.removeValue(forKey: streamID)
+                    peerTerminatedResponseStreamIDs.append(streamID)
+                    continue
+                }
                 guard result == 0 else {
-                    throw ConnectionError.http3("Unable to send HTTP/3 response headers (\(result))")
+                    pendingResponses.removeValue(forKey: streamID)
+                    failedResponseStreamIDs.append(streamID)
+                    continue
                 }
                 pending.headersSent = true
-                if pending.body.isEmpty {
+                if pending.expectedBodyLength == 0 {
                     pendingResponses.removeValue(forKey: streamID)
                     continue
                 }
             }
-            while pending.offset < pending.data.count {
-                let offeredLength = min(16 * 1024, pending.data.count - pending.offset)
-                let isFinal = pending.offset + offeredLength == pending.data.count
-                let sent = pending.data.withUnsafeBytes { bytes -> Int in
-                    let base = bytes.bindMemory(to: UInt8.self).baseAddress?.advanced(by: pending.offset)
+            while let chunk = pending.currentChunk {
+                let offeredLength = min(16 * 1024, chunk.count - pending.chunkOffset)
+                let isFinal = pending.inputFinished &&
+                    pending.sentBodyLength + offeredLength == pending.expectedBodyLength
+                let sent = chunk.withUnsafeBytes { bytes -> Int in
+                    let base = bytes.bindMemory(to: UInt8.self).baseAddress?.advanced(by: pending.chunkOffset)
                     return Int(quiche_h3_send_body(
                         http3Connection,
                         quicConnection,
@@ -407,19 +597,45 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
                         isFinal
                     ))
                 }
+                if Self.diagnosticsEnabled {
+                    diagnosticBodyAttempts += 1
+                    if sent == Int(QUICHE_H3_ERR_DONE.rawValue) ||
+                        sent == Int(QUICHE_H3_ERR_STREAM_BLOCKED.rawValue) {
+                        diagnosticBodyBlocked += 1
+                    } else if sent > 0 {
+                        diagnosticBodyAcceptedBytes += sent
+                    }
+                }
                 if sent == Int(QUICHE_H3_ERR_DONE.rawValue) ||
                     sent == Int(QUICHE_H3_ERR_STREAM_BLOCKED.rawValue) { break }
-                guard sent > 0 else {
-                    throw ConnectionError.http3("Unable to send the HTTP/3 response body (\(sent))")
+                if Self.isPeerTerminatedStreamError(sent) {
+                    pendingResponses.removeValue(forKey: streamID)
+                    peerTerminatedResponseStreamIDs.append(streamID)
+                    break
                 }
-                pending.offset += sent
+                guard sent > 0 else {
+                    pendingResponses.removeValue(forKey: streamID)
+                    failedResponseStreamIDs.append(streamID)
+                    break
+                }
+                pending.consume(sent)
             }
-            if pending.offset == pending.data.count {
+            if pendingResponses[streamID] == nil {
+                continue
+            } else if pending.inputFinished && pending.sentBodyLength == pending.expectedBodyLength {
                 pendingResponses.removeValue(forKey: streamID)
             } else {
                 pendingResponses[streamID] = pending
             }
         }
+    }
+
+    private static func isPeerTerminatedStreamError(_ value: Int) -> Bool {
+        value == Int(QUICHE_H3_ERR_REQUEST_CANCELLED.rawValue) ||
+            value == Int(QUICHE_H3_TRANSPORT_ERR_STREAM_STOPPED.rawValue) ||
+            value == Int(QUICHE_H3_TRANSPORT_ERR_STREAM_RESET.rawValue) ||
+            value == Int(QUICHE_H3_TRANSPORT_ERR_INVALID_STREAM_STATE.rawValue) ||
+            value == Int(QUICHE_H3_TRANSPORT_ERR_FINAL_SIZE.rawValue)
     }
 
     private func withAddresses<T>(
@@ -447,17 +663,42 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
 
 private struct PendingHTTP3Response {
     let headers: [(String, String)]
-    let body: Data
+    let expectedBodyLength: Int
     var headersSent = false
-    var offset: Int
+    var chunks: [Data] = []
+    var chunkIndex = 0
+    var chunkOffset = 0
+    var receivedBodyLength = 0
+    var sentBodyLength = 0
+    var inputFinished: Bool
 
-    init(headers: [(String, String)], body: Data) {
+    init(headers: [(String, String)], expectedBodyLength: Int) {
         self.headers = headers
-        self.body = body
-        self.offset = 0
+        self.expectedBodyLength = expectedBodyLength
+        self.inputFinished = expectedBodyLength == 0
     }
 
-    var data: Data { body }
+    var currentChunk: Data? {
+        chunkIndex < chunks.count ? chunks[chunkIndex] : nil
+    }
+
+    mutating func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        chunks.append(data)
+        receivedBodyLength += data.count
+    }
+
+    mutating func consume(_ count: Int) {
+        chunkOffset += count
+        sentBodyLength += count
+        guard let chunk = currentChunk, chunkOffset == chunk.count else { return }
+        chunkIndex += 1
+        chunkOffset = 0
+        if chunkIndex >= 8, chunkIndex * 2 >= chunks.count {
+            chunks.removeFirst(chunkIndex)
+            chunkIndex = 0
+        }
+    }
 }
 
 private final class HeaderCollectionBox {
@@ -520,7 +761,13 @@ private final class ManagedHTTP3Headers {
 enum GhostFileNetworkDatagram {
     // Amortize Network.framework callback and actor-hop overhead while keeping
     // both the send queue and the receive window explicitly bounded.
-    static let maximumSendBatchCount = 64
+    static let maximumSendBatchCount: Int = {
+        guard let rawValue = ProcessInfo.processInfo.environment["GHOSTFILE_HTTP3_SEND_BATCH_COUNT"],
+              let value = Int(rawValue), (1...1_024).contains(value) else {
+            return 64
+        }
+        return value
+    }()
     static let maximumReceiveCount = 64
 }
 

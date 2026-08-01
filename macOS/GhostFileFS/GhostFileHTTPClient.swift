@@ -126,6 +126,8 @@ actor GhostFileHTTP3Transport {
     private var pending: [UInt64: PendingResponse] = [:]
     private var isFlushing = false
     private var flushAgain = false
+    private var pendingReceivedDatagrams: [Data] = []
+    private var isReceiveDrainScheduled = false
 
     init(
         host: String,
@@ -224,9 +226,13 @@ actor GhostFileHTTP3Transport {
             fail(TransportError.closed)
             return
         }
-        await received(content)
-        if terminalError == nil {
-            receiveNextDatagram()
+        receiveNextDatagram()
+        pendingReceivedDatagrams.append(content)
+        guard !isReceiveDrainScheduled else { return }
+        isReceiveDrainScheduled = true
+        Task { [weak self] in
+            await Task.yield()
+            await self?.drainReceivedDatagrams()
         }
     }
 
@@ -247,25 +253,33 @@ actor GhostFileHTTP3Transport {
         }
     }
 
-    private func received(_ datagram: Data) async {
-        do {
-            try http3.receive(datagram)
-            if http3.isEstablished && !hasValidatedPeer {
-                guard let certificate = http3.peerCertificateDER(),
-                      Self.pin(for: certificate) == expectedCertificatePin else {
-                    throw TransportError.certificatePinMismatch
+    private func drainReceivedDatagrams() async {
+        while !pendingReceivedDatagrams.isEmpty, terminalError == nil {
+            let count = min(GhostFileNetworkDatagram.maximumReceiveCount, pendingReceivedDatagrams.count)
+            let datagrams = Array(pendingReceivedDatagrams.prefix(count))
+            pendingReceivedDatagrams.removeFirst(count)
+            do {
+                for datagram in datagrams {
+                    try http3.receive(datagram)
                 }
-                hasValidatedPeer = true
-                let waiters = handshakeWaiters
-                handshakeWaiters.removeAll()
-                waiters.forEach { $0.resume() }
+                if http3.isEstablished && !hasValidatedPeer {
+                    guard let certificate = http3.peerCertificateDER(),
+                          Self.pin(for: certificate) == expectedCertificatePin else {
+                        throw TransportError.certificatePinMismatch
+                    }
+                    hasValidatedPeer = true
+                    let waiters = handshakeWaiters
+                    handshakeWaiters.removeAll()
+                    waiters.forEach { $0.resume() }
+                }
+                try processEvents()
+                await flushOutgoing()
+                resetTimeout()
+            } catch {
+                fail(error)
             }
-            try processEvents()
-            await flushOutgoing()
-            resetTimeout()
-        } catch {
-            fail(error)
         }
+        isReceiveDrainScheduled = false
     }
 
     private func processEvents() throws {
@@ -310,6 +324,7 @@ actor GhostFileHTTP3Transport {
             repeat {
                 flushAgain = false
                 while true {
+                    let produceStartedAt = DispatchTime.now().uptimeNanoseconds
                     var datagrams: [Data] = []
                     datagrams.reserveCapacity(GhostFileNetworkDatagram.maximumSendBatchCount)
                     while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount,
@@ -317,7 +332,14 @@ actor GhostFileHTTP3Transport {
                         datagrams.append(datagram)
                     }
                     guard !datagrams.isEmpty else { break }
+                    let produceFinishedAt = DispatchTime.now().uptimeNanoseconds
                     try await connection.sendGhostFileDatagrams(datagrams)
+                    let sendFinishedAt = DispatchTime.now().uptimeNanoseconds
+                    http3.recordSendBatch(
+                        packetCount: datagrams.count,
+                        produceNanoseconds: produceFinishedAt - produceStartedAt,
+                        networkNanoseconds: sendFinishedAt - produceFinishedAt
+                    )
                 }
             } while flushAgain
             resetTimeout()

@@ -1,3 +1,5 @@
+import Darwin
+import Dispatch
 import Foundation
 import GhostHTTP
 import Network
@@ -246,6 +248,20 @@ private actor GhostFileHTTP3ServerSession {
     private var isFlushing = false
     private var flushAgain = false
     private var hasStopped = false
+    private var responseTasks: [UInt64: Task<Void, Never>] = [:]
+    private var terminatedRequestStreams: Set<UInt64> = []
+    private var pendingReceivedDatagrams: [Data] = []
+    private var isReceiveDrainScheduled = false
+
+    // GhostFile range requests are capped at 1 MiB. One DispatchIO operation per
+    // bounded range avoids re-entering the connection actor for artificial file
+    // chunks while independent HTTP/3 streams still read concurrently.
+    private static let fileReadChunkSize = GhostFileProtocol.maximumReadLength
+    private static let routingQueue = DispatchQueue(
+        label: "org.ghostvm.ghostfile.http3.routing",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
 
     init(
         connection: NWConnection,
@@ -305,23 +321,36 @@ private actor GhostFileHTTP3ServerSession {
             stopIsolated()
             return
         }
-        await received(content)
-        if !hasStopped {
-            receiveNextDatagram()
+        receiveNextDatagram()
+        pendingReceivedDatagrams.append(content)
+        guard !isReceiveDrainScheduled else { return }
+        isReceiveDrainScheduled = true
+        Task { [weak self] in
+            await Task.yield()
+            await self?.drainReceivedDatagrams()
         }
     }
 
-    private func received(_ datagram: Data) async {
-        guard !hasStopped else { return }
-        do {
-            try http3.receive(datagram)
-            try processEvents()
-            await flushOutgoing()
-            resetTimeout()
-        } catch {
-            NSLog("GhostFile HTTP/3 datagram failed: %@", String(describing: error))
-            stopIsolated()
+    private func drainReceivedDatagrams() async {
+        while !pendingReceivedDatagrams.isEmpty, !hasStopped {
+            let count = min(GhostFileNetworkDatagram.maximumReceiveCount, pendingReceivedDatagrams.count)
+            let datagrams = Array(pendingReceivedDatagrams.prefix(count))
+            pendingReceivedDatagrams.removeFirst(count)
+            do {
+                for datagram in datagrams {
+                    try http3.receive(datagram)
+                }
+                drainPeerTerminatedResponses()
+                try processEvents()
+                drainPeerTerminatedResponses()
+                await flushOutgoing()
+                resetTimeout()
+            } catch {
+                NSLog("GhostFile HTTP/3 datagram batch failed: %@", String(describing: error))
+                stopIsolated()
+            }
         }
+        isReceiveDrainScheduled = false
     }
 
     private func processEvents() throws {
@@ -335,14 +364,17 @@ private actor GhostFileHTTP3ServerSession {
                 }
                 let router = self.router
                 let delay = self.requestDelay
-                Task.detached(priority: .userInitiated) { [weak self] in
+                Task { [weak self] in
                     await delay(context)
-                    let response = router.route(request)
+                    let response = await Self.route(request, using: router)
                     await self?.send(response, streamID: streamID)
                 }
             case .data(let streamID):
                 _ = try http3.receiveBody(streamID: streamID)
-            case .finished, .reset:
+            case .reset(let streamID):
+                terminatedRequestStreams.insert(streamID)
+                cancelResponse(streamID: streamID)
+            case .finished:
                 break
             }
         }
@@ -360,20 +392,39 @@ private actor GhostFileHTTP3ServerSession {
         } catch { stopIsolated() }
     }
 
-    private func send(_ response: HTTPResponse, streamID: UInt64) async {
+    private func send(_ response: GhostFileHTTPResponse, streamID: UInt64) async {
         guard !hasStopped else { return }
+        guard terminatedRequestStreams.remove(streamID) == nil else { return }
         do {
-            let body = try Self.responseBodyData(response.body)
             var headers: [(String, String)] = [
                 (":status", String(response.status.rawValue)),
-                ("content-length", String(body.count)),
+                ("content-length", String(response.body.contentLength)),
             ]
             headers.append(contentsOf: response.headers.all.compactMap { entry in
                 let name = entry.name.lowercased()
                 guard name != "content-length", !name.hasPrefix(":") else { return nil }
                 return (name, entry.value)
             })
-            try http3.sendResponse(streamID: streamID, headers: headers, body: body)
+
+            switch response.body {
+            case .empty:
+                try http3.sendResponse(streamID: streamID, headers: headers, body: Data())
+            case .bytes(let body):
+                try http3.sendResponse(streamID: streamID, headers: headers, body: body)
+            case .fileRegion(let path, let identity, let offset, let length):
+                try http3.beginResponse(
+                    streamID: streamID,
+                    headers: headers,
+                    contentLength: length
+                )
+                startFileResponse(
+                    path: path,
+                    identity: identity,
+                    offset: offset,
+                    length: length,
+                    streamID: streamID
+                )
+            }
             requestCompleted()
             await flushOutgoing()
         } catch {
@@ -394,14 +445,24 @@ private actor GhostFileHTTP3ServerSession {
             repeat {
                 flushAgain = false
                 while true {
+                    let produceStartedAt = DispatchTime.now().uptimeNanoseconds
                     var datagrams: [Data] = []
                     datagrams.reserveCapacity(GhostFileNetworkDatagram.maximumSendBatchCount)
-                    while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount,
-                          let datagram = try http3.nextDatagram() {
+                    while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount {
+                        guard let datagram = try http3.nextDatagram() else { break }
                         datagrams.append(datagram)
+                        drainPeerTerminatedResponses()
                     }
+                    drainPeerTerminatedResponses()
                     guard !datagrams.isEmpty else { break }
+                    let produceFinishedAt = DispatchTime.now().uptimeNanoseconds
                     try await connection.sendGhostFileDatagrams(datagrams)
+                    let sendFinishedAt = DispatchTime.now().uptimeNanoseconds
+                    http3.recordSendBatch(
+                        packetCount: datagrams.count,
+                        produceNanoseconds: produceFinishedAt - produceStartedAt,
+                        networkNanoseconds: sendFinishedAt - produceFinishedAt
+                    )
                 }
             } while flushAgain
             resetTimeout()
@@ -433,6 +494,8 @@ private actor GhostFileHTTP3ServerSession {
         guard !hasStopped else { return }
         hasStopped = true
         timeoutTask?.cancel()
+        for task in responseTasks.values { task.cancel() }
+        responseTasks.removeAll()
         connection.cancel()
         stopped()
     }
@@ -467,35 +530,233 @@ private actor GhostFileHTTP3ServerSession {
         return GhostFileHTTPRequest(operation: operation, path: path, offset: offset, length: length)
     }
 
-    private nonisolated static func responseBodyData(_ body: HTTPResponseBody) throws -> Data {
-        switch body {
-        case .empty:
-            return Data()
-        case .bytes(let data):
-            return data
-        case .stream(let expectedLength, let producer):
-            let writer = GhostFileHTTP3BufferedWriter(capacity: expectedLength)
-            try producer(writer)
-            guard writer.data.count == expectedLength else { throw GhostFileHTTP3ServerError.incompleteBody }
-            return writer.data
+    private nonisolated static func route(
+        _ request: HTTPRequestHead,
+        using router: GhostFileShareRouter
+    ) async -> GhostFileHTTPResponse {
+        await withCheckedContinuation { continuation in
+            routingQueue.async {
+                continuation.resume(returning: router.route(request))
+            }
         }
     }
-}
 
-private final class GhostFileHTTP3BufferedWriter: HTTPBodyWriter {
-    private(set) var data: Data
-
-    init(capacity: Int) {
-        data = Data()
-        data.reserveCapacity(capacity)
+    private func startFileResponse(
+        path: String,
+        identity: String,
+        offset: UInt64,
+        length: Int,
+        streamID: UInt64
+    ) {
+        let task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Self.produceFileResponse(
+                    path: path,
+                    identity: identity,
+                    offset: offset,
+                    length: length,
+                    sendChunk: { [weak self] data, isFinal in
+                        guard let self else { throw CancellationError() }
+                        try await self.sendFileChunk(data, isFinal: isFinal, streamID: streamID)
+                    }
+                )
+                await self.fileResponseFinished(streamID: streamID)
+            } catch is CancellationError {
+                await self.cancelResponse(streamID: streamID)
+            } catch {
+                await self.fileResponseFailed(error, streamID: streamID)
+            }
+        }
+        responseTasks[streamID] = task
     }
 
-    func write(_ data: Data) throws { self.data.append(data) }
-    func write(_ buffer: UnsafeRawBufferPointer) throws {
-        data.append(buffer.bindMemory(to: UInt8.self))
+    private nonisolated static func produceFileResponse(
+        path: String,
+        identity: String,
+        offset: UInt64,
+        length: Int,
+        sendChunk: @escaping @Sendable (Data, Bool) async throws -> Void
+    ) async throws {
+        guard offset <= UInt64(Int64.max) else { throw POSIXError(.EOVERFLOW) }
+        let file = try await GhostFileDispatchIOFile.cached(path: path, identity: identity)
+
+        var currentOffset = offset
+        var remaining = length
+        while remaining > 0 {
+            try Task.checkCancellation()
+            let requestedLength = min(remaining, fileReadChunkSize)
+            let data = try await file.read(offset: currentOffset, length: requestedLength)
+            try Task.checkCancellation()
+            guard data.count == requestedLength else { throw POSIXError(.EIO) }
+            currentOffset += UInt64(data.count)
+            remaining -= data.count
+            try await sendChunk(data, remaining == 0)
+        }
     }
+
+    private func sendFileChunk(_ data: Data, isFinal: Bool, streamID: UInt64) async throws {
+        guard !hasStopped, responseTasks[streamID] != nil else { throw CancellationError() }
+        try http3.appendResponseBody(streamID: streamID, data: data, isFinal: isFinal)
+        await flushOutgoing()
+        guard !hasStopped, responseTasks[streamID] != nil else { throw CancellationError() }
+    }
+
+    private func fileResponseFinished(streamID: UInt64) {
+        responseTasks.removeValue(forKey: streamID)
+    }
+
+    private func fileResponseFailed(_ error: Error, streamID: UInt64) async {
+        NSLog("GhostFile DispatchIO response failed on stream %llu: %@", streamID, String(describing: error))
+        cancelResponse(streamID: streamID, resetTransport: true)
+        await flushOutgoing()
+    }
+
+    private func cancelResponse(streamID: UInt64, resetTransport: Bool = false) {
+        responseTasks.removeValue(forKey: streamID)?.cancel()
+        if resetTransport {
+            http3.resetResponse(streamID: streamID)
+        } else {
+            http3.abandonResponse(streamID: streamID)
+        }
+    }
+
+    private func drainPeerTerminatedResponses() {
+        for streamID in http3.takePeerTerminatedResponseStreamIDs() {
+            terminatedRequestStreams.insert(streamID)
+            cancelResponse(streamID: streamID)
+        }
+        for streamID in http3.takeFailedResponseStreamIDs() {
+            terminatedRequestStreams.insert(streamID)
+            cancelResponse(streamID: streamID, resetTransport: true)
+        }
+    }
+
 }
 
-private enum GhostFileHTTP3ServerError: Error {
-    case incompleteBody
+private final class GhostFileDispatchIOFile: @unchecked Sendable {
+    private static let callbackQueue = DispatchQueue(
+        label: "org.ghostvm.ghostfile.dispatch-io",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+    private static let cacheMissQueue = DispatchQueue(
+        label: "org.ghostvm.ghostfile.dispatch-io.cache",
+        qos: .userInitiated
+    )
+    private static let cache: NSCache<NSString, GhostFileDispatchIOFile> = {
+        let cache = NSCache<NSString, GhostFileDispatchIOFile>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    private let channel: DispatchIO
+    private let cacheKey: NSString
+
+    static func cached(path: String, identity: String) async throws -> GhostFileDispatchIOFile {
+        let cacheKey = path + "\0" + identity
+        if let cached = cache.object(forKey: cacheKey as NSString) { return cached }
+        return try await withCheckedThrowingContinuation { continuation in
+            cacheMissQueue.async {
+                let key = cacheKey as NSString
+                if let cached = cache.object(forKey: key) {
+                    continuation.resume(returning: cached)
+                    return
+                }
+                do {
+                    let file = try GhostFileDispatchIOFile(path: path, cacheKey: key)
+                    cache.setObject(file, forKey: key)
+                    continuation.resume(returning: file)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    init(path: String, cacheKey: NSString) throws {
+        guard let channel = path.withCString({ pathPointer in
+            DispatchIO(
+                type: .random,
+                path: pathPointer,
+                oflag: O_RDONLY,
+                mode: 0,
+                queue: Self.callbackQueue,
+                cleanupHandler: { _ in }
+            )
+        }) else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        self.channel = channel
+        self.cacheKey = cacheKey
+    }
+
+    func read(offset: UInt64, length: Int) async throws -> Data {
+        guard offset <= UInt64(Int64.max), length >= 0 else { throw POSIXError(.EOVERFLOW) }
+        do {
+            return try await withCheckedThrowingContinuation { continuation in
+                let operation = GhostFileDispatchIOReadOperation(
+                    expectedLength: length,
+                    continuation: continuation
+                )
+                channel.read(
+                    offset: off_t(offset),
+                    length: length,
+                    queue: Self.callbackQueue,
+                    ioHandler: operation.receive(done:data:error:)
+                )
+            }
+        } catch {
+            if Self.cache.object(forKey: cacheKey) === self {
+                Self.cache.removeObject(forKey: cacheKey)
+            }
+            throw error
+        }
+    }
+
+    deinit { channel.close(flags: .stop) }
+}
+
+private final class GhostFileDispatchIOReadOperation: @unchecked Sendable {
+    private let lock = NSLock()
+    private let expectedLength: Int
+    private var data = Data()
+    private var continuation: CheckedContinuation<Data, Error>?
+
+    init(expectedLength: Int, continuation: CheckedContinuation<Data, Error>) {
+        self.expectedLength = expectedLength
+        self.continuation = continuation
+        data.reserveCapacity(expectedLength)
+    }
+
+    func receive(done: Bool, data dispatchData: DispatchData?, error: Int32) {
+        let chunk = dispatchData.map { Data($0) } ?? Data()
+        var completion: CheckedContinuation<Data, Error>?
+        var result: Result<Data, Error>?
+
+        lock.lock()
+        if continuation != nil {
+            if error != 0 {
+                completion = continuation
+                continuation = nil
+                result = .failure(POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO))
+            } else {
+                if done {
+                    completion = continuation
+                    continuation = nil
+                    if data.isEmpty, chunk.count == expectedLength {
+                        result = .success(chunk)
+                    } else {
+                        data.append(chunk)
+                        result = data.count == expectedLength ? .success(data) : .failure(POSIXError(.EIO))
+                    }
+                } else {
+                    data.append(chunk)
+                }
+            }
+        }
+        lock.unlock()
+
+        if let completion, let result { completion.resume(with: result) }
+    }
 }

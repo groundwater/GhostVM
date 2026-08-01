@@ -61,6 +61,12 @@ flow control, and multiplexing. Integration tests cover 32 concurrent 64 KiB
 range reads and verify that a two-second paused request doesn't delay an
 independent request on the same connection.
 
+The server represents file bodies as immutable path/offset/length descriptors.
+Random-access `DispatchIO` channels perform the actual range reads and deliver
+their data outside the serialized HTTP/3 connection actor. Metadata and
+directory routing use a separate concurrent Dispatch queue, so blocking file
+system calls do not occupy the connection actor or Swift's cooperative executor.
+
 The service is advertised as `_ghostfile._udp` with `transport=http3` and
 `alpn=h3` TXT values. Peers negotiate the standard `h3` ALPN over TLS 1.3 and
 QUIC. The server uses an ephemeral certificate whose DER SHA-256 pin is carried
@@ -90,3 +96,5 @@ python3 scripts/benchmark-ghostfile.py \
 
 The stress script checks parallel reads, checksums, directory enumeration,
 spaces and UTF-8 names, symlinks, and enforcement of the read-only mount.
+Recorded before/after performance results are in
+[`GHOSTFILE_BENCHMARKS.md`](GHOSTFILE_BENCHMARKS.md).

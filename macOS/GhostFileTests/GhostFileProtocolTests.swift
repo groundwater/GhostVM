@@ -121,17 +121,17 @@ final class GhostFileShareRouterTests: XCTestCase {
         "\(GhostFileProtocol.shareBasePath(id: shareID))/\(operation)?\(GhostFilePath.percentEncodedQuery(relativePath))"
     }
 
-    private func bodyData(_ response: HTTPResponse) throws -> Data {
+    private func bodyData(_ response: GhostFileHTTPResponse) throws -> Data {
         switch response.body {
         case .empty:
             return Data()
         case .bytes(let data):
             return data
-        case .stream(let expectedLength, let producer):
-            let writer = CollectingWriter()
-            try producer(writer)
-            XCTAssertEqual(writer.data.count, expectedLength)
-            return writer.data
+        case .fileRegion(let path, _, let offset, let length):
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? handle.close() }
+            try handle.seek(toOffset: offset)
+            return try XCTUnwrap(handle.read(upToCount: length))
         }
     }
 }
@@ -141,17 +141,5 @@ final class GhostFileTLSIdentityTests: XCTestCase {
         let identity = try GhostFileTLSIdentity.make()
         XCTAssertFalse(identity.publicKeyPin.isEmpty)
         XCTAssertFalse(identity.publicKeyPin.contains("="))
-    }
-}
-
-private final class CollectingWriter: HTTPBodyWriter, @unchecked Sendable {
-    private(set) var data = Data()
-
-    func write(_ data: Data) throws {
-        self.data.append(data)
-    }
-
-    func write(_ buffer: UnsafeRawBufferPointer) throws {
-        data.append(buffer.bindMemory(to: UInt8.self))
     }
 }

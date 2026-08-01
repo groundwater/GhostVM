@@ -2,6 +2,55 @@ import Foundation
 import Darwin
 import GhostHTTP
 
+struct GhostFileHTTPResponse: Sendable {
+    var status: HTTPStatus
+    var headers: HTTPHeaders
+    var body: GhostFileHTTPResponseBody
+
+    init(
+        status: HTTPStatus,
+        headers: HTTPHeaders = HTTPHeaders(),
+        body: GhostFileHTTPResponseBody = .empty
+    ) {
+        self.status = status
+        self.headers = headers
+        self.body = body
+    }
+
+    init(
+        status: HTTPStatus,
+        headers: [String: String],
+        body: GhostFileHTTPResponseBody = .empty
+    ) {
+        self.init(status: status, headers: HTTPHeaders(headers), body: body)
+    }
+
+    static func text(_ string: String, status: HTTPStatus = .ok) -> GhostFileHTTPResponse {
+        GhostFileHTTPResponse(
+            status: status,
+            headers: ["Content-Type": "text/plain; charset=utf-8"],
+            body: .bytes(Data(string.utf8))
+        )
+    }
+}
+
+enum GhostFileHTTPResponseBody: Sendable {
+    case empty
+    case bytes(Data)
+    case fileRegion(path: String, identity: String, offset: UInt64, length: Int)
+
+    var contentLength: Int {
+        switch self {
+        case .empty:
+            return 0
+        case .bytes(let data):
+            return data.count
+        case .fileRegion(_, _, _, let length):
+            return length
+        }
+    }
+}
+
 final class GhostFileShareRouter: @unchecked Sendable {
     let rootURL: URL
     let shareID: UUID
@@ -17,7 +66,7 @@ final class GhostFileShareRouter: @unchecked Sendable {
         self.resolvedRootURL = rootURL.resolvingSymlinksInPath().standardizedFileURL
     }
 
-    func route(_ request: HTTPRequestHead) -> HTTPResponse {
+    func route(_ request: HTTPRequestHead) -> GhostFileHTTPResponse {
         guard request.header("authorization") == "Bearer \(accessKey)" else {
             return responseError(.unauthorized, "A valid GhostFile access key is required")
         }
@@ -56,7 +105,7 @@ final class GhostFileShareRouter: @unchecked Sendable {
             case (.GET, "metadata"), (.HEAD, "metadata"):
                 let metadata = try fileMetadata(at: url, displayName: relativePath.isEmpty ? shareName : nil)
                 if request.method == .HEAD {
-                    return HTTPResponse(status: .ok, headers: ["ETag": metadata.etag])
+                    return GhostFileHTTPResponse(status: .ok, headers: ["ETag": metadata.etag])
                 }
                 return json(metadata, headers: ["ETag": metadata.etag])
 
@@ -78,7 +127,7 @@ final class GhostFileShareRouter: @unchecked Sendable {
                     return responseError(.badRequest, "Path is not a regular file")
                 }
                 guard metadata.size > 0 else {
-                    return HTTPResponse(
+                    return GhostFileHTTPResponse(
                         status: .ok,
                         headers: ["Accept-Ranges": "bytes", "ETag": metadata.etag],
                         body: .bytes(Data())
@@ -89,7 +138,7 @@ final class GhostFileShareRouter: @unchecked Sendable {
                     fileSize: metadata.size,
                     maximumLength: GhostFileProtocol.maximumReadLength
                 ) else {
-                    return HTTPResponse(
+                    return GhostFileHTTPResponse(
                         status: .rangeNotSatisfiable,
                         headers: ["Content-Range": "bytes */\(metadata.size)"]
                     )
@@ -188,9 +237,9 @@ final class GhostFileShareRouter: @unchecked Sendable {
         url: URL,
         metadata: GhostFileMetadata,
         byteRange: GhostFileByteRange
-    ) -> HTTPResponse {
+    ) -> GhostFileHTTPResponse {
         let end = byteRange.offset + UInt64(byteRange.length) - 1
-        return HTTPResponse(
+        return GhostFileHTTPResponse(
             status: .partialContent,
             headers: [
                 "Content-Type": "application/octet-stream",
@@ -198,26 +247,23 @@ final class GhostFileShareRouter: @unchecked Sendable {
                 "Content-Range": "bytes \(byteRange.offset)-\(end)/\(metadata.size)",
                 "ETag": metadata.etag,
             ],
-            body: .stream(contentLength: byteRange.length) { writer in
-                let handle = try FileHandle(forReadingFrom: url)
-                defer { try? handle.close() }
-                try handle.seek(toOffset: byteRange.offset)
-                var remaining = byteRange.length
-                while remaining > 0 {
-                    let data = try handle.read(upToCount: min(remaining, 64 * 1024)) ?? Data()
-                    guard !data.isEmpty else { throw POSIXError(.EIO) }
-                    try writer.write(data)
-                    remaining -= data.count
-                }
-            }
+            body: .fileRegion(
+                path: url.path,
+                identity: metadata.etag,
+                offset: byteRange.offset,
+                length: byteRange.length
+            )
         )
     }
 
-    private func json<T: Encodable>(_ value: T, headers: [String: String] = [:]) -> HTTPResponse {
+    private func json<T: Encodable>(
+        _ value: T,
+        headers: [String: String] = [:]
+    ) -> GhostFileHTTPResponse {
         do {
             var responseHeaders = headers
             responseHeaders["Content-Type"] = "application/json"
-            return HTTPResponse(
+            return GhostFileHTTPResponse(
                 status: .ok,
                 headers: responseHeaders,
                 body: .bytes(try JSONEncoder().encode(value))
@@ -227,9 +273,9 @@ final class GhostFileShareRouter: @unchecked Sendable {
         }
     }
 
-    private func responseError(_ status: HTTPStatus, _ message: String) -> HTTPResponse {
+    private func responseError(_ status: HTTPStatus, _ message: String) -> GhostFileHTTPResponse {
         let payload = (try? JSONEncoder().encode(GhostFileErrorPayload(error: message))) ?? Data()
-        return HTTPResponse(
+        return GhostFileHTTPResponse(
             status: status,
             headers: ["Content-Type": "application/json"],
             body: .bytes(payload)
