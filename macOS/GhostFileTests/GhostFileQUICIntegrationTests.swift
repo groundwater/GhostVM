@@ -4,6 +4,88 @@ import XCTest
 @testable import GhostFile
 
 final class GhostFileHTTP3IntegrationTests: XCTestCase {
+    func testBulkTransferBenchmarkWhenRequested() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["GHOSTFILE_RUN_BULK_BENCHMARK"] == "1" else {
+            throw XCTSkip("Set GHOSTFILE_RUN_BULK_BENCHMARK=1 to run the HTTP/3 bulk benchmark")
+        }
+        guard let fixturePath = environment["GHOSTFILE_BENCHMARK_FILE"] else {
+            throw XCTSkip("Set GHOSTFILE_BENCHMARK_FILE to the source fixture path")
+        }
+
+        let fixtureURL = URL(fileURLWithPath: fixturePath).standardizedFileURL
+        let payload = try Data(contentsOf: fixtureURL, options: .mappedIfSafe)
+        let accessKey = "quic-bulk-benchmark-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixtureURL.deletingLastPathComponent(),
+                shareName: "GhostFileHTTP3BulkBenchmark",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        let resourceURL = try loopbackResourceURL(
+            shareURL: shareURL,
+            accessKey: accessKey
+        )
+        let client = try GhostFileHTTP3Client(resourceURL: resourceURL)
+        let relativePath = fixtureURL.lastPathComponent
+        let chunkSize = GhostFileProtocol.maximumReadLength
+        let chunks = stride(from: 0, to: payload.count, by: chunkSize).map { offset in
+            (offset: offset, length: min(chunkSize, payload.count - offset))
+        }
+
+        // Establish the connection before either timed transfer.
+        _ = try await client.read(path: relativePath, offset: 0, length: 1)
+
+        let sequential = try await timedTransfer {
+            var responses: [(Int, Data)] = []
+            responses.reserveCapacity(chunks.count)
+            for chunk in chunks {
+                let data = try await client.read(
+                    path: relativePath,
+                    offset: UInt64(chunk.offset),
+                    length: chunk.length
+                )
+                responses.append((chunk.offset, data))
+            }
+            return responses
+        }
+        try verify(sequential.result, against: payload)
+
+        let parallel = try await timedTransfer {
+            var responses: [(Int, Data)] = []
+            responses.reserveCapacity(chunks.count)
+            for batchStart in stride(from: 0, to: chunks.count, by: 16) {
+                let batchEnd = min(batchStart + 16, chunks.count)
+                try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+                    for chunk in chunks[batchStart..<batchEnd] {
+                        group.addTask {
+                            let data = try await client.read(
+                                path: relativePath,
+                                offset: UInt64(chunk.offset),
+                                length: chunk.length
+                            )
+                            return (chunk.offset, data)
+                        }
+                    }
+                    for try await response in group {
+                        responses.append(response)
+                    }
+                }
+            }
+            return responses
+        }
+        try verify(parallel.result, against: payload)
+
+        printBenchmark("direct HTTP/3 sequential", bytes: payload.count, seconds: sequential.seconds)
+        printBenchmark("direct HTTP/3 16-stream", bytes: payload.count, seconds: parallel.seconds)
+    }
+
     func testPausedRequestDoesNotBlockAnotherRequestOnSameHTTP3Connection() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("ghostfile-quic-tests-\(UUID().uuidString)", isDirectory: true)
@@ -89,17 +171,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         }
 
         let shareURL = try await waitForShareURL(server)
-        let resourceURL = try { () -> URL in
-            guard var components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false) else {
-                throw TestError.missingShareURL
-            }
-            components.host = "127.0.0.1"
-            components.queryItems = (components.queryItems ?? []) + [
-                URLQueryItem(name: "access_key", value: accessKey)
-            ]
-            guard let url = components.url else { throw TestError.missingShareURL }
-            return url
-        }()
+        let resourceURL = try loopbackResourceURL(shareURL: shareURL, accessKey: accessKey)
         let client = try GhostFileHTTP3Client(resourceURL: resourceURL)
 
         let chunkSize = 64 * 1024
@@ -122,6 +194,53 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
 
     private enum TestError: Error {
         case missingShareURL
+        case responseMismatch
+    }
+
+    private func loopbackResourceURL(shareURL: URL, accessKey: String) throws -> URL {
+        guard var components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false) else {
+            throw TestError.missingShareURL
+        }
+        components.host = "127.0.0.1"
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "access_key", value: accessKey)
+        ]
+        guard let url = components.url else { throw TestError.missingShareURL }
+        return url
+    }
+
+    private func timedTransfer<Result>(
+        _ operation: () async throws -> Result
+    ) async rethrows -> (seconds: Double, result: Result) {
+        let clock = ContinuousClock()
+        let started = clock.now
+        let result = try await operation()
+        let elapsed = started.duration(to: clock.now)
+        let components = elapsed.components
+        let seconds = Double(components.seconds) + Double(components.attoseconds) / 1e18
+        return (seconds, result)
+    }
+
+    private func verify(_ responses: [(Int, Data)], against payload: Data) throws {
+        var expectedOffset = 0
+        for (offset, data) in responses.sorted(by: { $0.0 < $1.0 }) {
+            guard offset == expectedOffset, offset + data.count <= payload.count else {
+                throw TestError.responseMismatch
+            }
+            guard payload[offset..<(offset + data.count)].elementsEqual(data) else {
+                throw TestError.responseMismatch
+            }
+            expectedOffset += data.count
+        }
+        guard expectedOffset == payload.count else {
+            throw TestError.responseMismatch
+        }
+    }
+
+    private func printBenchmark(_ label: String, bytes: Int, seconds: Double) {
+        let throughput = Double(bytes) / seconds / (1024 * 1024)
+        print("GHOSTFILE_BENCHMARK \(label): \(String(format: "%.1f", throughput)) MiB/s " +
+              "(\(String(format: "%.3f", seconds)) s)")
     }
 
     private func waitForShareURL(_ server: GhostFileShareServer) async throws -> URL {
