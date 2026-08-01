@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import GhostHTTP3
+import Network
 
 final class GhostFileHTTP3Connection: @unchecked Sendable {
     enum Role {
@@ -513,5 +514,66 @@ private final class ManagedHTTP3Headers {
 
     func withUnsafeHeaders<T>(_ body: (UnsafePointer<quiche_h3_header>?, Int) -> T) -> T {
         headers.withUnsafeBufferPointer { body($0.baseAddress, $0.count) }
+    }
+}
+
+enum GhostFileNetworkDatagram {
+    // Amortize Network.framework callback and actor-hop overhead while keeping
+    // both the send queue and the receive window explicitly bounded.
+    static let maximumSendBatchCount = 64
+    static let maximumReceiveCount = 64
+}
+
+extension NWConnection {
+    func sendGhostFileDatagrams(_ datagrams: [Data]) async throws {
+        guard !datagrams.isEmpty else { return }
+
+        try await withCheckedThrowingContinuation { continuation in
+            let completion = GhostFileDatagramBatchCompletion(
+                count: datagrams.count,
+                continuation: continuation
+            )
+            batch {
+                for datagram in datagrams {
+                    send(content: datagram, completion: .contentProcessed { error in
+                        completion.completed(error: error)
+                    })
+                }
+            }
+        }
+    }
+}
+
+private final class GhostFileDatagramBatchCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var remaining: Int
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    init(count: Int, continuation: CheckedContinuation<Void, Error>) {
+        remaining = count
+        self.continuation = continuation
+    }
+
+    func completed(error: NWError?) {
+        var continuationToResume: CheckedContinuation<Void, Error>?
+        var completionError: Error?
+        lock.lock()
+        remaining -= 1
+        if let error, continuation != nil {
+            continuationToResume = continuation
+            continuation = nil
+            completionError = error
+        } else if remaining == 0, continuation != nil {
+            continuationToResume = continuation
+            continuation = nil
+        }
+        lock.unlock()
+
+        guard let continuationToResume else { return }
+        if let completionError {
+            continuationToResume.resume(throwing: completionError)
+        } else {
+            continuationToResume.resume()
+        }
     }
 }

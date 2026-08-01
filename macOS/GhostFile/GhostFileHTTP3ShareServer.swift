@@ -242,7 +242,6 @@ private actor GhostFileHTTP3ServerSession {
     private let requestDelay: RequestDelay
     private let requestCompleted: @Sendable () -> Void
     private let stopped: @Sendable () -> Void
-    private var receiveTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
     private var isFlushing = false
     private var flushAgain = false
@@ -287,15 +286,28 @@ private actor GhostFileHTTP3ServerSession {
             }
         }
         connection.start(queue: DispatchQueue(label: "org.ghostvm.ghostfile.http3.session"))
-        receiveTask = Task { [weak self, connection] in
-            do {
-                while !Task.isCancelled {
-                    let datagram = try await connection.receiveHTTP3Datagram()
-                    await self?.received(datagram)
-                }
-            } catch {
-                await self?.stopIsolated()
+        connection.batch {
+            for _ in 0..<GhostFileNetworkDatagram.maximumReceiveCount {
+                receiveNextDatagram()
             }
+        }
+    }
+
+    private func receiveNextDatagram() {
+        connection.receiveMessage { [weak self] content, _, _, error in
+            Task { await self?.receiveCompleted(content, error: error) }
+        }
+    }
+
+    private func receiveCompleted(_ content: Data?, error: NWError?) async {
+        guard !hasStopped else { return }
+        guard error == nil, let content else {
+            stopIsolated()
+            return
+        }
+        await received(content)
+        if !hasStopped {
+            receiveNextDatagram()
         }
     }
 
@@ -381,8 +393,15 @@ private actor GhostFileHTTP3ServerSession {
         do {
             repeat {
                 flushAgain = false
-                while let datagram = try http3.nextDatagram() {
-                    try await connection.sendHTTP3Datagram(datagram)
+                while true {
+                    var datagrams: [Data] = []
+                    datagrams.reserveCapacity(GhostFileNetworkDatagram.maximumSendBatchCount)
+                    while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount,
+                          let datagram = try http3.nextDatagram() {
+                        datagrams.append(datagram)
+                    }
+                    guard !datagrams.isEmpty else { break }
+                    try await connection.sendGhostFileDatagrams(datagrams)
                 }
             } while flushAgain
             resetTimeout()
@@ -413,7 +432,6 @@ private actor GhostFileHTTP3ServerSession {
     private func stopIsolated() {
         guard !hasStopped else { return }
         hasStopped = true
-        receiveTask?.cancel()
         timeoutTask?.cancel()
         connection.cancel()
         stopped()
@@ -480,26 +498,4 @@ private final class GhostFileHTTP3BufferedWriter: HTTPBodyWriter {
 
 private enum GhostFileHTTP3ServerError: Error {
     case incompleteBody
-    case closed
-}
-
-private extension NWConnection {
-    func sendHTTP3Datagram(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            send(content: data, completion: .contentProcessed { error in
-                if let error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            })
-        }
-    }
-
-    func receiveHTTP3Datagram() async throws -> Data {
-        try await withCheckedThrowingContinuation { continuation in
-            receiveMessage { content, _, _, error in
-                if let error { continuation.resume(throwing: error) }
-                else if let content { continuation.resume(returning: content) }
-                else { continuation.resume(throwing: GhostFileHTTP3ServerError.closed) }
-            }
-        }
-    }
 }
