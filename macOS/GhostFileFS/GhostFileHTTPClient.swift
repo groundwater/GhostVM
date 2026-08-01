@@ -264,6 +264,8 @@ actor GhostFileHTTP3Transport {
     private var readyWaiters: [CheckedContinuation<Void, Error>] = []
     private var handshakeWaiters: [CheckedContinuation<Void, Error>] = []
     private var pending: [UInt64: PendingResponse] = [:]
+    private var streamCreditWaiters: [PendingStreamCredit] = []
+    private var reservedStreamCredits: UInt64 = 0
     private var isFlushing = false
     private var flushAgain = false
     private var pendingReceivedDatagrams: [Data] = []
@@ -293,6 +295,14 @@ actor GhostFileHTTP3Transport {
         length: Int?
     ) async throws -> Response {
         try await ensureHTTP3Ready()
+        try await acquireRequestStreamCredit()
+        do {
+            try Task.checkCancellation()
+            if let terminalError { throw terminalError }
+        } catch {
+            releaseReservedStreamCredit()
+            throw error
+        }
         var components = URLComponents()
         components.path = operationPath(operation)
         if let relativePath {
@@ -310,7 +320,15 @@ actor GhostFileHTTP3Transport {
         if let offset, let length, length > 0 {
             headers.append(("range", "bytes=\(offset)-\(offset + UInt64(length) - 1)"))
         }
-        let streamID = try http3.sendRequest(headers: headers)
+        let streamID: UInt64
+        do {
+            streamID = try http3.sendRequest(headers: headers)
+            releaseReservedStreamCredit()
+        } catch {
+            releaseReservedStreamCredit()
+            grantAvailableStreamCredits()
+            throw error
+        }
         return try await withCheckedThrowingContinuation { continuation in
             pending[streamID] = PendingResponse(continuation: continuation)
             Task { await self.flushOutgoing() }
@@ -413,6 +431,7 @@ actor GhostFileHTTP3Transport {
                     waiters.forEach { $0.resume() }
                 }
                 try processEvents()
+                grantAvailableStreamCredits()
                 await flushOutgoing()
                 resetTimeout()
             } catch {
@@ -450,6 +469,66 @@ actor GhostFileHTTP3Transport {
                 pending.removeValue(forKey: streamID)?.continuation.resume(throwing: TransportError.streamReset)
             }
         }
+    }
+
+    private func acquireRequestStreamCredit() async throws {
+        if unreservedStreamCreditCount > 0 {
+            reservedStreamCredits += 1
+            return
+        }
+
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                let deadlineTask = Task { [weak self] in
+                    do {
+                        try await Task.sleep(for: .seconds(15))
+                        guard !Task.isCancelled else { return }
+                        await self?.streamCreditWaiterExpired(id: waiterID)
+                    } catch {}
+                }
+                streamCreditWaiters.append(PendingStreamCredit(
+                    id: waiterID,
+                    continuation: continuation,
+                    deadlineTask: deadlineTask
+                ))
+                grantAvailableStreamCredits()
+            }
+        } onCancel: {
+            Task { await self.cancelStreamCreditWaiter(id: waiterID) }
+        }
+    }
+
+    private var unreservedStreamCreditCount: UInt64 {
+        let available = http3.availableRequestStreamCount
+        return available > reservedStreamCredits ? available - reservedStreamCredits : 0
+    }
+
+    private func grantAvailableStreamCredits() {
+        while !streamCreditWaiters.isEmpty, unreservedStreamCreditCount > 0 {
+            let waiter = streamCreditWaiters.removeFirst()
+            reservedStreamCredits += 1
+            waiter.deadlineTask.cancel()
+            waiter.continuation.resume()
+        }
+    }
+
+    private func releaseReservedStreamCredit() {
+        precondition(reservedStreamCredits > 0, "Released HTTP/3 stream credit without a reservation")
+        reservedStreamCredits -= 1
+    }
+
+    private func cancelStreamCreditWaiter(id: UUID) {
+        guard let index = streamCreditWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = streamCreditWaiters.remove(at: index)
+        waiter.deadlineTask.cancel()
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func streamCreditWaiterExpired(id: UUID) {
+        guard let index = streamCreditWaiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = streamCreditWaiters.remove(at: index)
+        waiter.continuation.resume(throwing: TransportError.streamCreditTimedOut)
     }
 
     private func flushOutgoing() async {
@@ -516,6 +595,11 @@ actor GhostFileHTTP3Transport {
         handshakeWaiters.removeAll()
         for response in pending.values { response.continuation.resume(throwing: error) }
         pending.removeAll()
+        for waiter in streamCreditWaiters {
+            waiter.deadlineTask.cancel()
+            waiter.continuation.resume(throwing: error)
+        }
+        streamCreditWaiters.removeAll()
         timeoutTask?.cancel()
         connection.cancel()
     }
@@ -534,10 +618,17 @@ actor GhostFileHTTP3Transport {
         var body = Data()
     }
 
+    private struct PendingStreamCredit {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+        let deadlineTask: Task<Void, Never>
+    }
+
     private enum TransportError: Error {
         case invalidResponse
         case certificatePinMismatch
         case streamReset
+        case streamCreditTimedOut
         case closed
     }
 }

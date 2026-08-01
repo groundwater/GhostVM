@@ -52,6 +52,19 @@ final class GhostFileShareServer: ObservableObject {
         return components.url
     }
 
+#if DEBUG
+    var loopbackShareURLForTesting: URL? {
+        guard port != 0 else { return nil }
+        var components = URLComponents()
+        components.scheme = GhostFileProtocol.urlScheme
+        components.host = "127.0.0.1"
+        components.port = Int(port)
+        components.path = GhostFileProtocol.shareBasePath(id: shareID)
+        components.queryItems = [URLQueryItem(name: "tls_pin", value: publicKeyPin)]
+        return components.url
+    }
+#endif
+
     func start(preferredPort: UInt16 = 0) throws {
         guard listener == nil else { return }
         let router = GhostFileShareRouter(
@@ -101,7 +114,7 @@ final class GhostFileShareServer: ObservableObject {
             portTask = Task { [weak self, weak listener] in
                 for _ in 0..<500 {
                     guard let self, let listener else { return }
-                    if let boundPort = listener.port?.rawValue {
+                    if let boundPort = listener.port?.rawValue, boundPort != 0 {
                         self.port = boundPort
                         self.isRunning = true
                         self.publishBonjour(port: boundPort, values: txt)

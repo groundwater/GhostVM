@@ -230,6 +230,86 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         await MainActor.run { server.stop() }
     }
 
+    func testRequestsWaitForHTTP3StreamCreditInsteadOfFailing() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-quic-stream-credit-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("stream credit".utf8).write(to: fixture.appendingPathComponent("hello.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let gate = GhostFileRequestGate()
+        let accessKey = "quic-stream-credit-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileHTTP3StreamCredit-\(UUID().uuidString)",
+                accessKey: accessKey,
+                requestDelay: { request in
+                    guard request.operation == "metadata" else { return }
+                    await gate.wait()
+                }
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForLoopbackShareURL(server)
+        guard let portNumber = shareURL.port,
+              let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
+              let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
+              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+            throw TestError.missingShareURL
+        }
+        let transport = try GhostFileHTTP3Transport(
+            host: "127.0.0.1",
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: pin,
+            resourceBasePath: shareURL.path
+        )
+
+        _ = try await transport.request(
+            operation: "capabilities",
+            relativePath: nil,
+            offset: nil,
+            length: nil
+        )
+
+        let release = Task {
+            try await Task.sleep(for: .milliseconds(250))
+            await gate.open()
+        }
+        defer { release.cancel() }
+
+        let results = await withTaskGroup(of: Result<Int, Error>.self) { group in
+            for _ in 0..<80 {
+                group.addTask {
+                    do {
+                        return .success(try await transport.request(
+                            operation: "metadata",
+                            relativePath: "hello.txt",
+                            offset: nil,
+                            length: nil
+                        ).status)
+                    } catch {
+                        return .failure(error)
+                    }
+                }
+            }
+            return await group.reduce(into: []) { $0.append($1) }
+        }
+
+        let statuses = results.compactMap { try? $0.get() }
+        let failures = results.compactMap { result -> String? in
+            guard case .failure(let error) = result else { return nil }
+            return String(describing: error)
+        }
+        XCTAssertEqual(failures, [], "Requests failed instead of waiting for HTTP/3 stream credit")
+        XCTAssertEqual(statuses.count, 80)
+        XCTAssertTrue(statuses.allSatisfy { $0 == 200 })
+    }
+
     private enum TestError: Error {
         case missingShareURL
         case responseMismatch
@@ -289,5 +369,32 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         throw TestError.missingShareURL
+    }
+
+    private func waitForLoopbackShareURL(_ server: GhostFileShareServer) async throws -> URL {
+        for _ in 0..<200 {
+            if let url = await MainActor.run(body: { server.loopbackShareURLForTesting }) {
+                return url
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw TestError.missingShareURL
+    }
+}
+
+private actor GhostFileRequestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let currentWaiters = waiters
+        waiters.removeAll()
+        currentWaiters.forEach { $0.resume() }
     }
 }

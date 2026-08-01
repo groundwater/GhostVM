@@ -168,6 +168,11 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         return value == UInt64.max ? nil : value
     }
 
+    var availableRequestStreamCount: UInt64 {
+        guard let quicConnection else { return 0 }
+        return quiche_conn_peer_streams_left_bidi(quicConnection)
+    }
+
     func handleTimeout() {
         guard let quicConnection else { return }
         quiche_conn_on_timeout(quicConnection)
