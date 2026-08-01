@@ -87,6 +87,7 @@ typedef struct {
     server_response responses[MAX_REQUESTS];
     size_t response_count;
     int64_t paused_stream;
+    int64_t blackholed_stream;
     bool paused_released;
     bool goaway_sent;
     size_t reset_count;
@@ -432,6 +433,13 @@ static void configure_server_response(server_state *state,
         response->seed = 0x71;
         return;
     }
+    if (strcmp(response->path, "/blackhole") == 0) {
+        state->blackholed_stream = (int64_t) response->stream_id;
+        // Model an application that accepted a request but never generated
+        // headers or a body. Other HTTP/3 streams must remain independent.
+        response->abandoned = true;
+        return;
+    }
     if (strcmp(response->path, "/empty") == 0) {
         response->body_length = 0;
         response->seed = 0;
@@ -774,7 +782,7 @@ int main(int argc, char **argv) {
     CHECK(ghost_http3_backend_is_ready(), "GhostHTTP3 backend is not ready");
 
     test_pair pair;
-    server_state server = {.paused_stream = -1};
+    server_state server = {.paused_stream = -1, .blackholed_stream = -1};
     client_state client = {0};
     pair_create(&pair, argv[1], argv[2]);
     printf("PASS handshake: TLS over QUIC negotiated ALPN h3\n");
@@ -814,6 +822,38 @@ int main(int argc, char **argv) {
     drive_until_finished(&pair, &server, &client, paused, 1,
                          "released paused request");
     printf("PASS stream resumption: paused request completed after release\n");
+
+    size_t blackholed = client_send(&pair, &client, "/blackhole", 0, 0,
+                                    false, false, false);
+    size_t after_blackhole_first = client.request_count;
+    for (unsigned i = 2000; i < 2016; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/fast/%u", i);
+        client_send(&pair, &client, path, 257 + (i % 127), (uint8_t) i,
+                    false, false, false);
+    }
+    drive_until_finished(&pair, &server, &client, after_blackhole_first, 16,
+                         "requests after a black-holed stream");
+    CHECK(server.blackholed_stream ==
+              (int64_t) client.requests[blackholed].stream_id,
+          "server did not observe the black-holed stream");
+    CHECK(!client.requests[blackholed].saw_headers &&
+              !client.requests[blackholed].finished,
+          "black-holed request unexpectedly produced a response");
+    int cancel_blackhole = quiche_conn_stream_shutdown(
+        pair.client.quic, client.requests[blackholed].stream_id,
+        QUICHE_SHUTDOWN_READ, H3_REQUEST_CANCELLED_ERROR);
+    CHECK(cancel_blackhole == 0,
+          "could not cancel black-holed stream %" PRIu64 ": %d",
+          client.requests[blackholed].stream_id, cancel_blackhole);
+    client.requests[blackholed].cancellation_sent = true;
+    for (size_t round = 0; round < 32; round++) {
+        drive_round(&pair, &server, &client);
+    }
+    CHECK(!quiche_conn_is_closed(pair.client.quic) &&
+              !quiche_conn_is_closed(pair.server.quic),
+          "black-holed stream cancellation closed the connection");
+    printf("PASS black-holed stream: 16 later requests completed and the stalled stream was cancelled independently\n");
 
     size_t large_first = client.request_count;
     for (unsigned i = 0; i < LARGE_REQUEST_COUNT; i++) {
