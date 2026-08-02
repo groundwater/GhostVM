@@ -436,6 +436,12 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         return failedResponseStreamIDs
     }
 
+    func peerStoppedReceivingResponse(streamID: UInt64) -> Bool {
+        guard let quicConnection else { return false }
+        return quiche_conn_stream_capacity(quicConnection, streamID) ==
+            Int(QUICHE_ERR_STREAM_STOPPED.rawValue)
+    }
+
     func pollEvent() throws -> Event? {
         if let currentEvent {
             quiche_h3_event_free(currentEvent)

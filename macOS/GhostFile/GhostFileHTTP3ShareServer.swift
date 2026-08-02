@@ -261,6 +261,7 @@ private actor GhostFileHTTP3ServerSession {
     private var isFlushing = false
     private var flushAgain = false
     private var hasStopped = false
+    private var routingTasks: [UInt64: Task<Void, Never>] = [:]
     private var responseTasks: [UInt64: Task<Void, Never>] = [:]
     private var terminatedRequestStreams: Set<UInt64> = []
     private var pendingReceivedDatagrams: [Data] = []
@@ -377,11 +378,20 @@ private actor GhostFileHTTP3ServerSession {
                 }
                 let router = self.router
                 let delay = self.requestDelay
-                Task { [weak self] in
+                let task = Task { [weak self] in
                     await delay(context)
+                    guard !Task.isCancelled else {
+                        await self?.routingCancelled(streamID: streamID)
+                        return
+                    }
                     let response = await Self.route(request, using: router)
-                    await self?.send(response, streamID: streamID)
+                    guard !Task.isCancelled else {
+                        await self?.routingCancelled(streamID: streamID)
+                        return
+                    }
+                    await self?.routingFinished(response, streamID: streamID)
                 }
+                routingTasks[streamID] = task
             case .data(let streamID):
                 _ = try http3.receiveBody(streamID: streamID)
             case .reset(let streamID):
@@ -507,6 +517,8 @@ private actor GhostFileHTTP3ServerSession {
         guard !hasStopped else { return }
         hasStopped = true
         timeoutTask?.cancel()
+        for task in routingTasks.values { task.cancel() }
+        routingTasks.removeAll()
         for task in responseTasks.values { task.cancel() }
         responseTasks.removeAll()
         connection.cancel()
@@ -584,6 +596,18 @@ private actor GhostFileHTTP3ServerSession {
         responseTasks[streamID] = task
     }
 
+    private func routingCancelled(streamID: UInt64) {
+        routingTasks.removeValue(forKey: streamID)
+        terminatedRequestStreams.remove(streamID)
+    }
+
+    private func routingFinished(_ response: GhostFileHTTPResponse, streamID: UInt64) async {
+        guard routingTasks.removeValue(forKey: streamID) != nil,
+              !hasStopped,
+              !terminatedRequestStreams.contains(streamID) else { return }
+        await send(response, streamID: streamID)
+    }
+
     private nonisolated static func produceFileResponse(
         path: String,
         identity: String,
@@ -626,6 +650,7 @@ private actor GhostFileHTTP3ServerSession {
     }
 
     private func cancelResponse(streamID: UInt64, resetTransport: Bool = false) {
+        routingTasks.removeValue(forKey: streamID)?.cancel()
         responseTasks.removeValue(forKey: streamID)?.cancel()
         if resetTransport {
             http3.resetResponse(streamID: streamID)
@@ -635,6 +660,11 @@ private actor GhostFileHTTP3ServerSession {
     }
 
     private func drainPeerTerminatedResponses() {
+        for streamID in Array(routingTasks.keys)
+            where http3.peerStoppedReceivingResponse(streamID: streamID) {
+            terminatedRequestStreams.insert(streamID)
+            cancelResponse(streamID: streamID)
+        }
         for streamID in http3.takePeerTerminatedResponseStreamIDs() {
             terminatedRequestStreams.insert(streamID)
             cancelResponse(streamID: streamID)

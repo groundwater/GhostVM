@@ -850,6 +850,12 @@ int main(int argc, char **argv) {
     for (size_t round = 0; round < 32; round++) {
         drive_round(&pair, &server, &client);
     }
+    ssize_t stopped_capacity = quiche_conn_stream_capacity(
+        pair.server.quic, client.requests[blackholed].stream_id);
+    CHECK(stopped_capacity == QUICHE_ERR_STREAM_STOPPED,
+          "server did not observe STOP_SENDING for cancelled stream %" PRIu64
+          ": %zd",
+          client.requests[blackholed].stream_id, stopped_capacity);
     CHECK(!quiche_conn_is_closed(pair.client.quic) &&
               !quiche_conn_is_closed(pair.server.quic),
           "black-holed stream cancellation closed the connection");

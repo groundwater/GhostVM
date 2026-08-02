@@ -450,6 +450,89 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         XCTAssertLessThan(cancellationLatency, .milliseconds(500))
     }
 
+    func testCancellingOpenedRequestCancelsServerRoutingWithoutBlockingSibling() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-quic-server-cancellation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("cancel me".utf8).write(to: fixture.appendingPathComponent("cancel.txt"))
+        try Data("still responsive".utf8).write(to: fixture.appendingPathComponent("sibling.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let gate = GhostFileRequestGate()
+        let serverRoutingCancelled = expectation(description: "server routing task cancelled after peer reset")
+        let accessKey = "quic-server-cancellation-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileHTTP3ServerCancellation-\(UUID().uuidString)",
+                accessKey: accessKey,
+                requestDelay: { request in
+                    guard request.operation == "metadata", request.path == "cancel.txt" else { return }
+                    await withTaskCancellationHandler {
+                        await gate.wait()
+                    } onCancel: {
+                        serverRoutingCancelled.fulfill()
+                    }
+                }
+            )
+            try server.start()
+            return server
+        }
+        defer {
+            Task {
+                await gate.open()
+                await MainActor.run { server.stop() }
+            }
+        }
+
+        let shareURL = try await waitForLoopbackShareURL(server)
+        guard let portNumber = shareURL.port,
+              let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
+              let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
+              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+            throw TestError.missingShareURL
+        }
+        let transport = try GhostFileHTTP3Transport(
+            host: "127.0.0.1",
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: pin,
+            resourceBasePath: shareURL.path
+        )
+
+        let slowRequest = Task { () -> GhostFileCancellationOutcome in
+            do {
+                _ = try await transport.request(
+                    operation: "metadata",
+                    relativePath: "cancel.txt",
+                    offset: nil,
+                    length: nil
+                )
+                return .succeeded
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .failed(String(describing: error))
+            }
+        }
+
+        await gate.waitForArrival()
+        slowRequest.cancel()
+        let slowOutcome = await slowRequest.value
+        XCTAssertEqual(slowOutcome, .cancelled)
+
+        let sibling = try await transport.request(
+            operation: "metadata",
+            relativePath: "sibling.txt",
+            offset: nil,
+            length: nil
+        )
+        XCTAssertEqual(sibling.status, 200)
+
+        await fulfillment(of: [serverRoutingCancelled], timeout: 0.5)
+        await gate.open()
+    }
+
     private enum TestError: Error {
         case missingShareURL
         case responseMismatch
