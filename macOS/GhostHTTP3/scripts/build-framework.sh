@@ -9,6 +9,7 @@ source_dir=${build_dir}/upstream/quiche
 output_dir=${build_dir}/artifacts
 deployment_target=${MACOSX_DEPLOYMENT_TARGET:-15.0}
 lock_file=${project_dir}/quiche-0.29.3.Cargo.lock
+pacing_patch=${project_dir}/Patches/quiche-darwin-send-time.patch
 
 # quiche 0.29.3. Keep this immutable so the framework is reproducible.
 quiche_revision=55886df3be579579207104c8e645825b6347a209
@@ -36,6 +37,8 @@ fi
 
 git -C "${source_dir}" fetch --depth 1 origin "${quiche_revision}"
 git -C "${source_dir}" checkout --detach --force "${quiche_revision}"
+git -C "${source_dir}" apply --check "${pacing_patch}"
+git -C "${source_dir}" apply "${pacing_patch}"
 cp "${lock_file}" "${source_dir}/Cargo.lock"
 
 actual_revision=$(git -C "${source_dir}" rev-parse HEAD)
@@ -127,6 +130,19 @@ xcrun install_name_tool \
     -id '@rpath/GhostHTTP3.framework/Versions/A/GhostHTTP3' \
     "${framework_dir}/Versions/A/GhostHTTP3"
 codesign --force --sign - --timestamp=none "${framework_dir}"
+
+source_fingerprint=$(
+    shasum -a 256 \
+        "${project_dir}/Sources/GhostHTTP3.c" \
+        "${project_dir}/include/GhostHTTP3/GhostHTTP3.h" \
+        "${project_dir}/include/module.modulemap" \
+        "${project_dir}/quiche-0.29.3.Cargo.lock" \
+        "${pacing_patch}" \
+        "${project_dir}/scripts/build-framework.sh" \
+        "${project_dir}/scripts/ensure-framework.sh" | \
+        shasum -a 256 | awk '{ print $1 }'
+)
+print -r -- "${source_fingerprint}" > "${output_dir}/.source-fingerprint"
 
 file "${framework_dir}/GhostHTTP3" | rg -q 'Mach-O 64-bit dynamically linked shared library arm64'
 [[ $(lipo -archs "${framework_dir}/GhostHTTP3") == arm64 ]]

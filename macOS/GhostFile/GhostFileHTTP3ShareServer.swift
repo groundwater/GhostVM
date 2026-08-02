@@ -3,6 +3,23 @@ import Dispatch
 import Foundation
 import GhostHTTP
 import Network
+import OSLog
+
+private let ghostFileHTTP3ServerLogger = Logger(
+    subsystem: "org.ghostvm.ghostfile",
+    category: "HTTP3Server"
+)
+
+private let ghostFileServerProcessLogIdentity: String = {
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    return "version=\(version) build=\(build) pid=\(ProcessInfo.processInfo.processIdentifier)"
+}()
+
+private func ghostFileServerElapsedMilliseconds(since startedAt: UInt64) -> UInt64 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    return now >= startedAt ? (now - startedAt) / 1_000_000 : 0
+}
 
 @MainActor
 final class GhostFileShareServer: ObservableObject {
@@ -21,9 +38,16 @@ final class GhostFileShareServer: ObservableObject {
     private var publicKeyPin = ""
     private var listener: NWListener?
     private var portTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
     private var netService: NetService?
+    private var bonjourResolver: GhostFileBonjourSelfResolver?
+    @Published private var resolvedShareHost: String?
     private var identityDirectory: URL?
     private var sessions: [UUID: GhostFileHTTP3ServerSession] = [:]
+    private var bonjourValues: [String: String] = [:]
+    private var bonjourHeartbeat: UInt64 = 0
+    private var isStopping = false
 
     init(
         rootURL: URL,
@@ -40,9 +64,18 @@ final class GhostFileShareServer: ObservableObject {
     }
 
     var shareURL: URL? {
+        guard port != 0, let host = resolvedShareHost else { return nil }
+        return resourceURL(host: host)
+    }
+
+#if DEBUG
+    var loopbackShareURLForTesting: URL? {
         guard port != 0 else { return nil }
-        var host = ProcessInfo.processInfo.hostName
-        if !host.hasSuffix(".local") { host += ".local" }
+        return resourceURL(host: "127.0.0.1")
+    }
+#endif
+
+    private func resourceURL(host: String) -> URL? {
         var components = URLComponents()
         components.scheme = GhostFileProtocol.urlScheme
         components.host = host
@@ -52,21 +85,11 @@ final class GhostFileShareServer: ObservableObject {
         return components.url
     }
 
-#if DEBUG
-    var loopbackShareURLForTesting: URL? {
-        guard port != 0 else { return nil }
-        var components = URLComponents()
-        components.scheme = GhostFileProtocol.urlScheme
-        components.host = "127.0.0.1"
-        components.port = Int(port)
-        components.path = GhostFileProtocol.shareBasePath(id: shareID)
-        components.queryItems = [URLQueryItem(name: "tls_pin", value: publicKeyPin)]
-        return components.url
-    }
-#endif
-
     func start(preferredPort: UInt16 = 0) throws {
         guard listener == nil else { return }
+        ghostFileHTTP3ServerLogger.notice(
+            "Share listener starting share=\(self.shareID.uuidString.lowercased(), privacy: .public) \(ghostFileServerProcessLogIdentity, privacy: .public) preferredPort=\(preferredPort, privacy: .public) name=\(self.shareName, privacy: .private(mask: .hash)) root=\(self.rootURL.path, privacy: .private(mask: .hash))"
+        )
         let router = GhostFileShareRouter(
             rootURL: rootURL,
             shareID: shareID,
@@ -85,7 +108,10 @@ final class GhostFileShareServer: ObservableObject {
             "alpn": GhostFileProtocol.alpn,
             "auth": "access-key",
             "tls-pin": publicKeyPin,
+            "state": "ready",
+            "ttl": String(Int(GhostFileBonjourLease.advertisedTTL)),
         ]
+        bonjourValues = txt
         let parameters = NWParameters.udp
         parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
@@ -114,6 +140,11 @@ final class GhostFileShareServer: ObservableObject {
             portTask = Task { [weak self, weak listener] in
                 for _ in 0..<500 {
                     guard let self, let listener else { return }
+                    // NWListener can transiently report `.any` (raw value 0)
+                    // before the kernel assigns its real ephemeral port. Never
+                    // publish that placeholder: `publishBonjour` is one-shot,
+                    // so doing so would permanently advertise an unusable SRV
+                    // endpoint for this share instance.
                     if let boundPort = listener.port?.rawValue, boundPort != 0 {
                         self.port = boundPort
                         self.isRunning = true
@@ -130,18 +161,62 @@ final class GhostFileShareServer: ObservableObject {
     }
 
     func stop() {
+        guard listener != nil else {
+            finishStop()
+            return
+        }
+        guard !isStopping else { return }
+        isStopping = true
+        ghostFileHTTP3ServerLogger.notice(
+            "Share stop requested share=\(self.shareID.uuidString.lowercased(), privacy: .public) port=\(self.port, privacy: .public) sessions=\(self.sessions.count, privacy: .public) requests=\(self.requestCount, privacy: .public)"
+        )
+        isRunning = false
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+
+        // Tell mount clients to detach before closing their backing transport.
+        // This prevents a forced unmount from waiting on an already-dead share.
+        if let netService {
+            var stoppingValues = bonjourValues
+            stoppingValues["state"] = "stopping"
+            let dataValues = stoppingValues.mapValues { Data($0.utf8) }
+            netService.setTXTRecord(NetService.data(fromTXTRecord: dataValues))
+            stopTask = Task { [self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled else { return }
+                finishStop()
+            }
+        } else {
+            finishStop()
+        }
+    }
+
+    private func finishStop() {
+        ghostFileHTTP3ServerLogger.notice(
+            "Share stopping share=\(self.shareID.uuidString.lowercased(), privacy: .public) port=\(self.port, privacy: .public) sessions=\(self.sessions.count, privacy: .public) requests=\(self.requestCount, privacy: .public)"
+        )
+        stopTask?.cancel()
+        stopTask = nil
         listener?.cancel()
         listener = nil
         netService?.stop()
         netService = nil
+        bonjourResolver?.stop()
+        bonjourResolver = nil
+        resolvedShareHost = nil
         portTask?.cancel()
         portTask = nil
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
         for session in sessions.values { session.stop() }
         sessions.removeAll()
         if let identityDirectory { try? FileManager.default.removeItem(at: identityDirectory) }
         identityDirectory = nil
+        bonjourValues = [:]
+        bonjourHeartbeat = 0
         port = 0
         isRunning = false
+        isStopping = false
     }
 
     private func accept(
@@ -151,8 +226,10 @@ final class GhostFileShareServer: ObservableObject {
         privateKeyPath: String
     ) {
         let id = UUID()
+        let sessionID = String(id.uuidString.prefix(12)).lowercased()
         do {
             let session = try GhostFileHTTP3ServerSession(
+                sessionID: sessionID,
                 connection: connection,
                 certificatePath: certificatePath,
                 privateKeyPath: privateKeyPath,
@@ -166,9 +243,14 @@ final class GhostFileShareServer: ObservableObject {
                 }
             )
             sessions[id] = session
+            ghostFileHTTP3ServerLogger.notice(
+                "Session accepted share=\(self.shareID.uuidString.lowercased(), privacy: .public) session=\(sessionID, privacy: .public) endpoint=\(String(describing: connection.endpoint), privacy: .public) activeSessions=\(self.sessions.count, privacy: .public)"
+            )
             session.start()
         } catch {
-            NSLog("GhostFile HTTP/3 session setup failed: %@", String(describing: error))
+            ghostFileHTTP3ServerLogger.error(
+                "Session setup failed share=\(self.shareID.uuidString.lowercased(), privacy: .public) session=\(sessionID, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
             connection.cancel()
         }
     }
@@ -179,6 +261,9 @@ final class GhostFileShareServer: ObservableObject {
             port = listener?.port?.rawValue ?? 0
             isRunning = port != 0
             if port != 0 {
+                ghostFileHTTP3ServerLogger.notice(
+                    "Share listener ready share=\(self.shareID.uuidString.lowercased(), privacy: .public) port=\(self.port, privacy: .public)"
+                )
                 publishBonjour(port: port, values: [
                     "version": String(GhostFileProtocol.version),
                     "id": shareID.uuidString.lowercased(),
@@ -187,20 +272,25 @@ final class GhostFileShareServer: ObservableObject {
                     "alpn": GhostFileProtocol.alpn,
                     "auth": "access-key",
                     "tls-pin": publicKeyPin,
+                    "state": "ready",
+                    "ttl": String(Int(GhostFileBonjourLease.advertisedTTL)),
                 ])
             }
         case .failed(let error):
-#if DEBUG
-            print("GhostFile HTTP/3 listener failed: \(error)")
-#endif
-            stop()
+            ghostFileHTTP3ServerLogger.error(
+                "Share listener failed share=\(self.shareID.uuidString.lowercased(), privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+            finishStop()
         case .cancelled:
+            ghostFileHTTP3ServerLogger.notice(
+                "Share listener cancelled share=\(self.shareID.uuidString.lowercased(), privacy: .public)"
+            )
             port = 0
             isRunning = false
         case .waiting(let error):
-#if DEBUG
-            print("GhostFile HTTP/3 listener waiting: \(error)")
-#endif
+            ghostFileHTTP3ServerLogger.notice(
+                "Share listener waiting share=\(self.shareID.uuidString.lowercased(), privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
         case .setup:
             break
         @unknown default:
@@ -210,6 +300,17 @@ final class GhostFileShareServer: ObservableObject {
 
     private func publishBonjour(port: UInt16, values: [String: String]) {
         guard netService == nil else { return }
+        guard port != 0 else {
+            ghostFileHTTP3ServerLogger.error(
+                "Refusing Bonjour publication with zero port share=\(self.shareID.uuidString.lowercased(), privacy: .public)"
+            )
+            return
+        }
+        ghostFileHTTP3ServerLogger.notice(
+            "Bonjour publish starting share=\(self.shareID.uuidString.lowercased(), privacy: .public) port=\(port, privacy: .public) ttl=\(values["ttl"] ?? "unknown", privacy: .public)"
+        )
+        bonjourValues = values
+        bonjourHeartbeat = 0
         let service = NetService(
             domain: GhostFileProtocol.bonjourDomain,
             type: GhostFileProtocol.bonjourType,
@@ -217,10 +318,34 @@ final class GhostFileShareServer: ObservableObject {
             port: Int32(port)
         )
         service.includesPeerToPeer = true
-        let dataValues = values.mapValues { Data($0.utf8) }
+        var initialValues = values
+        initialValues["heartbeat"] = String(bonjourHeartbeat)
+        let dataValues = initialValues.mapValues { Data($0.utf8) }
         service.setTXTRecord(NetService.data(fromTXTRecord: dataValues))
         netService = service
-        service.publish()
+        let resolver = GhostFileBonjourSelfResolver { [weak self, weak service] host in
+            Task { @MainActor in
+                guard let self, let service, self.netService === service else { return }
+                self.resolvedShareHost = host
+                ghostFileHTTP3ServerLogger.notice(
+                    "Bonjour self-resolution ready share=\(self.shareID.uuidString.lowercased(), privacy: .public) host=\(host, privacy: .public) port=\(self.port, privacy: .public)"
+                )
+            }
+        }
+        bonjourResolver = resolver
+        resolver.publish(service)
+        heartbeatTask = Task { [weak self, weak service] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: GhostFileBonjourLease.heartbeatInterval)
+                guard !Task.isCancelled, let self, let service else { return }
+                guard self.netService === service, self.isRunning, !self.isStopping else { return }
+                self.bonjourHeartbeat &+= 1
+                var heartbeatValues = self.bonjourValues
+                heartbeatValues["heartbeat"] = String(self.bonjourHeartbeat)
+                let dataValues = heartbeatValues.mapValues { Data($0.utf8) }
+                service.setTXTRecord(NetService.data(fromTXTRecord: dataValues))
+            }
+        }
     }
 
     private static func writeIdentityFiles(
@@ -246,11 +371,19 @@ final class GhostFileShareServer: ObservableObject {
             throw error
         }
     }
+
 }
 
 private actor GhostFileHTTP3ServerSession {
     typealias RequestDelay = GhostFileShareServer.RequestDelay
 
+    private struct RequestLogContext {
+        let requestID: String
+        let operation: String
+        let startedAt: UInt64
+    }
+
+    private let sessionID: String
     private let connection: NWConnection
     private let http3: GhostFileHTTP3Connection
     private let router: GhostFileShareRouter
@@ -260,12 +393,21 @@ private actor GhostFileHTTP3ServerSession {
     private var timeoutTask: Task<Void, Never>?
     private var isFlushing = false
     private var flushAgain = false
+    private var isStopping = false
     private var hasStopped = false
     private var routingTasks: [UInt64: Task<Void, Never>] = [:]
     private var responseTasks: [UInt64: Task<Void, Never>] = [:]
+    private var requestLogs: [UInt64: RequestLogContext] = [:]
     private var terminatedRequestStreams: Set<UInt64> = []
     private var pendingReceivedDatagrams: [Data] = []
+    private var pendingScheduledDatagram: GhostFileScheduledDatagram?
     private var isReceiveDrainScheduled = false
+    private let createdAt = DispatchTime.now().uptimeNanoseconds
+    private var didLogHandshake = false
+    private var receivedDatagramCount = 0
+    private var receivedByteCount = 0
+    private var sentDatagramCount = 0
+    private var sentByteCount = 0
 
     // GhostFile range requests are capped at 1 MiB. One DispatchIO operation per
     // bounded range avoids re-entering the connection actor for artificial file
@@ -278,6 +420,7 @@ private actor GhostFileHTTP3ServerSession {
     )
 
     init(
+        sessionID: String,
         connection: NWConnection,
         certificatePath: String,
         privateKeyPath: String,
@@ -286,6 +429,7 @@ private actor GhostFileHTTP3ServerSession {
         requestCompleted: @escaping @Sendable () -> Void,
         stopped: @escaping @Sendable () -> Void
     ) throws {
+        self.sessionID = sessionID
         self.connection = connection
         self.http3 = try GhostFileHTTP3Connection(
             role: .server(certificatePath: certificatePath, privateKeyPath: privateKeyPath)
@@ -305,15 +449,11 @@ private actor GhostFileHTTP3ServerSession {
     }
 
     private func startIsolated() {
+        ghostFileHTTP3ServerLogger.notice(
+            "Session starting session=\(self.sessionID, privacy: .public) endpoint=\(String(describing: self.connection.endpoint), privacy: .public)"
+        )
         connection.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state {
-#if DEBUG
-                print("GhostFile HTTP/3 UDP connection failed: \(error)")
-#endif
-                Task { await self?.stopIsolated() }
-            } else if case .cancelled = state {
-                Task { await self?.stopIsolated() }
-            }
+            Task { await self?.connectionStateChanged(state) }
         }
         connection.start(queue: DispatchQueue(label: "org.ghostvm.ghostfile.http3.session"))
         connection.batch {
@@ -330,10 +470,20 @@ private actor GhostFileHTTP3ServerSession {
     }
 
     private func receiveCompleted(_ content: Data?, error: NWError?) async {
-        guard !hasStopped else { return }
+        guard !hasStopped, !isStopping else { return }
         guard error == nil, let content else {
-            stopIsolated()
+            ghostFileHTTP3ServerLogger.error(
+                "Session receive failed session=\(self.sessionID, privacy: .public) error=\(String(describing: error), privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+            await stopIsolated(reason: "receiveFailed")
             return
+        }
+        receivedDatagramCount += 1
+        receivedByteCount += content.count
+        if receivedDatagramCount == 1 {
+            ghostFileHTTP3ServerLogger.notice(
+                "Session first UDP datagram session=\(self.sessionID, privacy: .public) bytes=\(content.count, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
         }
         receiveNextDatagram()
         pendingReceivedDatagrams.append(content)
@@ -346,7 +496,7 @@ private actor GhostFileHTTP3ServerSession {
     }
 
     private func drainReceivedDatagrams() async {
-        while !pendingReceivedDatagrams.isEmpty, !hasStopped {
+        while !pendingReceivedDatagrams.isEmpty, !hasStopped, !isStopping {
             let count = min(GhostFileNetworkDatagram.maximumReceiveCount, pendingReceivedDatagrams.count)
             let datagrams = Array(pendingReceivedDatagrams.prefix(count))
             pendingReceivedDatagrams.removeFirst(count)
@@ -354,14 +504,22 @@ private actor GhostFileHTTP3ServerSession {
                 for datagram in datagrams {
                     try http3.receive(datagram)
                 }
+                if http3.isEstablished && !didLogHandshake {
+                    didLogHandshake = true
+                    ghostFileHTTP3ServerLogger.notice(
+                        "Session QUIC handshake established session=\(self.sessionID, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+                    )
+                }
                 drainPeerTerminatedResponses()
                 try processEvents()
                 drainPeerTerminatedResponses()
                 await flushOutgoing()
                 resetTimeout()
             } catch {
-                NSLog("GhostFile HTTP/3 datagram batch failed: %@", String(describing: error))
-                stopIsolated()
+                ghostFileHTTP3ServerLogger.error(
+                    "Session datagram processing failed session=\(self.sessionID, privacy: .public) error=\(String(describing: error), privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+                )
+                await stopIsolated(reason: "datagramProcessingFailed")
             }
         }
         isReceiveDrainScheduled = false
@@ -376,9 +534,21 @@ private actor GhostFileHTTP3ServerSession {
                     Task { await self.sendBadRequest(streamID: streamID) }
                     continue
                 }
+                let requestID = request.header("x-ghostfile-request-id")
+                    ?? "peer-\(self.sessionID)-\(streamID)"
+                let logContext = RequestLogContext(
+                    requestID: requestID,
+                    operation: context.operation,
+                    startedAt: DispatchTime.now().uptimeNanoseconds
+                )
+                requestLogs[streamID] = logContext
+                ghostFileHTTP3ServerLogger.info(
+                    "Request received request=\(requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) offset=\(String(describing: context.offset), privacy: .public) length=\(String(describing: context.length), privacy: .public) path=\(String(describing: context.path), privacy: .private(mask: .hash))"
+                )
                 let router = self.router
                 let delay = self.requestDelay
                 let task = Task { [weak self] in
+                    let started = ContinuousClock.now
                     await delay(context)
                     guard !Task.isCancelled else {
                         await self?.routingCancelled(streamID: streamID)
@@ -389,13 +559,26 @@ private actor GhostFileHTTP3ServerSession {
                         await self?.routingCancelled(streamID: streamID)
                         return
                     }
-                    await self?.routingFinished(response, streamID: streamID)
+                    let elapsed = started.duration(to: .now)
+                    ghostFileHTTP3ServerLogger.info(
+                        "Request routed request=\(requestID, privacy: .public) session=\(self?.sessionID ?? "gone", privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) status=\(response.status.rawValue, privacy: .public) bytes=\(response.body.contentLength, privacy: .public) elapsed=\(String(describing: elapsed), privacy: .public)"
+                    )
+                    await self?.routingFinished(
+                        response,
+                        streamID: streamID,
+                        context: logContext
+                    )
                 }
                 routingTasks[streamID] = task
             case .data(let streamID):
-                _ = try http3.receiveBody(streamID: streamID)
+                try http3.discardReceivedBody(streamID: streamID)
             case .reset(let streamID):
                 terminatedRequestStreams.insert(streamID)
+                if let context = requestLogs.removeValue(forKey: streamID) {
+                    ghostFileHTTP3ServerLogger.error(
+                        "Request reset by client request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+                    )
+                }
                 cancelResponse(streamID: streamID)
             case .finished:
                 break
@@ -412,12 +595,19 @@ private actor GhostFileHTTP3ServerSession {
                 body: body
             )
             await flushOutgoing()
-        } catch { stopIsolated() }
+        } catch { await stopIsolated(reason: "badRequestSendFailed") }
     }
 
-    private func send(_ response: GhostFileHTTPResponse, streamID: UInt64) async {
+    private func send(
+        _ response: GhostFileHTTPResponse,
+        streamID: UInt64,
+        context: RequestLogContext
+    ) async {
         guard !hasStopped else { return }
-        guard terminatedRequestStreams.remove(streamID) == nil else { return }
+        guard terminatedRequestStreams.remove(streamID) == nil else {
+            requestLogs.removeValue(forKey: streamID)
+            return
+        }
         do {
             var headers: [(String, String)] = [
                 (":status", String(response.status.rawValue)),
@@ -429,11 +619,14 @@ private actor GhostFileHTTP3ServerSession {
                 return (name, entry.value)
             })
 
+            let completesImmediately: Bool
             switch response.body {
             case .empty:
                 try http3.sendResponse(streamID: streamID, headers: headers, body: Data())
+                completesImmediately = true
             case .bytes(let body):
                 try http3.sendResponse(streamID: streamID, headers: headers, body: body)
+                completesImmediately = true
             case .fileRegion(let path, let identity, let offset, let length):
                 try http3.beginResponse(
                     streamID: streamID,
@@ -447,40 +640,76 @@ private actor GhostFileHTTP3ServerSession {
                     length: length,
                     streamID: streamID
                 )
+                completesImmediately = false
             }
-            requestCompleted()
+            ghostFileHTTP3ServerLogger.info(
+                "Response queued request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) status=\(response.status.rawValue, privacy: .public) bytes=\(response.body.contentLength, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+            )
+            if completesImmediately {
+                requestLogs.removeValue(forKey: streamID)
+                requestCompleted()
+            }
             await flushOutgoing()
         } catch {
-            NSLog("GhostFile HTTP/3 response failed: %@", String(describing: error))
-            stopIsolated()
+            ghostFileHTTP3ServerLogger.error(
+                "Response failed request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) error=\(String(describing: error), privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+            )
+            await stopIsolated(reason: "responseFailed")
         }
     }
 
     private func flushOutgoing() async {
+        guard !hasStopped, !isStopping else { return }
         if isFlushing {
             flushAgain = true
             return
         }
-        guard !hasStopped else { return }
         isFlushing = true
         defer { isFlushing = false }
         do {
             repeat {
                 flushAgain = false
-                while true {
+                while !isStopping {
                     let produceStartedAt = DispatchTime.now().uptimeNanoseconds
                     var datagrams: [Data] = []
                     datagrams.reserveCapacity(GhostFileNetworkDatagram.maximumSendBatchCount)
+                    var transportDrained = false
                     while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount {
-                        guard let datagram = try http3.nextDatagram() else { break }
-                        datagrams.append(datagram)
+                        let scheduled: GhostFileScheduledDatagram
+                        if let pendingScheduledDatagram {
+                            scheduled = pendingScheduledDatagram
+                        } else if let next = try http3.nextScheduledDatagram() {
+                            scheduled = next
+                        } else {
+                            transportDrained = true
+                            break
+                        }
+                        let now = ghostFileMonotonicNanoseconds()
+                        guard scheduled.sendAtNanoseconds <= now else {
+                            pendingScheduledDatagram = scheduled
+                            break
+                        }
+                        pendingScheduledDatagram = nil
+                        datagrams.append(scheduled.data)
                         drainPeerTerminatedResponses()
                     }
                     drainPeerTerminatedResponses()
-                    guard !datagrams.isEmpty else { break }
+                    if datagrams.isEmpty {
+                        if transportDrained { break }
+                        guard let pendingScheduledDatagram else { break }
+                        let now = ghostFileMonotonicNanoseconds()
+                        if pendingScheduledDatagram.sendAtNanoseconds > now {
+                            try await Task.sleep(
+                                nanoseconds: pendingScheduledDatagram.sendAtNanoseconds - now
+                            )
+                        }
+                        continue
+                    }
                     let produceFinishedAt = DispatchTime.now().uptimeNanoseconds
                     try await connection.sendGhostFileDatagrams(datagrams)
                     let sendFinishedAt = DispatchTime.now().uptimeNanoseconds
+                    sentDatagramCount += datagrams.count
+                    sentByteCount += datagrams.reduce(into: 0) { $0 += $1.count }
                     http3.recordSendBatch(
                         packetCount: datagrams.count,
                         produceNanoseconds: produceFinishedAt - produceStartedAt,
@@ -490,8 +719,10 @@ private actor GhostFileHTTP3ServerSession {
             } while flushAgain
             resetTimeout()
         } catch {
-            NSLog("GhostFile HTTP/3 UDP send failed: %@", String(describing: error))
-            stopIsolated()
+            ghostFileHTTP3ServerLogger.error(
+                "Session UDP send failed session=\(self.sessionID, privacy: .public) error=\(String(describing: error), privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+            await stopIsolated(reason: "sendFailed")
         }
     }
 
@@ -510,19 +741,78 @@ private actor GhostFileHTTP3ServerSession {
     private func timeoutFired() async {
         http3.handleTimeout()
         await flushOutgoing()
-        if http3.isClosed { stopIsolated() }
+        if http3.isClosed {
+            ghostFileHTTP3ServerLogger.error(
+                "Session QUIC timeout closed connection session=\(self.sessionID, privacy: .public) activeRequests=\(self.requestLogs.count, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+            await stopIsolated(reason: "quicTimeoutClosed")
+        }
     }
 
-    private func stopIsolated() {
-        guard !hasStopped else { return }
-        hasStopped = true
+    private func connectionStateChanged(_ state: NWConnection.State) async {
+        switch state {
+        case .ready:
+            ghostFileHTTP3ServerLogger.notice(
+                "Session UDP ready session=\(self.sessionID, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+        case .waiting(let error):
+            ghostFileHTTP3ServerLogger.notice(
+                "Session UDP waiting session=\(self.sessionID, privacy: .public) error=\(String(describing: error), privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+        case .failed(let error):
+            ghostFileHTTP3ServerLogger.error(
+                "Session UDP failed session=\(self.sessionID, privacy: .public) error=\(String(describing: error), privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+            await stopIsolated(reason: "networkFailed")
+        case .cancelled:
+            await stopIsolated(reason: "networkCancelled")
+        default:
+            break
+        }
+    }
+
+    private func stopIsolated(reason: String = "requested") async {
+        guard !hasStopped, !isStopping else { return }
+        isStopping = true
+        ghostFileHTTP3ServerLogger.notice(
+            "Session stopping session=\(self.sessionID, privacy: .public) reason=\(reason, privacy: .public) activeRequests=\(self.requestLogs.count, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) receivedBytes=\(self.receivedByteCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) sentBytes=\(self.sentByteCount, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+        )
         timeoutTask?.cancel()
         for task in routingTasks.values { task.cancel() }
         routingTasks.removeAll()
         for task in responseTasks.values { task.cancel() }
         responseTasks.removeAll()
+        requestLogs.removeAll()
+        pendingScheduledDatagram = nil
+        while isFlushing {
+            await Task.yield()
+        }
+        let applicationErrorCode = reason == "requested"
+            ? GhostFileHTTP3Connection.h3NoError
+            : GhostFileHTTP3Connection.h3InternalError
+        await sendConnectionClose(reason: reason, applicationErrorCode: applicationErrorCode)
+        hasStopped = true
         connection.cancel()
         stopped()
+    }
+
+    private func sendConnectionClose(reason: String, applicationErrorCode: UInt64) async {
+        do {
+            try http3.close(applicationErrorCode: applicationErrorCode, reason: reason)
+            while let datagram = try http3.nextScheduledDatagram() {
+                let now = ghostFileMonotonicNanoseconds()
+                if datagram.sendAtNanoseconds > now {
+                    try await Task.sleep(nanoseconds: datagram.sendAtNanoseconds - now)
+                }
+                try await connection.sendGhostFileDatagrams([datagram.data])
+                sentDatagramCount += 1
+                sentByteCount += datagram.data.count
+            }
+        } catch {
+            ghostFileHTTP3ServerLogger.error(
+                "Session close notification failed session=\(self.sessionID, privacy: .public) reason=\(reason, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
     }
 
     private nonisolated static func httpRequest(fields: [(String, String)]) -> HTTPRequestHead? {
@@ -573,6 +863,11 @@ private actor GhostFileHTTP3ServerSession {
         length: Int,
         streamID: UInt64
     ) {
+        if let context = requestLogs[streamID] {
+            ghostFileHTTP3ServerLogger.info(
+                "File response started request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) offset=\(offset, privacy: .public) bytes=\(length, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+            )
+        }
         let task = Task { [weak self] in
             guard let self else { return }
             do {
@@ -601,11 +896,15 @@ private actor GhostFileHTTP3ServerSession {
         terminatedRequestStreams.remove(streamID)
     }
 
-    private func routingFinished(_ response: GhostFileHTTPResponse, streamID: UInt64) async {
+    private func routingFinished(
+        _ response: GhostFileHTTPResponse,
+        streamID: UInt64,
+        context: RequestLogContext
+    ) async {
         guard routingTasks.removeValue(forKey: streamID) != nil,
               !hasStopped,
               !terminatedRequestStreams.contains(streamID) else { return }
-        await send(response, streamID: streamID)
+        await send(response, streamID: streamID, context: context)
     }
 
     private nonisolated static func produceFileResponse(
@@ -641,10 +940,20 @@ private actor GhostFileHTTP3ServerSession {
 
     private func fileResponseFinished(streamID: UInt64) {
         responseTasks.removeValue(forKey: streamID)
+        requestCompleted()
+        if let context = requestLogs.removeValue(forKey: streamID) {
+            ghostFileHTTP3ServerLogger.info(
+                "File response completed request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+            )
+        }
     }
 
     private func fileResponseFailed(_ error: Error, streamID: UInt64) async {
-        NSLog("GhostFile DispatchIO response failed on stream %llu: %@", streamID, String(describing: error))
+        if let context = requestLogs.removeValue(forKey: streamID) {
+            ghostFileHTTP3ServerLogger.error(
+                "File response failed request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) error=\(String(describing: error), privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+            )
+        }
         cancelResponse(streamID: streamID, resetTransport: true)
         await flushOutgoing()
     }
@@ -663,18 +972,128 @@ private actor GhostFileHTTP3ServerSession {
         for streamID in Array(routingTasks.keys)
             where http3.peerStoppedReceivingResponse(streamID: streamID) {
             terminatedRequestStreams.insert(streamID)
+            if let context = requestLogs.removeValue(forKey: streamID) {
+                ghostFileHTTP3ServerLogger.notice(
+                    "Response stopped by peer during routing request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+                )
+            }
             cancelResponse(streamID: streamID)
         }
         for streamID in http3.takePeerTerminatedResponseStreamIDs() {
             terminatedRequestStreams.insert(streamID)
+            if let context = requestLogs.removeValue(forKey: streamID) {
+                ghostFileHTTP3ServerLogger.notice(
+                    "Response abandoned by peer request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+                )
+            }
             cancelResponse(streamID: streamID)
         }
         for streamID in http3.takeFailedResponseStreamIDs() {
             terminatedRequestStreams.insert(streamID)
+            if let context = requestLogs.removeValue(forKey: streamID) {
+                ghostFileHTTP3ServerLogger.error(
+                    "Response stream failed request=\(context.requestID, privacy: .public) session=\(self.sessionID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(context.operation, privacy: .public) elapsedMs=\(ghostFileServerElapsedMilliseconds(since: context.startedAt), privacy: .public)"
+                )
+            }
             cancelResponse(streamID: streamID, resetTransport: true)
         }
     }
 
+}
+
+/// Resolves the service GhostFile just published and returns the actual mDNS
+/// SRV target. `ProcessInfo.hostName` is not suitable here: VPN and DNS clients
+/// can replace it with a connectivity-check hostname that is not the machine's
+/// Bonjour endpoint.
+private final class GhostFileBonjourSelfResolver: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
+    private let completion: (String) -> Void
+    private let browser = NetServiceBrowser()
+    private weak var publishedService: NetService?
+    private var expectedName = ""
+    private var candidates: [ObjectIdentifier: NetService] = [:]
+    private var didResolve = false
+
+    init(completion: @escaping (String) -> Void) {
+        self.completion = completion
+        super.init()
+        browser.delegate = self
+        browser.includesPeerToPeer = true
+    }
+
+    func publish(_ service: NetService) {
+        publishedService = service
+        service.delegate = self
+        service.publish()
+    }
+
+    func stop() {
+        browser.stop()
+        for service in candidates.values {
+            service.stop()
+        }
+        candidates.removeAll()
+        publishedService?.delegate = nil
+        publishedService = nil
+    }
+
+    func netServiceDidPublish(_ sender: NetService) {
+        guard sender === publishedService else { return }
+        expectedName = sender.name
+        // Resolve the final registered name directly. Browsing for our own
+        // service can miss or be delayed when instances with the same display
+        // name overlap during their short shutdown grace period.
+        resolve(domain: sender.domain, type: sender.type, name: sender.name)
+        browser.searchForServices(ofType: sender.type, inDomain: sender.domain)
+    }
+
+    func netService(_ sender: NetService, didNotPublish errorDict: [String: NSNumber]) {
+        guard sender === publishedService else { return }
+        ghostFileHTTP3ServerLogger.error(
+            "Bonjour publication failed name=\(sender.name, privacy: .private(mask: .hash)) error=\(String(describing: errorDict), privacy: .public)"
+        )
+    }
+
+    func netServiceBrowser(
+        _ browser: NetServiceBrowser,
+        didFind service: NetService,
+        moreComing: Bool
+    ) {
+        guard !didResolve, service.name == expectedName else { return }
+        beginResolution(service)
+    }
+
+    func netService(_ sender: NetService, didNotResolve errorDict: [String: NSNumber]) {
+        guard candidates.removeValue(forKey: ObjectIdentifier(sender)) != nil else { return }
+        ghostFileHTTP3ServerLogger.notice(
+            "Bonjour self-resolution attempt failed name=\(sender.name, privacy: .private(mask: .hash)) error=\(String(describing: errorDict), privacy: .public)"
+        )
+    }
+
+    func netServiceDidResolveAddress(_ sender: NetService) {
+        guard !didResolve, candidates[ObjectIdentifier(sender)] != nil,
+              let hostName = sender.hostName else { return }
+        didResolve = true
+        let host = hostName.hasSuffix(".") ? String(hostName.dropLast()) : hostName
+        completion(host)
+        browser.stop()
+        for service in candidates.values where service !== sender {
+            service.stop()
+        }
+        candidates.removeAll()
+    }
+
+    private func resolve(domain: String, type: String, name: String) {
+        beginResolution(NetService(domain: domain, type: type, name: name))
+    }
+
+    private func beginResolution(_ service: NetService) {
+        let key = ObjectIdentifier(service)
+        guard candidates[key] == nil else { return }
+        candidates[key] = service
+        service.delegate = self
+        service.includesPeerToPeer = true
+        service.resolve(withTimeout: 5)
+    }
 }
 
 private final class GhostFileDispatchIOFile: @unchecked Sendable {

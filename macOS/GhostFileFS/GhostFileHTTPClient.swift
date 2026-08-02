@@ -4,12 +4,33 @@ import Foundation
 import FSKit
 import GhostHTTP3
 import Network
+import OSLog
+
+private let ghostFileHTTP3Logger = Logger(
+    subsystem: "org.ghostvm.ghostfile.fs",
+    category: "HTTP3"
+)
+
+private let ghostFileProcessLogIdentity: String = {
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown"
+    let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "unknown"
+    return "version=\(version) build=\(build) pid=\(ProcessInfo.processInfo.processIdentifier)"
+}()
+
+private func ghostFileElapsedMilliseconds(since startedAt: UInt64) -> UInt64 {
+    let now = DispatchTime.now().uptimeNanoseconds
+    return now >= startedAt ? (now - startedAt) / 1_000_000 : 0
+}
 
 struct GhostFileHTTP3Client: Sendable {
-    private let transport: GhostFileHTTP3Transport
+    private let transport: GhostFileHTTP3TransportPool
     private let cache = GhostFileResponseCache()
 
-    init(resourceURL: URL) throws {
+    init(
+        resourceURL: URL,
+        connectionTimeout: Duration = .seconds(8),
+        requestTimeout: Duration = .seconds(5)
+    ) throws {
         guard resourceURL.scheme == GhostFileProtocol.urlScheme,
               let host = resourceURL.host,
               let portNumber = resourceURL.port,
@@ -21,12 +42,14 @@ struct GhostFileHTTP3Client: Sendable {
               !publicKeyPin.isEmpty else {
             throw fs_errorForPOSIXError(EINVAL)
         }
-        transport = try GhostFileHTTP3Transport(
+        transport = try GhostFileHTTP3TransportPool(
             host: host,
             port: port,
             accessKey: accessKey,
             publicKeyPin: publicKeyPin,
-            resourceBasePath: resourceURL.path
+            resourceBasePath: resourceURL.path,
+            connectionTimeout: connectionTimeout,
+            requestTimeout: requestTimeout
         )
     }
 
@@ -72,6 +95,14 @@ struct GhostFileHTTP3Client: Sendable {
         return value
     }
 
+    func invalidateTransportForTesting() async {
+        await transport.invalidateCurrentTransportForTesting()
+    }
+
+    func transportLogIDForTesting() async -> String? {
+        await transport.currentTransportLogIDForTesting()
+    }
+
     private func decode<T: Decodable>(
         _ type: T.Type,
         operation: String,
@@ -100,7 +131,9 @@ struct GhostFileHTTP3Client: Sendable {
                 length: length
             )
         } catch {
-            NSLog("GhostFile HTTP/3 request failed: %@", String(describing: error))
+            ghostFileHTTP3Logger.error(
+                "Request failed operation=\(operation, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
             throw fs_errorForPOSIXError(ENOTCONN)
         }
         switch response.status {
@@ -117,6 +150,174 @@ struct GhostFileHTTP3Client: Sendable {
         default:
             throw fs_errorForPOSIXError(EIO)
         }
+    }
+}
+
+private actor GhostFileHTTP3TransportPool {
+    private let host: String
+    private let port: NWEndpoint.Port
+    private let accessKey: String
+    private let publicKeyPin: String
+    private let resourceBasePath: String
+    private let connectionTimeout: Duration
+    private let requestTimeout: Duration
+    private var current: GhostFileHTTP3Transport?
+
+    init(
+        host: String,
+        port: NWEndpoint.Port,
+        accessKey: String,
+        publicKeyPin: String,
+        resourceBasePath: String,
+        connectionTimeout: Duration,
+        requestTimeout: Duration
+    ) throws {
+        self.host = host
+        self.port = port
+        self.accessKey = accessKey
+        self.publicKeyPin = publicKeyPin
+        self.resourceBasePath = resourceBasePath
+        self.connectionTimeout = connectionTimeout
+        self.requestTimeout = requestTimeout
+        current = try Self.makeTransport(
+            host: host,
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: publicKeyPin,
+            resourceBasePath: resourceBasePath,
+            connectionTimeout: connectionTimeout,
+            requestTimeout: requestTimeout
+        )
+    }
+
+    func request(
+        operation: String,
+        relativePath: String?,
+        offset: UInt64?,
+        length: Int?
+    ) async throws -> GhostFileHTTP3Transport.Response {
+        let requestID = Self.makeLogID()
+        let pathTag = Self.pathTag(relativePath)
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        var lastError: Error?
+        for attempt in 0...1 {
+            let candidate = try transport()
+            ghostFileHTTP3Logger.info(
+                "Request attempt request=\(requestID, privacy: .public) transport=\(candidate.logID, privacy: .public) attempt=\(attempt + 1, privacy: .public) operation=\(operation, privacy: .public) pathTag=\(pathTag, privacy: .public) offset=\(String(describing: offset), privacy: .public) length=\(String(describing: length), privacy: .public)"
+            )
+            do {
+                let response = try await candidate.request(
+                    requestID: requestID,
+                    operation: operation,
+                    relativePath: relativePath,
+                    offset: offset,
+                    length: length
+                )
+                ghostFileHTTP3Logger.info(
+                    "Request succeeded request=\(requestID, privacy: .public) transport=\(candidate.logID, privacy: .public) attempt=\(attempt + 1, privacy: .public) operation=\(operation, privacy: .public) status=\(response.status, privacy: .public) bytes=\(response.body.count, privacy: .public) totalMs=\(ghostFileElapsedMilliseconds(since: startedAt), privacy: .public)"
+                )
+                return response
+            } catch {
+                lastError = error
+                let terminal = await candidate.isTerminal
+                let requestTimedOut = Self.isRequestTimeout(error)
+                let peerClosed = Self.isCleanPeerClose(error)
+                ghostFileHTTP3Logger.error(
+                    "Request attempt failed request=\(requestID, privacy: .public) transport=\(candidate.logID, privacy: .public) attempt=\(attempt + 1, privacy: .public) operation=\(operation, privacy: .public) error=\(String(describing: error), privacy: .public) terminal=\(terminal, privacy: .public) totalMs=\(ghostFileElapsedMilliseconds(since: startedAt), privacy: .public)"
+                )
+                if requestTimedOut, !terminal {
+                    // A request deadline belongs to one HTTP/3 stream, not to
+                    // the QUIC connection. requestDeadlineExpired has already
+                    // reset that stream; keep the established transport for
+                    // sibling and subsequent requests.
+                    ghostFileHTTP3Logger.notice(
+                        "Request stream failed; transport retained request=\(requestID, privacy: .public) transport=\(candidate.logID, privacy: .public) operation=\(operation, privacy: .public) reason=requestTimedOut"
+                    )
+                    throw error
+                }
+                guard terminal else { throw error }
+                if current === candidate { current = nil }
+                guard !peerClosed else { throw error }
+                guard attempt == 0 else { throw error }
+                ghostFileHTTP3Logger.notice(
+                    "Request retry scheduled request=\(requestID, privacy: .public) retiredTransport=\(candidate.logID, privacy: .public) operation=\(operation, privacy: .public) reason=\(String(describing: error), privacy: .public) delayMs=100"
+                )
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        throw lastError ?? GhostFileHTTP3Transport.TransportError.closed
+    }
+
+    func invalidateCurrentTransportForTesting() async {
+        await current?.invalidateForTesting()
+    }
+
+    func currentTransportLogIDForTesting() -> String? {
+        current?.logID
+    }
+
+    private func transport() throws -> GhostFileHTTP3Transport {
+        if let current { return current }
+        let replacement = try Self.makeTransport(
+            host: host,
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: publicKeyPin,
+            resourceBasePath: resourceBasePath,
+            connectionTimeout: connectionTimeout,
+            requestTimeout: requestTimeout
+        )
+        current = replacement
+        ghostFileHTTP3Logger.notice(
+            "Transport pool installed transport=\(replacement.logID, privacy: .public) host=\(self.host, privacy: .public) port=\(self.port.rawValue, privacy: .public)"
+        )
+        return replacement
+    }
+
+    private nonisolated static func makeLogID() -> String {
+        String(UUID().uuidString.prefix(12)).lowercased()
+    }
+
+    private nonisolated static func pathTag(_ path: String?) -> String {
+        guard let path else { return "none" }
+        let digest = SHA256.hash(data: Data(path.utf8))
+        return digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private nonisolated static func makeTransport(
+        host: String,
+        port: NWEndpoint.Port,
+        accessKey: String,
+        publicKeyPin: String,
+        resourceBasePath: String,
+        connectionTimeout: Duration,
+        requestTimeout: Duration
+    ) throws -> GhostFileHTTP3Transport {
+        try GhostFileHTTP3Transport(
+            host: host,
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: publicKeyPin,
+            resourceBasePath: resourceBasePath,
+            connectionTimeout: connectionTimeout,
+            requestTimeout: requestTimeout
+        )
+    }
+
+    private nonisolated static func isRequestTimeout(_ error: Error) -> Bool {
+        guard let transportError = error as? GhostFileHTTP3Transport.TransportError else {
+            return false
+        }
+        if case .requestTimedOut = transportError { return true }
+        return false
+    }
+
+    private nonisolated static func isCleanPeerClose(_ error: Error) -> Bool {
+        guard let transportError = error as? GhostFileHTTP3Transport.TransportError else {
+            return false
+        }
+        if case .peerClosed = transportError { return true }
+        return false
     }
 }
 
@@ -254,9 +455,14 @@ actor GhostFileHTTP3Transport {
     private let host: String
     private let resourceBasePath: String
     private let expectedCertificatePin: String
+    private let connectionTimeout: Duration
+    private let requestTimeout: Duration
     private let connection: NWConnection
     private let http3: GhostFileHTTP3Connection
+    nonisolated let logID = String(UUID().uuidString.prefix(12)).lowercased()
+    private let createdAt = DispatchTime.now().uptimeNanoseconds
     private var timeoutTask: Task<Void, Never>?
+    private var connectionDeadlineTask: Task<Void, Never>?
     private var hasStarted = false
     private var isNetworkReady = false
     private var hasValidatedPeer = false
@@ -269,33 +475,52 @@ actor GhostFileHTTP3Transport {
     private var isFlushing = false
     private var flushAgain = false
     private var pendingReceivedDatagrams: [Data] = []
+    private var pendingScheduledDatagram: GhostFileScheduledDatagram?
     private var isReceiveDrainScheduled = false
+    private var receivedDatagramCount = 0
+    private var receivedByteCount = 0
+    private var sentDatagramCount = 0
+    private var sentByteCount = 0
+
+    var isTerminal: Bool { terminalError != nil }
 
     init(
         host: String,
         port: NWEndpoint.Port,
         accessKey: String,
         publicKeyPin: String,
-        resourceBasePath: String = "/"
+        resourceBasePath: String = "/",
+        connectionTimeout: Duration = .seconds(8),
+        requestTimeout: Duration = .seconds(15)
     ) throws {
         self.accessKey = accessKey
         self.host = host
         self.resourceBasePath = resourceBasePath
         self.expectedCertificatePin = publicKeyPin
+        self.connectionTimeout = connectionTimeout
+        self.requestTimeout = requestTimeout
         let parameters = NWParameters.udp
         parameters.includePeerToPeer = true
         connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
         http3 = try GhostFileHTTP3Connection(role: .client(serverName: host))
+        ghostFileHTTP3Logger.notice(
+            "Transport created transport=\(self.logID, privacy: .public) \(ghostFileProcessLogIdentity, privacy: .public) host=\(host, privacy: .public) port=\(port.rawValue, privacy: .public) connectionTimeout=\(String(describing: connectionTimeout), privacy: .public) requestTimeout=\(String(describing: requestTimeout), privacy: .public)"
+        )
     }
 
     func request(
+        requestID: String = String(UUID().uuidString.prefix(12)).lowercased(),
         operation: String,
         relativePath: String?,
         offset: UInt64?,
         length: Int?
     ) async throws -> Response {
+        let requestStartedAt = DispatchTime.now().uptimeNanoseconds
+        ghostFileHTTP3Logger.info(
+            "Transport request begin request=\(requestID, privacy: .public) transport=\(self.logID, privacy: .public) operation=\(operation, privacy: .public) started=\(self.hasStarted, privacy: .public) networkReady=\(self.isNetworkReady, privacy: .public) peerValidated=\(self.hasValidatedPeer, privacy: .public) pending=\(self.pending.count, privacy: .public)"
+        )
         try await ensureHTTP3Ready()
-        try await acquireRequestStreamCredit()
+        try await acquireRequestStreamCredit(requestID: requestID, operation: operation)
         do {
             try Task.checkCancellation()
             if let terminalError { throw terminalError }
@@ -303,6 +528,9 @@ actor GhostFileHTTP3Transport {
             releaseReservedStreamCredit()
             throw error
         }
+        ghostFileHTTP3Logger.info(
+            "Transport request ready request=\(requestID, privacy: .public) transport=\(self.logID, privacy: .public) operation=\(operation, privacy: .public) readyMs=\(ghostFileElapsedMilliseconds(since: requestStartedAt), privacy: .public)"
+        )
         var components = URLComponents()
         components.path = operationPath(operation)
         if let relativePath {
@@ -316,6 +544,7 @@ actor GhostFileHTTP3Transport {
             (":path", path),
             ("authorization", "Bearer \(accessKey)"),
             ("accept", "application/json, application/octet-stream"),
+            ("x-ghostfile-request-id", requestID),
         ]
         if let offset, let length, length > 0 {
             headers.append(("range", "bytes=\(offset)-\(offset + UInt64(length) - 1)"))
@@ -329,9 +558,25 @@ actor GhostFileHTTP3Transport {
             grantAvailableStreamCredits()
             throw error
         }
+        ghostFileHTTP3Logger.info(
+            "HTTP/3 stream opened request=\(requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(operation, privacy: .public) openMs=\(ghostFileElapsedMilliseconds(since: requestStartedAt), privacy: .public)"
+        )
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                pending[streamID] = PendingResponse(continuation: continuation)
+                let deadlineTask = Task { [weak self, requestTimeout] in
+                    do {
+                        try await Task.sleep(for: requestTimeout)
+                        guard !Task.isCancelled else { return }
+                        await self?.requestDeadlineExpired(streamID: streamID)
+                    } catch {}
+                }
+                pending[streamID] = PendingResponse(
+                    requestID: requestID,
+                    operation: operation,
+                    startedAt: requestStartedAt,
+                    continuation: continuation,
+                    deadlineTask: deadlineTask
+                )
                 Task { await self.flushOutgoing() }
             }
         } onCancel: {
@@ -390,11 +635,21 @@ actor GhostFileHTTP3Transport {
     private func start() {
         guard !hasStarted else { return }
         hasStarted = true
+        ghostFileHTTP3Logger.notice(
+            "UDP connection starting transport=\(self.logID, privacy: .public) host=\(self.host, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+        )
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             Task { await self.connectionStateChanged(state) }
         }
         connection.start(queue: DispatchQueue(label: "org.ghostvm.ghostfile.http3.client"))
+        connectionDeadlineTask = Task { [weak self, connectionTimeout] in
+            do {
+                try await Task.sleep(for: connectionTimeout)
+                guard !Task.isCancelled else { return }
+                await self?.connectionDeadlineExpired()
+            } catch {}
+        }
         connection.batch {
             for _ in 0..<GhostFileNetworkDatagram.maximumReceiveCount {
                 receiveNextDatagram()
@@ -418,6 +673,13 @@ actor GhostFileHTTP3Transport {
             fail(TransportError.closed)
             return
         }
+        receivedDatagramCount += 1
+        receivedByteCount += content.count
+        if receivedDatagramCount == 1 {
+            ghostFileHTTP3Logger.notice(
+                "First UDP datagram received transport=\(self.logID, privacy: .public) bytes=\(content.count, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+        }
         receiveNextDatagram()
         pendingReceivedDatagrams.append(content)
         guard !isReceiveDrainScheduled else { return }
@@ -432,6 +694,9 @@ actor GhostFileHTTP3Transport {
         switch state {
         case .ready:
             isNetworkReady = true
+            ghostFileHTTP3Logger.notice(
+                "UDP connection ready transport=\(self.logID, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
             let waiters = readyWaiters
             readyWaiters.removeAll()
             waiters.values.forEach { $0.resume() }
@@ -440,6 +705,10 @@ actor GhostFileHTTP3Transport {
             fail(error)
         case .cancelled:
             fail(TransportError.closed)
+        case .waiting(let error):
+            ghostFileHTTP3Logger.notice(
+                "UDP connection waiting transport=\(self.logID, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
         default:
             break
         }
@@ -453,6 +722,14 @@ actor GhostFileHTTP3Transport {
             do {
                 for datagram in datagrams {
                     try http3.receive(datagram)
+                    if http3.isClosedOrDraining {
+                        if let peerError = http3.peerConnectionError,
+                           peerError.isApplication,
+                           peerError.code == GhostFileHTTP3Connection.h3NoError {
+                            throw TransportError.peerClosed
+                        }
+                        throw TransportError.closed
+                    }
                 }
                 if http3.isEstablished && !hasValidatedPeer {
                     guard let certificate = http3.peerCertificateDER(),
@@ -460,6 +737,11 @@ actor GhostFileHTTP3Transport {
                         throw TransportError.certificatePinMismatch
                     }
                     hasValidatedPeer = true
+                    ghostFileHTTP3Logger.notice(
+                        "QUIC handshake validated transport=\(self.logID, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public)"
+                    )
+                    connectionDeadlineTask?.cancel()
+                    connectionDeadlineTask = nil
                     let waiters = handshakeWaiters
                     handshakeWaiters.removeAll()
                     waiters.values.forEach { $0.resume() }
@@ -479,50 +761,81 @@ actor GhostFileHTTP3Transport {
         while let event = try http3.pollEvent() {
             switch event {
             case .headers(let streamID, let fields, _):
-                guard var response = pending[streamID],
-                      let statusValue = fields.first(where: { $0.0 == ":status" })?.1,
+                guard let response = pending[streamID] else { continue }
+                guard let statusValue = fields.first(where: { $0.0 == ":status" })?.1,
                       let status = Int(statusValue) else {
                     throw TransportError.invalidResponse
                 }
                 response.status = status
-                pending[streamID] = response
+                if response.headersAt == nil {
+                    response.headersAt = DispatchTime.now().uptimeNanoseconds
+                    ghostFileHTTP3Logger.info(
+                        "Response headers request=\(response.requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(response.operation, privacy: .public) status=\(status, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: response.startedAt), privacy: .public)"
+                    )
+                }
+                if let value = fields.first(where: { $0.0 == "content-length" })?.1,
+                   let contentLength = Int(value),
+                   (0...(GhostFileProtocol.maximumReadLength + 1024 * 1024)).contains(contentLength) {
+                    response.body.reserveCapacity(contentLength)
+                }
             case .data(let streamID):
-                guard var response = pending[streamID] else { continue }
-                response.body.append(try http3.receiveBody(streamID: streamID))
+                guard let response = pending[streamID] else { continue }
+                let previousCount = response.body.count
+                try http3.receiveBody(streamID: streamID, into: &response.body)
+                if response.firstDataAt == nil, response.body.count > previousCount {
+                    response.firstDataAt = DispatchTime.now().uptimeNanoseconds
+                    ghostFileHTTP3Logger.info(
+                        "Response first data request=\(response.requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(response.operation, privacy: .public) bytes=\(response.body.count - previousCount, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: response.startedAt), privacy: .public)"
+                    )
+                }
                 guard response.body.count <= GhostFileProtocol.maximumReadLength + 1024 * 1024 else {
                     throw TransportError.invalidResponse
                 }
-                pending[streamID] = response
             case .finished(let streamID):
-                guard let response = pending.removeValue(forKey: streamID),
-                      let status = response.status else {
+                guard let response = pending.removeValue(forKey: streamID) else { continue }
+                guard let status = response.status else {
                     throw TransportError.invalidResponse
                 }
+                response.deadlineTask.cancel()
+                ghostFileHTTP3Logger.info(
+                    "Response finished request=\(response.requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(response.operation, privacy: .public) status=\(status, privacy: .public) bytes=\(response.body.count, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: response.startedAt), privacy: .public)"
+                )
                 response.continuation.resume(returning: Response(status: status, body: response.body))
             case .reset(let streamID):
-                pending.removeValue(forKey: streamID)?.continuation.resume(throwing: TransportError.streamReset)
+                if let response = pending.removeValue(forKey: streamID) {
+                    response.deadlineTask.cancel()
+                    ghostFileHTTP3Logger.error(
+                        "Response reset request=\(response.requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(response.operation, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: response.startedAt), privacy: .public)"
+                    )
+                    response.continuation.resume(throwing: TransportError.streamReset)
+                }
             }
         }
     }
 
-    private func acquireRequestStreamCredit() async throws {
+    private func acquireRequestStreamCredit(requestID: String, operation: String) async throws {
         if unreservedStreamCreditCount > 0 {
             reservedStreamCredits += 1
             return
         }
 
         let waiterID = UUID()
+        ghostFileHTTP3Logger.notice(
+            "HTTP/3 stream credit wait request=\(requestID, privacy: .public) transport=\(self.logID, privacy: .public) operation=\(operation, privacy: .public) waiters=\(self.streamCreditWaiters.count + 1, privacy: .public)"
+        )
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                let deadlineTask = Task { [weak self] in
+                let deadlineTask = Task { [weak self, requestTimeout] in
                     do {
-                        try await Task.sleep(for: .seconds(15))
+                        try await Task.sleep(for: requestTimeout)
                         guard !Task.isCancelled else { return }
                         await self?.streamCreditWaiterExpired(id: waiterID)
                     } catch {}
                 }
                 streamCreditWaiters.append(PendingStreamCredit(
                     id: waiterID,
+                    requestID: requestID,
+                    operation: operation,
                     continuation: continuation,
                     deadlineTask: deadlineTask
                 ))
@@ -543,6 +856,9 @@ actor GhostFileHTTP3Transport {
             let waiter = streamCreditWaiters.removeFirst()
             reservedStreamCredits += 1
             waiter.deadlineTask.cancel()
+            ghostFileHTTP3Logger.notice(
+                "HTTP/3 stream credit granted request=\(waiter.requestID, privacy: .public) transport=\(self.logID, privacy: .public) operation=\(waiter.operation, privacy: .public) remainingWaiters=\(self.streamCreditWaiters.count, privacy: .public)"
+            )
             waiter.continuation.resume()
         }
     }
@@ -562,7 +878,39 @@ actor GhostFileHTTP3Transport {
     private func streamCreditWaiterExpired(id: UUID) {
         guard let index = streamCreditWaiters.firstIndex(where: { $0.id == id }) else { return }
         let waiter = streamCreditWaiters.remove(at: index)
-        waiter.continuation.resume(throwing: TransportError.streamCreditTimedOut)
+        ghostFileHTTP3Logger.error(
+            "HTTP/3 stream credit deadline expired request=\(waiter.requestID, privacy: .public) transport=\(self.logID, privacy: .public) operation=\(waiter.operation, privacy: .public) waiters=\(self.streamCreditWaiters.count + 1, privacy: .public)"
+        )
+        waiter.continuation.resume(throwing: TransportError.requestTimedOut)
+    }
+
+    private func connectionDeadlineExpired() {
+        guard !hasValidatedPeer, terminalError == nil else { return }
+        ghostFileHTTP3Logger.error(
+            "QUIC handshake deadline expired transport=\(self.logID, privacy: .public) networkReady=\(self.isNetworkReady, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) receivedBytes=\(self.receivedByteCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) sentBytes=\(self.sentByteCount, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+        )
+        fail(TransportError.connectionTimedOut)
+    }
+
+    private func requestDeadlineExpired(streamID: UInt64) async {
+        guard let response = pending.removeValue(forKey: streamID), terminalError == nil else { return }
+        ghostFileHTTP3Logger.error(
+            "Request deadline expired request=\(response.requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(response.operation, privacy: .public) status=\(String(describing: response.status), privacy: .public) bodyBytes=\(response.body.count, privacy: .public) networkReady=\(self.isNetworkReady, privacy: .public) peerValidated=\(self.hasValidatedPeer, privacy: .public) pending=\(self.pending.count + 1, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: response.startedAt), privacy: .public)"
+        )
+        http3.cancelRequest(streamID: streamID)
+        response.continuation.resume(throwing: TransportError.requestTimedOut)
+        await flushOutgoing()
+    }
+
+    private func cancelPendingRequest(streamID: UInt64) async {
+        guard let response = pending.removeValue(forKey: streamID) else { return }
+        response.deadlineTask.cancel()
+        ghostFileHTTP3Logger.notice(
+            "Request cancelled request=\(response.requestID, privacy: .public) transport=\(self.logID, privacy: .public) stream=\(streamID, privacy: .public) operation=\(response.operation, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: response.startedAt), privacy: .public)"
+        )
+        http3.cancelRequest(streamID: streamID)
+        response.continuation.resume(throwing: CancellationError())
+        await flushOutgoing()
     }
 
     private func flushOutgoing() async {
@@ -580,14 +928,41 @@ actor GhostFileHTTP3Transport {
                     let produceStartedAt = DispatchTime.now().uptimeNanoseconds
                     var datagrams: [Data] = []
                     datagrams.reserveCapacity(GhostFileNetworkDatagram.maximumSendBatchCount)
-                    while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount,
-                          let datagram = try http3.nextDatagram() {
-                        datagrams.append(datagram)
+                    var transportDrained = false
+                    while datagrams.count < GhostFileNetworkDatagram.maximumSendBatchCount {
+                        let scheduled: GhostFileScheduledDatagram
+                        if let pendingScheduledDatagram {
+                            scheduled = pendingScheduledDatagram
+                        } else if let next = try http3.nextScheduledDatagram() {
+                            scheduled = next
+                        } else {
+                            transportDrained = true
+                            break
+                        }
+                        let now = ghostFileMonotonicNanoseconds()
+                        guard scheduled.sendAtNanoseconds <= now else {
+                            pendingScheduledDatagram = scheduled
+                            break
+                        }
+                        pendingScheduledDatagram = nil
+                        datagrams.append(scheduled.data)
                     }
-                    guard !datagrams.isEmpty else { break }
+                    if datagrams.isEmpty {
+                        if transportDrained { break }
+                        guard let pendingScheduledDatagram else { break }
+                        let now = ghostFileMonotonicNanoseconds()
+                        if pendingScheduledDatagram.sendAtNanoseconds > now {
+                            try await Task.sleep(
+                                nanoseconds: pendingScheduledDatagram.sendAtNanoseconds - now
+                            )
+                        }
+                        continue
+                    }
                     let produceFinishedAt = DispatchTime.now().uptimeNanoseconds
                     try await connection.sendGhostFileDatagrams(datagrams)
                     let sendFinishedAt = DispatchTime.now().uptimeNanoseconds
+                    sentDatagramCount += datagrams.count
+                    sentByteCount += datagrams.reduce(into: 0) { $0 += $1.count }
                     http3.recordSendBatch(
                         packetCount: datagrams.count,
                         produceNanoseconds: produceFinishedAt - produceStartedAt,
@@ -616,19 +991,19 @@ actor GhostFileHTTP3Transport {
     private func timeoutFired() async {
         http3.handleTimeout()
         await flushOutgoing()
-        if http3.isClosed { fail(TransportError.closed) }
-    }
-
-    private func cancelPendingRequest(streamID: UInt64) async {
-        guard let response = pending.removeValue(forKey: streamID) else { return }
-        http3.cancelRequest(streamID: streamID)
-        response.continuation.resume(throwing: CancellationError())
-        await flushOutgoing()
+        if http3.isClosed {
+            ghostFileHTTP3Logger.error(
+                "QUIC timeout closed transport transport=\(self.logID, privacy: .public) pending=\(self.pending.count, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+            )
+            fail(TransportError.closed)
+        }
     }
 
     private func fail(_ error: Error) {
         guard terminalError == nil else { return }
-        NSLog("GhostFile HTTP/3 transport failed: %@", String(describing: error))
+        ghostFileHTTP3Logger.error(
+            "Transport failed transport=\(self.logID, privacy: .public) error=\(String(describing: error), privacy: .public) networkReady=\(self.isNetworkReady, privacy: .public) peerValidated=\(self.hasValidatedPeer, privacy: .public) pending=\(self.pending.count, privacy: .public) receivedDatagrams=\(self.receivedDatagramCount, privacy: .public) receivedBytes=\(self.receivedByteCount, privacy: .public) sentDatagrams=\(self.sentDatagramCount, privacy: .public) sentBytes=\(self.sentByteCount, privacy: .public) elapsedMs=\(ghostFileElapsedMilliseconds(since: self.createdAt), privacy: .public)"
+        )
         terminalError = error
         readyWaiters.values.forEach { $0.resume(throwing: error) }
         handshakeWaiters.values.forEach { $0.resume(throwing: error) }
@@ -642,6 +1017,8 @@ actor GhostFileHTTP3Transport {
         }
         streamCreditWaiters.removeAll()
         timeoutTask?.cancel()
+        connectionDeadlineTask?.cancel()
+        pendingScheduledDatagram = nil
         connection.cancel()
     }
 
@@ -657,23 +1034,47 @@ actor GhostFileHTTP3Transport {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private struct PendingResponse {
+    private final class PendingResponse {
+        let requestID: String
+        let operation: String
+        let startedAt: UInt64
         let continuation: CheckedContinuation<Response, Error>
+        let deadlineTask: Task<Void, Never>
         var status: Int?
         var body = Data()
+        var headersAt: UInt64?
+        var firstDataAt: UInt64?
+
+        init(
+            requestID: String,
+            operation: String,
+            startedAt: UInt64,
+            continuation: CheckedContinuation<Response, Error>,
+            deadlineTask: Task<Void, Never>
+        ) {
+            self.requestID = requestID
+            self.operation = operation
+            self.startedAt = startedAt
+            self.continuation = continuation
+            self.deadlineTask = deadlineTask
+        }
     }
 
     private struct PendingStreamCredit {
         let id: UUID
+        let requestID: String
+        let operation: String
         let continuation: CheckedContinuation<Void, Error>
         let deadlineTask: Task<Void, Never>
     }
 
-    private enum TransportError: Error {
+    enum TransportError: Error {
         case invalidResponse
         case certificatePinMismatch
         case streamReset
-        case streamCreditTimedOut
+        case connectionTimedOut
+        case requestTimedOut
+        case peerClosed
         case closed
     }
 }

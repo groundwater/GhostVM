@@ -16,6 +16,17 @@ FSKIT_PROVISIONING_PROFILE ?= .var/profiles/GhostVM_FS_Distribution.provisionpro
 # Set to 0 only when a canonical release version is explicitly required.
 INJECT_TIMESTAMP ?= 1
 BUILD_TIMESTAMP := $(shell date +%Y%m%d%H%M%S)
+GHOSTFILE_MAJOR_MINOR ?= 1.0
+GHOSTFILE_VERSION ?= $(GHOSTFILE_MAJOR_MINOR).$(BUILD_TIMESTAMP)
+GHOSTFILE_BUILD_NUMBER ?= 3
+GHOSTFILE_KEEP_INTERMEDIATES ?= 0
+GHOSTFILE_ARCHIVE = build/GhostFile-$(GHOSTFILE_VERSION).xcarchive
+GHOSTFILE_EXPORT_DIR = build/GhostFile-$(GHOSTFILE_VERSION)-export
+GHOSTFILE_UPLOAD_DIR = build/GhostFile-$(GHOSTFILE_VERSION)-upload
+GHOSTFILE_DERIVED_DATA = build/.GhostFile-$(GHOSTFILE_VERSION)-DerivedData
+GHOSTFILE_ARTIFACT = build/GhostFile-$(GHOSTFILE_VERSION)-notarized-arm64.zip
+GHOSTFILE_SHARED_DOWNLOADS ?= /Volumes/My Shared Files/Downloads
+GHOSTFILE_LSREGISTER = /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 APP_SKIP_XCODE_SIGNING ?= 0
 XCODE_ALLOW_PROVISIONING_UPDATES ?= 1
 
@@ -48,7 +59,7 @@ $(error Missing $(VERSION_FILE). Create it with a version like 1.85.0)
 endif
 BASE_MAJOR_MINOR := $(word 1,$(subst ., ,$(BASE_VERSION))).$(word 2,$(subst ., ,$(BASE_VERSION)))
 
-.PHONY: all cli app clean help run launch ghostfile run-ghostfile test-ghostfile generate test uitest framework dist debug-dmg tools debug-tools dmg ghosttools-icon ghostvm-icon debug debug-export website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist ghosthttp3-framework
+.PHONY: all cli app clean help run launch ghostfile ghostfile-release ghostfile-notarized run-ghostfile run-ghostfile-release test-ghostfile generate test uitest framework dist debug-dmg tools debug-tools dmg ghosttools-icon ghostvm-icon debug debug-export website website-build sparkle-tools sparkle-sign capture composite screenshots bump check-version render-plists prepare-app-plists prepare-tools-plist ghosthttp3-framework
 
 all: help
 
@@ -285,8 +296,85 @@ ghostfile: $(XCODE_PROJECT) ghosthttp3-framework
 		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
 		build
 
+# Build the optimized arm64 GhostFile app used for performance and distribution testing.
+ghostfile-release: $(XCODE_PROJECT) ghosthttp3-framework
+	@if [ -z "$(DEVELOPMENT_TEAM)" ]; then \
+		echo "ERROR: DEVELOPMENT_TEAM is required to sign GhostFileFS.appex"; \
+		echo "Set it in .env or run: make ghostfile-release DEVELOPMENT_TEAM=YOUR_TEAM_ID"; \
+		exit 1; \
+	fi
+	xcodebuild -project $(XCODE_PROJECT) \
+		-scheme GhostFile \
+		-configuration Release \
+		-derivedDataPath $(BUILD_DIR) \
+		-allowProvisioningUpdates \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
+		ARCHS=arm64 \
+		ONLY_ACTIVE_ARCH=YES \
+		build
+
+# Create a timestamp-versioned, Developer ID signed, notarized arm64 GhostFile archive.
+# Every distributed filename includes the full major.minor.YYYYMMDDHHMMSS version.
+ghostfile-notarized: $(XCODE_PROJECT) ghosthttp3-framework
+	@if [ -z "$(DEVELOPMENT_TEAM)" ]; then \
+		echo "ERROR: DEVELOPMENT_TEAM is required"; \
+		exit 1; \
+	fi
+	@for PLIST in macOS/GhostFile/Info.plist macOS/GhostFileFS/Info.plist; do \
+		plutil -replace CFBundleShortVersionString -string "$(GHOSTFILE_VERSION)" "$$PLIST"; \
+		plutil -replace CFBundleVersion -string "$(GHOSTFILE_BUILD_NUMBER)" "$$PLIST"; \
+	done
+	@echo "Building GhostFile $(GHOSTFILE_VERSION)..."
+	rm -rf "$(GHOSTFILE_ARCHIVE)" "$(GHOSTFILE_EXPORT_DIR)" "$(GHOSTFILE_UPLOAD_DIR)" "$(GHOSTFILE_DERIVED_DATA)"
+	xcodebuild archive -project $(XCODE_PROJECT) \
+		-scheme GhostFile \
+		-configuration Release \
+		-archivePath "$(GHOSTFILE_ARCHIVE)" \
+		-derivedDataPath "$(GHOSTFILE_DERIVED_DATA)" \
+		-allowProvisioningUpdates \
+		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)" \
+		ARCHS=arm64 \
+		ONLY_ACTIVE_ARCH=YES
+	xcodebuild -exportArchive \
+		-archivePath "$(GHOSTFILE_ARCHIVE)" \
+		-exportPath "$(GHOSTFILE_UPLOAD_DIR)" \
+		-exportOptionsPlist macOS/GhostFile/NotarizeOptions.plist \
+		-allowProvisioningUpdates
+	@ATTEMPT=1; \
+	while ! xcodebuild -exportNotarizedApp -archivePath "$(GHOSTFILE_ARCHIVE)" -exportPath "$(GHOSTFILE_EXPORT_DIR)"; do \
+		if [ "$$ATTEMPT" -ge 60 ]; then echo "ERROR: notarization did not complete"; exit 1; fi; \
+		echo "Waiting for notarization (attempt $$ATTEMPT/60)..."; \
+		ATTEMPT=$$((ATTEMPT + 1)); \
+		sleep 30; \
+	done
+	xcrun stapler validate "$(GHOSTFILE_EXPORT_DIR)/GhostFile.app"
+	rm -f "$(GHOSTFILE_ARTIFACT)"
+	ditto -c -k --keepParent "$(GHOSTFILE_EXPORT_DIR)/GhostFile.app" "$(GHOSTFILE_ARTIFACT)"
+	@if [ -d "$(GHOSTFILE_SHARED_DOWNLOADS)" ]; then \
+		cp "$(GHOSTFILE_ARTIFACT)" "$(GHOSTFILE_SHARED_DOWNLOADS)/GhostFile-$(GHOSTFILE_VERSION)-notarized-arm64.zip"; \
+	fi
+	@# Xcode/LaunchServices eagerly discovers FSKit extensions inside archives and
+	@# DerivedData. Unregister every non-installed build product even when the
+	@# intermediates are retained for release inspection.
+	@for APP in \
+		"$(GHOSTFILE_ARCHIVE)/Products/Applications/GhostFile.app" \
+		"$(GHOSTFILE_EXPORT_DIR)/GhostFile.app" \
+		"$(GHOSTFILE_DERIVED_DATA)/Build/Products/Release/GhostFile.app"; do \
+		if [ -d "$$APP" ]; then \
+			/usr/bin/pluginkit -r "$$APP/Contents/Extensions/GhostFileFS.appex" >/dev/null 2>&1 || true; \
+			$(GHOSTFILE_LSREGISTER) -u "$$APP" >/dev/null 2>&1 || true; \
+		fi; \
+	done
+	@if [ "$(GHOSTFILE_KEEP_INTERMEDIATES)" != "1" ]; then \
+		rm -rf "$(GHOSTFILE_ARCHIVE)" "$(GHOSTFILE_EXPORT_DIR)" "$(GHOSTFILE_UPLOAD_DIR)" "$(GHOSTFILE_DERIVED_DATA)"; \
+	fi
+	@echo "GhostFile artifact: $(GHOSTFILE_ARTIFACT)"
+
 run-ghostfile: ghostfile
 	open -n "$(BUILD_DIR)/Build/Products/Debug/GhostFile.app"
+
+run-ghostfile-release: ghostfile-release
+	open -n "$(BUILD_DIR)/Build/Products/Release/GhostFile.app"
 
 test-ghostfile: $(XCODE_PROJECT) ghosthttp3-framework
 	@if [ -z "$(DEVELOPMENT_TEAM)" ]; then \
@@ -300,6 +388,11 @@ test-ghostfile: $(XCODE_PROJECT) ghosthttp3-framework
 		-derivedDataPath $(BUILD_DIR) \
 		-allowProvisioningUpdates \
 		DEVELOPMENT_TEAM="$(DEVELOPMENT_TEAM)"
+	@TEST_APP="$(BUILD_DIR)/Build/Products/Debug/GhostFile.app"; \
+	if [ -d "$$TEST_APP" ]; then \
+		/usr/bin/pluginkit -r "$$TEST_APP/Contents/Extensions/GhostFileFS.appex" >/dev/null 2>&1 || true; \
+		$(GHOSTFILE_LSREGISTER) -u "$$TEST_APP" >/dev/null 2>&1 || true; \
+	fi
 
 # Run unit tests
 test: $(XCODE_PROJECT)

@@ -8,9 +8,10 @@ final class GhostFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
               let shareID = Self.shareID(from: resource.url) else {
             return .notRecognized
         }
+        let mountID = GhostFileProtocol.mountInstanceID(from: resource.url) ?? shareID
         return .usable(
             name: "GhostFile",
-            containerID: FSContainerIdentifier(uuid: shareID)
+            containerID: FSContainerIdentifier(uuid: mountID)
         )
     }
 
@@ -20,6 +21,7 @@ final class GhostFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
               let shareID = Self.shareID(from: resource.url) else {
             throw fs_errorForPOSIXError(ENOTSUP)
         }
+        let mountID = GhostFileProtocol.mountInstanceID(from: resource.url) ?? shareID
         let client = try GhostFileHTTP3Client(resourceURL: resource.url)
         let capabilities = try await client.capabilities()
         guard capabilities.protocolVersion == GhostFileProtocol.version,
@@ -29,7 +31,9 @@ final class GhostFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
         }
         containerStatus = .ready
         return GhostFileVolume(
-            volumeID: FSVolume.Identifier(uuid: shareID),
+            // LiveFS performs its final connector lookup using this identity.
+            // Use the same unqualified per-mount UUID returned by probeResource.
+            volumeID: FSVolume.Identifier(uuid: mountID),
             volumeName: FSFileName(string: capabilities.name),
             client: client
         )

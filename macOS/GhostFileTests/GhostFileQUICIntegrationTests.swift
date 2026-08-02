@@ -4,6 +4,170 @@ import XCTest
 @testable import GhostFile
 
 final class GhostFileHTTP3IntegrationTests: XCTestCase {
+    func testPublishedShareURLConnectsThroughResolvedBonjourHost() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-share-url-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "bonjour-share-url-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "URLTest-\(UUID().uuidString)",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        guard var components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false) else {
+            throw TestError.missingShareURL
+        }
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "access_key", value: accessKey)
+        ]
+        let resourceURL = try XCTUnwrap(components.url)
+        let client = try GhostFileHTTP3Client(resourceURL: resourceURL)
+        let capabilities = try await client.capabilities()
+        let expectedShareID = await MainActor.run { server.shareID }
+
+        XCTAssertEqual(capabilities.shareID, expectedShareID)
+        XCTAssertEqual(shareURL.host?.hasSuffix(".local"), true)
+        XCTAssertNotEqual(shareURL.host, "connectivity-check.warp-svc.local")
+    }
+
+    func testClientReconnectsAfterHTTP3ConnectionLoss() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-reconnect-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("reconnected".utf8).write(to: fixture.appendingPathComponent("hello.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "reconnect-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "ReconnectTest",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey)
+        )
+        _ = try await client.capabilities()
+
+        await client.invalidateTransportForTesting()
+
+        let metadata = try await client.metadata(path: "hello.txt")
+        let contents = try await client.read(path: "hello.txt", offset: 0, length: 64)
+        XCTAssertEqual(metadata.size, UInt64(contents.count))
+        XCTAssertEqual(contents, Data("reconnected".utf8))
+    }
+
+    func testTimedOutStreamDoesNotReplaceHTTP3Connection() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-timeout-retry-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("fresh connection".utf8).write(to: fixture.appendingPathComponent("hello.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let delay = GhostFileOneShotRequestDelay()
+        let accessKey = "timeout-retry-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "TimeoutRetryTest",
+                accessKey: accessKey,
+                requestDelay: { request in
+                    guard request.operation == "metadata", request.path == "hello.txt",
+                          await delay.consume() else { return }
+                    try? await Task.sleep(for: .milliseconds(500))
+                }
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey),
+            connectionTimeout: .seconds(2),
+            requestTimeout: .milliseconds(150)
+        )
+
+        let initialTransport = await client.transportLogIDForTesting()
+        let originalTransport = try XCTUnwrap(initialTransport)
+        do {
+            _ = try await client.metadata(path: "hello.txt")
+            XCTFail("The delayed request unexpectedly completed before its deadline")
+        } catch {}
+        let firstInvocationCount = await delay.invocationCount
+        let transportAfterTimeout = await client.transportLogIDForTesting()
+        XCTAssertEqual(firstInvocationCount, 1, "A stream timeout retried the request automatically")
+        XCTAssertEqual(
+            transportAfterTimeout,
+            originalTransport,
+            "A stream timeout replaced the entire QUIC connection"
+        )
+
+        let metadata = try await client.metadata(path: "hello.txt")
+        XCTAssertEqual(metadata.size, UInt64(Data("fresh connection".utf8).count))
+        let invocationCount = await delay.invocationCount
+        let finalTransport = await client.transportLogIDForTesting()
+        XCTAssertEqual(invocationCount, 2)
+        XCTAssertEqual(finalTransport, originalTransport)
+    }
+
+    func testUnresponsiveQUICPeerFailsWithinConnectionDeadline() async throws {
+        let queue = DispatchQueue(label: "org.ghostvm.ghostfile.tests.silent-udp")
+        let listener = try NWListener(using: .udp, on: .any)
+        let ready = expectation(description: "silent UDP listener ready")
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { ready.fulfill() }
+        }
+        listener.newConnectionHandler = { connection in
+            // Accept UDP datagrams but intentionally never answer the QUIC handshake.
+            connection.start(queue: queue)
+        }
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+        await fulfillment(of: [ready], timeout: 2)
+        guard let port = listener.port else { throw TestError.missingShareURL }
+
+        let transport = try GhostFileHTTP3Transport(
+            host: "127.0.0.1",
+            port: port,
+            accessKey: "deadline-test",
+            publicKeyPin: "not-a-real-pin",
+            resourceBasePath: "/v1/shares/00000000-0000-0000-0000-000000000001",
+            connectionTimeout: .milliseconds(250),
+            requestTimeout: .seconds(1)
+        )
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await transport.request(
+                operation: "capabilities",
+                relativePath: nil,
+                offset: nil,
+                length: nil
+            )
+            XCTFail("An unresponsive QUIC peer unexpectedly completed a request")
+        } catch {
+            XCTAssertLessThan(started.duration(to: clock.now), .seconds(2))
+        }
+    }
+
     func testCancellingRequestDuringQUICHandshakeFinishesPromptly() async throws {
         let queue = DispatchQueue(label: "org.ghostvm.ghostfile.tests.cancel-handshake-udp")
         let listener = try NWListener(using: .udp, on: .any)
@@ -29,7 +193,9 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             port: port,
             accessKey: "cancel-handshake-test",
             publicKeyPin: "not-a-real-pin",
-            resourceBasePath: "/v1/shares/00000000-0000-0000-0000-000000000001"
+            resourceBasePath: "/v1/shares/00000000-0000-0000-0000-000000000001",
+            connectionTimeout: .seconds(10),
+            requestTimeout: .seconds(10)
         )
 
         let completed = expectation(description: "handshake-waiting request completed after cancellation")
@@ -58,7 +224,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         let cancellationLatency = cancelledAt.duration(to: clock.now)
 
         // Unblock the deliberately broken implementation after the timeout
-        // assertion instead of waiting for the QUIC idle timeout.
+        // assertion so the test never waits for the ten-second deadline.
         await transport.invalidateForTesting()
         let outcome = await requestTask.value
         XCTAssertEqual(outcome, .cancelled)
@@ -105,6 +271,106 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         XCTAssertEqual(refreshed.size, 6)
         let refreshedContents = try await client.read(path: "tiny.txt", offset: 0, length: 64)
         XCTAssertEqual(refreshedContents, Data("after!".utf8))
+    }
+
+    func testDesktopSizedDirectoryListingCompletesOnOneHTTP3Connection() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-large-directory-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        // The real Desktop failure returned roughly 22 KiB. Use enough long
+        // directory names to force the response across multiple UDP send
+        // batches without introducing file-content I/O into this test.
+        for index in 0..<128 {
+            let name = String(format: "%03d-%@", index, String(repeating: "directory-entry-", count: 5))
+            try FileManager.default.createDirectory(
+                at: fixture.appendingPathComponent(name, isDirectory: true),
+                withIntermediateDirectories: false
+            )
+        }
+
+        let accessKey = "large-directory-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "LargeDirectoryTest",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey),
+            connectionTimeout: .seconds(2),
+            requestTimeout: .seconds(2)
+        )
+        let initialTransport = await client.transportLogIDForTesting()
+        let originalTransport = try XCTUnwrap(initialTransport)
+        let started = ContinuousClock.now
+        let listing = try await client.directory(path: "")
+        let elapsed = started.duration(to: .now)
+        let finalTransport = await client.transportLogIDForTesting()
+
+        XCTAssertEqual(listing.entries.count, 128)
+        XCTAssertEqual(finalTransport, originalTransport)
+        XCTAssertLessThan(elapsed, .seconds(1))
+    }
+
+    func testDesktopSizedDirectoryListingSurvivesMinimumQUICPathMTU() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-minimum-pmtu-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        for index in 0..<128 {
+            let name = String(format: "%03d-%@", index, String(repeating: "directory-entry-", count: 5))
+            try FileManager.default.createDirectory(
+                at: fixture.appendingPathComponent(name, isDirectory: true),
+                withIntermediateDirectories: false
+            )
+        }
+
+        let accessKey = "minimum-pmtu-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "MinimumPMTUTest",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForLoopbackShareURL(server)
+        guard let serverPortValue = shareURL.port,
+              let serverPort = NWEndpoint.Port(rawValue: UInt16(serverPortValue)),
+              var components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false) else {
+            throw TestError.missingShareURL
+        }
+        let proxy = try GhostFilePathMTUProxy(upstreamPort: serverPort, maximumDatagramSize: 1_200)
+        let proxyPort = try await proxy.start()
+        defer { proxy.stop() }
+
+        components.host = "127.0.0.1"
+        components.port = Int(proxyPort.rawValue)
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "access_key", value: accessKey)
+        ]
+        let resourceURL = try XCTUnwrap(components.url)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: resourceURL,
+            connectionTimeout: .seconds(2),
+            requestTimeout: .seconds(2)
+        )
+
+        let listing = try await client.directory(path: "")
+        XCTAssertEqual(listing.entries.count, 128)
+        XCTAssertGreaterThan(proxy.droppedDatagramCount, 0, "The PMTU proxy did not reject a probe")
     }
 
     func testBulkTransferBenchmarkWhenRequested() async throws {
@@ -254,6 +520,66 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         await MainActor.run { server.stop() }
     }
 
+    func testTimedOutRequestDoesNotPoisonSiblingHTTP3Streams() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-quic-timeout-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("still responsive".utf8).write(to: fixture.appendingPathComponent("hello.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "quic-timeout-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileHTTP3Timeout",
+                accessKey: accessKey,
+                requestDelay: { request in
+                    if request.path == "slow.txt" {
+                        try? await Task.sleep(for: .seconds(2))
+                    }
+                }
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        guard let portNumber = shareURL.port,
+              let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
+              let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
+              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+            throw TestError.missingShareURL
+        }
+        let transport = try GhostFileHTTP3Transport(
+            host: "127.0.0.1",
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: pin,
+            resourceBasePath: shareURL.path,
+            connectionTimeout: .seconds(2),
+            requestTimeout: .milliseconds(250)
+        )
+
+        do {
+            _ = try await transport.request(
+                operation: "metadata",
+                relativePath: "slow.txt",
+                offset: nil,
+                length: nil
+            )
+            XCTFail("The deliberately stalled request unexpectedly completed")
+        } catch {}
+
+        let response = try await transport.request(
+            operation: "metadata",
+            relativePath: "hello.txt",
+            offset: nil,
+            length: nil
+        )
+        XCTAssertEqual(response.status, 200)
+    }
+
     func testConcurrentRangeReadsUseOneHTTP3Connection() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("ghostfile-quic-load-\(UUID().uuidString)", isDirectory: true)
@@ -331,7 +657,8 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             port: port,
             accessKey: accessKey,
             publicKeyPin: pin,
-            resourceBasePath: shareURL.path
+            resourceBasePath: shareURL.path,
+            requestTimeout: .seconds(5)
         )
 
         _ = try await transport.request(
@@ -404,7 +731,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             }
         }
 
-        let shareURL = try await waitForShareURL(server)
+        let shareURL = try await waitForLoopbackShareURL(server)
         guard let portNumber = shareURL.port,
               let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
               let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
@@ -416,7 +743,8 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             port: port,
             accessKey: accessKey,
             publicKeyPin: pin,
-            resourceBasePath: shareURL.path
+            resourceBasePath: shareURL.path,
+            requestTimeout: .seconds(10)
         )
 
         let completed = expectation(description: "cancelled HTTP/3 request completed")
@@ -444,10 +772,16 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         await fulfillment(of: [completed], timeout: 0.5)
         let cancellationLatency = cancelledAt.duration(to: clock.now)
 
+        // Always release the server barrier so a broken implementation can
+        // drain cleanly after the timeout assertion instead of leaking a task.
         await gate.open()
         let outcome = await requestTask.value
         XCTAssertEqual(outcome, .cancelled)
-        XCTAssertLessThan(cancellationLatency, .milliseconds(500))
+        XCTAssertLessThan(
+            cancellationLatency,
+            .milliseconds(500),
+            "Caller cancellation waited for the HTTP/3 response or request deadline"
+        )
     }
 
     func testCancellingOpenedRequestCancelsServerRoutingWithoutBlockingSibling() async throws {
@@ -533,6 +867,71 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         await gate.open()
     }
 
+    func testStoppingShareNotifiesInFlightHTTP3RequestBeforeItsDeadline() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-quic-share-stop-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("stop me".utf8).write(to: fixture.appendingPathComponent("stop.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let gate = GhostFileRequestGate()
+        let accessKey = "quic-share-stop-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileHTTP3ShareStop-\(UUID().uuidString)",
+                accessKey: accessKey,
+                requestDelay: { request in
+                    guard request.operation == "metadata", request.path == "stop.txt" else { return }
+                    await gate.wait()
+                }
+            )
+            try server.start()
+            return server
+        }
+        defer {
+            Task {
+                await gate.open()
+                await MainActor.run { server.stop() }
+            }
+        }
+
+        let shareURL = try await waitForLoopbackShareURL(server)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey),
+            connectionTimeout: .seconds(2),
+            requestTimeout: .seconds(4)
+        )
+
+        let request = Task { () -> GhostFileCancellationOutcome in
+            do {
+                _ = try await client.metadata(path: "stop.txt")
+                return .succeeded
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .failed(String(describing: error))
+            }
+        }
+
+        await gate.waitForArrival()
+        let clock = ContinuousClock()
+        let stoppedAt = clock.now
+        await MainActor.run { server.stop() }
+        let outcome = await request.value
+        let elapsed = stoppedAt.duration(to: clock.now)
+
+        await gate.open()
+        guard case .failed = outcome else {
+            return XCTFail("An in-flight request unexpectedly survived share shutdown: \(outcome)")
+        }
+        XCTAssertLessThan(
+            elapsed,
+            .seconds(3),
+            "The client learned about share shutdown only from its request deadline"
+        )
+    }
+
     private enum TestError: Error {
         case missingShareURL
         case responseMismatch
@@ -605,6 +1004,17 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
     }
 }
 
+private actor GhostFileOneShotRequestDelay {
+    private(set) var invocationCount = 0
+    private var shouldDelay = true
+
+    func consume() -> Bool {
+        invocationCount += 1
+        defer { shouldDelay = false }
+        return shouldDelay
+    }
+}
+
 private actor GhostFileRequestGate {
     private var isOpen = false
     private var hasArrival = false
@@ -639,4 +1049,121 @@ private enum GhostFileCancellationOutcome: Equatable {
     case succeeded
     case cancelled
     case failed(String)
+}
+
+private final class GhostFilePathMTUProxy: @unchecked Sendable {
+    private let upstreamPort: NWEndpoint.Port
+    private let maximumDatagramSize: Int
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "org.ghostvm.ghostfile.tests.pmtu-proxy")
+    private let lock = NSLock()
+    private var downstream: NWConnection?
+    private var upstream: NWConnection?
+    private var dropped = 0
+
+    init(upstreamPort: NWEndpoint.Port, maximumDatagramSize: Int) throws {
+        self.upstreamPort = upstreamPort
+        self.maximumDatagramSize = maximumDatagramSize
+        listener = try NWListener(using: .udp, on: .any)
+    }
+
+    var droppedDatagramCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return dropped
+    }
+
+    func start() async throws -> NWEndpoint.Port {
+        try await withCheckedThrowingContinuation { continuation in
+            let completion = GhostFileProxyStartCompletion(continuation: continuation)
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    if let port = self.listener.port {
+                        completion.succeed(port)
+                    }
+                case .failed(let error):
+                    completion.fail(error)
+                case .cancelled:
+                    completion.fail(CancellationError())
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.accept(connection)
+            }
+            listener.start(queue: queue)
+        }
+    }
+
+    func stop() {
+        listener.cancel()
+        lock.lock()
+        let downstream = self.downstream
+        let upstream = self.upstream
+        self.downstream = nil
+        self.upstream = nil
+        lock.unlock()
+        downstream?.cancel()
+        upstream?.cancel()
+    }
+
+    private func accept(_ downstream: NWConnection) {
+        let upstream = NWConnection(host: "127.0.0.1", port: upstreamPort, using: .udp)
+        lock.lock()
+        guard self.downstream == nil else {
+            lock.unlock()
+            downstream.cancel()
+            return
+        }
+        self.downstream = downstream
+        self.upstream = upstream
+        lock.unlock()
+
+        downstream.start(queue: queue)
+        upstream.start(queue: queue)
+        forward(from: downstream, to: upstream)
+        forward(from: upstream, to: downstream)
+    }
+
+    private func forward(from source: NWConnection, to destination: NWConnection) {
+        source.receiveMessage { [weak self, weak source, weak destination] content, _, _, error in
+            guard let self, let source, let destination, error == nil, let content else { return }
+            if content.count <= self.maximumDatagramSize {
+                destination.send(content: content, completion: .contentProcessed { _ in })
+            } else {
+                self.lock.lock()
+                self.dropped += 1
+                self.lock.unlock()
+            }
+            self.forward(from: source, to: destination)
+        }
+    }
+}
+
+private final class GhostFileProxyStartCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<NWEndpoint.Port, Error>?
+
+    init(continuation: CheckedContinuation<NWEndpoint.Port, Error>) {
+        self.continuation = continuation
+    }
+
+    func succeed(_ port: NWEndpoint.Port) {
+        complete(.success(port))
+    }
+
+    func fail(_ error: Error) {
+        complete(.failure(error))
+    }
+
+    private func complete(_ result: Result<NWEndpoint.Port, Error>) {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
 }

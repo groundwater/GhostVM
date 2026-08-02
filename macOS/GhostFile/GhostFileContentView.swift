@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private enum GhostFileMode: String, CaseIterable, Identifiable {
@@ -8,6 +9,7 @@ private enum GhostFileMode: String, CaseIterable, Identifiable {
 
 struct GhostFileContentView: View {
     @State private var mode: GhostFileMode = .share
+    @StateObject private var shareController = GhostFileShareController()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +36,7 @@ struct GhostFileContentView: View {
 
             switch mode {
             case .share:
-                GhostFileShareView()
+                GhostFileShareView(controller: shareController)
             case .mount:
                 GhostFileMountView()
             }
@@ -43,7 +45,7 @@ struct GhostFileContentView: View {
 }
 
 private struct GhostFileShareView: View {
-    @StateObject private var controller = GhostFileShareController()
+    @ObservedObject var controller: GhostFileShareController
 
     var body: some View {
         Group {
@@ -177,6 +179,7 @@ private struct GhostFileMountView: View {
     @State private var urlText = ""
     @State private var accessKey = ""
     @State private var volumeName = "GhostFile Share"
+    @State private var mountPoint: URL?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -225,6 +228,18 @@ private struct GhostFileMountView: View {
                     TextField("Share URL", text: $urlText, prompt: Text("ghostfile://mac.local:8049/v1/shares/…"))
                     SecureField("Access key", text: $accessKey)
                     TextField("Volume name", text: $volumeName)
+                    LabeledContent("Mount point") {
+                        HStack {
+                            Text(mountPoint?.path ?? "Automatic — ~/GhostFile Mounts")
+                                .foregroundStyle(mountPoint == nil ? .secondary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if mountPoint != nil {
+                                Button("Use Automatic") { mountPoint = nil }
+                            }
+                            Button("Choose…") { chooseMountPoint() }
+                        }
+                    }
                 }
                 .formStyle(.columns)
                 .padding(.vertical, 8)
@@ -236,7 +251,12 @@ private struct GhostFileMountView: View {
                     Label("FSKit extension enabled", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                 case false:
                     Label("FSKit extension not enabled", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                    Button("Open Settings…") { mountManager.openExtensionSettings() }
+                    Button("Open File System Extensions…") { mountManager.openExtensionSettings() }
+                    if mountManager.extensionRepairAvailable {
+                        Button("Repair & Open Settings…") {
+                            Task { await mountManager.repairExtensionRegistration() }
+                        }
+                    }
                 case nil:
                     ProgressView().controlSize(.small)
                     Text("Checking FSKit extension…").foregroundStyle(.secondary)
@@ -247,10 +267,21 @@ private struct GhostFileMountView: View {
                         mountManager.errorMessage = "Enter a valid share URL."
                         return
                     }
-                    Task { await mountManager.mount(url: url, accessKey: accessKey, volumeName: volumeName) }
+                    Task {
+                        await mountManager.mount(
+                            url: url,
+                            accessKey: accessKey,
+                            volumeName: volumeName,
+                            requestedMountPoint: mountPoint
+                        )
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(mountManager.isWorking || mountManager.extensionEnabled != true)
+            }
+
+            if let detail = mountManager.extensionStatusDetail {
+                Text(detail).foregroundStyle(.orange).font(.callout)
             }
 
             if !mountManager.mountedShares.isEmpty {
@@ -278,11 +309,33 @@ private struct GhostFileMountView: View {
             discovery.start()
             await mountManager.refreshExtensionStatus()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            Task { await mountManager.refreshExtensionStatus() }
+        }
+        .onChange(of: discovery.removalEvent) { _, removal in
+            guard let removal else { return }
+            Task { await mountManager.unmountDisconnectedShare(withID: removal.shareID) }
+        }
     }
 
     private func select(_ share: DiscoveredGhostFileShare) {
         selectedShareID = share.id
         urlText = share.url?.absoluteString ?? ""
         volumeName = share.name
+    }
+
+    private func chooseMountPoint() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose an empty folder to use as the mount point"
+        panel.prompt = "Choose Mount Point"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        if let mountPoint {
+            panel.directoryURL = mountPoint
+        }
+        guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+        mountPoint = selectedURL.standardizedFileURL
     }
 }

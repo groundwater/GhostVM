@@ -51,6 +51,32 @@ final class GhostHTTPTests: XCTestCase {
         XCTAssertEqual(try reader.readAll(), Data("hello world".utf8))
     }
 
+    func testReadURLSessionStyleRequestWithGhostFileAcceptHeader() throws {
+        let pair = try makeSocketPair()
+        defer {
+            Darwin.close(pair.0)
+            Darwin.close(pair.1)
+        }
+
+        let request = "GET /v1/shares/c46e85bc-760a-415e-87e1-47fc014a138c/capabilities HTTP/1.1\r\n"
+            + "Host: localhost:60999\r\n"
+            + "Connection: keep-alive\r\n"
+            + "Accept: application/vnd.ghostfile.v1+json\r\n"
+            + "User-Agent: GhostFileFS CFNetwork/3860.600.21 Darwin/25.5.0\r\n"
+            + "Accept-Language: en-US,en;q=0.9\r\n"
+            + "Authorization: Bearer 2f6b22a4-f5c0-4112-84c4-53e2d6d240c3\r\n"
+            + "Accept-Encoding: gzip, deflate\r\n"
+            + "\r\n"
+        try HTTPCodec.writeAll(fd: pair.0, data: Data(request.utf8))
+
+        let (head, prelude) = try HTTPCodec.readRequest(fd: pair.1)
+        XCTAssertEqual(head.method, .GET)
+        XCTAssertEqual(head.path, "/v1/shares/c46e85bc-760a-415e-87e1-47fc014a138c/capabilities")
+        XCTAssertEqual(head.header("Accept"), "application/vnd.ghostfile.v1+json")
+        XCTAssertEqual(head.header("Authorization"), "Bearer 2f6b22a4-f5c0-4112-84c4-53e2d6d240c3")
+        XCTAssertTrue(prelude.isEmpty)
+    }
+
     func testWriteStreamingResponse() throws {
         let pair = try makeSocketPair()
         defer {

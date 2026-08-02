@@ -11,9 +11,25 @@ enum GhostFileProtocol {
     static let maximumInlineFileLength = 64 * 1024
     static let maximumInlineDirectoryLength = 512 * 1024
     static let maximumInlineDirectoryFileCount = 256
+    static let mountInstanceQueryName = "mount_instance"
 
     static func shareBasePath(id: UUID) -> String {
         "/v1/shares/\(id.uuidString.lowercased())"
+    }
+
+    /// FSKit uses the resource and volume identifiers to serialize work. Give
+    /// every network mount a connection-specific UUID so a dead mount cannot
+    /// leave a later connection to the same share permanently EBUSY.
+    ///
+    /// Although FSKit also exposes an eight-byte identifier qualifier for this
+    /// purpose, macOS 26.4 drops it during the final LiveFS connector lookup.
+    /// A plain UUID survives that handoff intact.
+    static func mountInstanceID(from url: URL) -> UUID? {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let value = components.queryItems?.first(where: {
+                  $0.name == mountInstanceQueryName
+              })?.value else { return nil }
+        return UUID(uuidString: value)
     }
 }
 

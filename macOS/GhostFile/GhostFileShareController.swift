@@ -11,6 +11,11 @@ final class GhostFileShareController: ObservableObject {
     @Published var errorMessage: String?
 
     private var isAccessingSecurityScopedFolder = false
+    private static let selectedFolderBookmarkKey = "GhostFile.selectedFolderBookmark"
+
+    init() {
+        restoreSelectedFolder()
+    }
 
     func chooseFolder() {
         let panel = NSOpenPanel()
@@ -21,6 +26,7 @@ final class GhostFileShareController: ObservableObject {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         selectedFolder = url
+        persistSelectedFolder(url)
         if shareName == "DemoShare" || shareName.isEmpty {
             shareName = url.lastPathComponent
         }
@@ -80,5 +86,41 @@ final class GhostFileShareController: ObservableObject {
     func copy(_ value: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
+    }
+
+    private func persistSelectedFolder(_ url: URL) {
+        do {
+            let bookmark = try url.bookmarkData(
+                options: [],
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            UserDefaults.standard.set(bookmark, forKey: Self.selectedFolderBookmarkKey)
+        } catch {
+            errorMessage = "Unable to remember the shared folder: \(error.localizedDescription)"
+        }
+    }
+
+    private func restoreSelectedFolder() {
+        guard let bookmark = UserDefaults.standard.data(forKey: Self.selectedFolderBookmarkKey) else {
+            return
+        }
+        do {
+            var stale = false
+            let url = try URL(
+                resolvingBookmarkData: bookmark,
+                options: [],
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            )
+            selectedFolder = url
+            shareName = url.lastPathComponent
+            if stale {
+                persistSelectedFolder(url)
+            }
+        } catch {
+            UserDefaults.standard.removeObject(forKey: Self.selectedFolderBookmarkKey)
+            errorMessage = "Choose the shared folder again; its saved permission is no longer valid."
+        }
     }
 }

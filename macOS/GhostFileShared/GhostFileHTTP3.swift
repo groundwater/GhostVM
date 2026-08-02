@@ -4,6 +4,9 @@ import GhostHTTP3
 import Network
 
 final class GhostFileHTTP3Connection: @unchecked Sendable {
+    static let h3NoError: UInt64 = 0x0100
+    static let h3InternalError: UInt64 = 0x0102
+
     private static let maximumUDPPayloadSize: Int = {
         guard let rawValue = ProcessInfo.processInfo.environment["GHOSTFILE_HTTP3_UDP_PAYLOAD_SIZE"],
               let value = Int(rawValue), (1_200...65_527).contains(value) else {
@@ -45,6 +48,10 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
     private var quicConnection: OpaquePointer?
     private var http3Connection: OpaquePointer?
     private var currentEvent: OpaquePointer?
+    // Reuse one receive buffer per QUIC connection. Every caller confines a
+    // GhostFileHTTP3Connection to its connection actor, so this storage is
+    // never accessed concurrently.
+    private var receiveScratchBuffer = Data(count: 64 * 1024)
     private var pendingResponses: [UInt64: PendingHTTP3Response] = [:]
     private var peerTerminatedResponseStreamIDs: [UInt64] = []
     private var failedResponseStreamIDs: [UInt64] = []
@@ -92,6 +99,12 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         quiche_config_set_max_idle_timeout(quicConfiguration, 60_000)
         quiche_config_set_max_recv_udp_payload_size(quicConfiguration, Self.maximumUDPPayloadSize)
         quiche_config_set_max_send_udp_payload_size(quicConfiguration, Self.maximumUDPPayloadSize)
+        // Start application traffic at QUIC's guaranteed 1200-byte datagram
+        // size and probe upward before using the configured maximum. Without
+        // DPLPMTUD, a path that carries the 1200-byte handshake but drops our
+        // former 1350-byte data packets becomes a permanent MTU black hole.
+        // This is common across VM bridges, VPNs, and IPv6 paths.
+        quiche_config_discover_pmtu(quicConfiguration, true)
         quiche_config_set_initial_max_data(quicConfiguration, 64 * 1024 * 1024)
         quiche_config_set_initial_max_stream_data_bidi_local(quicConfiguration, 2 * 1024 * 1024)
         quiche_config_set_initial_max_stream_data_bidi_remote(quicConfiguration, 2 * 1024 * 1024)
@@ -162,6 +175,32 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         return quiche_conn_is_closed(quicConnection)
     }
 
+    var isClosedOrDraining: Bool {
+        guard let quicConnection else { return false }
+        return quiche_conn_is_closed(quicConnection) || quiche_conn_is_draining(quicConnection)
+    }
+
+    var peerConnectionError: (isApplication: Bool, code: UInt64, reason: String)? {
+        guard let quicConnection else { return nil }
+        var isApplication = false
+        var code: UInt64 = 0
+        var reasonPointer: UnsafePointer<UInt8>?
+        var reasonLength = 0
+        guard quiche_conn_peer_error(
+            quicConnection,
+            &isApplication,
+            &code,
+            &reasonPointer,
+            &reasonLength
+        ) else {
+            return nil
+        }
+        let reason = reasonPointer.map {
+            String(decoding: UnsafeBufferPointer(start: $0, count: reasonLength), as: UTF8.self)
+        } ?? ""
+        return (isApplication, code, reason)
+    }
+
     var timeoutNanoseconds: UInt64? {
         guard let quicConnection else { return nil }
         let value = quiche_conn_timeout_as_nanos(quicConnection)
@@ -176,6 +215,26 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
     func handleTimeout() {
         guard let quicConnection else { return }
         quiche_conn_on_timeout(quicConnection)
+    }
+
+    func close(
+        applicationErrorCode: UInt64 = GhostFileHTTP3Connection.h3NoError,
+        reason: String = "share-stopped"
+    ) throws {
+        guard let quicConnection, !isClosedOrDraining else { return }
+        let reasonBytes = Array(reason.utf8)
+        let result = reasonBytes.withUnsafeBufferPointer { bytes in
+            quiche_conn_close(
+                quicConnection,
+                true,
+                applicationErrorCode,
+                bytes.baseAddress,
+                bytes.count
+            )
+        }
+        guard result == 0 else {
+            throw ConnectionError.connection("Unable to close the QUIC connection (\(result))")
+        }
     }
 
     func receive(_ datagram: Data) throws {
@@ -209,7 +268,7 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         try pumpResponseBodies()
     }
 
-    func nextDatagram() throws -> Data? {
+    func nextScheduledDatagram() throws -> GhostFileScheduledDatagram? {
         guard let quicConnection else { return nil }
         if Self.diagnosticsEnabled { diagnosticNextDatagramCalls += 1 }
         try pumpResponseBodies()
@@ -231,21 +290,27 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
             throw ConnectionError.connection("QUIC could not produce a UDP datagram (\(length))")
         }
         output.count = length
+        let nowNanoseconds = ghostFileMonotonicNanoseconds()
+        let rawSendNanoseconds = Int64(sendInfo.at.tv_sec) * 1_000_000_000
+            + Int64(sendInfo.at.tv_nsec)
+        let sendNanoseconds = rawSendNanoseconds > 0 ? UInt64(rawSendNanoseconds) : nowNanoseconds
         if Self.diagnosticsEnabled {
             diagnosticDatagrams += 1
             diagnosticDatagramBytes += length
-            var now = timespec()
-            clock_gettime(CLOCK_MONOTONIC, &now)
-            let nowNanoseconds = Int64(now.tv_sec) * 1_000_000_000 + Int64(now.tv_nsec)
-            let sendNanoseconds = Int64(sendInfo.at.tv_sec) * 1_000_000_000 + Int64(sendInfo.at.tv_nsec)
             if sendNanoseconds > nowNanoseconds {
-                let delay = UInt64(sendNanoseconds - nowNanoseconds)
+                let delay = sendNanoseconds - nowNanoseconds
                 diagnosticFuturePacingPackets += 1
                 diagnosticFuturePacingNanoseconds += delay
                 diagnosticMaximumPacingNanoseconds = max(diagnosticMaximumPacingNanoseconds, delay)
             }
         }
-        return output
+        return GhostFileScheduledDatagram(data: output, sendAtNanoseconds: sendNanoseconds)
+    }
+
+    // The in-memory protocol tests intentionally deliver datagrams without a
+    // wall clock. Production Network.framework callers use the scheduled API.
+    func nextDatagram() throws -> Data? {
+        try nextScheduledDatagram()?.data
     }
 
     func recordSendBatch(packetCount: Int, produceNanoseconds: UInt64, networkNanoseconds: UInt64) {
@@ -478,27 +543,41 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         }
     }
 
-    func receiveBody(streamID: UInt64) throws -> Data {
-        guard let quicConnection, let http3Connection else { return Data() }
-        var result = Data()
-        var buffer = Data(count: 64 * 1024)
+    func receiveBody(streamID: UInt64, into destination: inout Data) throws {
+        try drainReceivedBody(streamID: streamID) { bytes in
+            guard let baseAddress = bytes.baseAddress, !bytes.isEmpty else { return }
+            destination.append(baseAddress.assumingMemoryBound(to: UInt8.self), count: bytes.count)
+        }
+    }
+
+    func discardReceivedBody(streamID: UInt64) throws {
+        try drainReceivedBody(streamID: streamID) { _ in }
+    }
+
+    private func drainReceivedBody(
+        streamID: UInt64,
+        consume: (UnsafeRawBufferPointer) -> Void
+    ) throws {
+        guard let quicConnection, let http3Connection else { return }
         while true {
-            let count = buffer.withUnsafeMutableBytes { bytes in
-                Int(quiche_h3_recv_body(
+            let count = receiveScratchBuffer.withUnsafeMutableBytes { bytes -> Int in
+                let count = Int(quiche_h3_recv_body(
                     http3Connection,
                     quicConnection,
                     streamID,
                     bytes.bindMemory(to: UInt8.self).baseAddress,
                     bytes.count
                 ))
+                if count > 0 {
+                    consume(UnsafeRawBufferPointer(start: bytes.baseAddress, count: count))
+                }
+                return count
             }
             if count == Int(QUICHE_H3_ERR_DONE.rawValue) { break }
             guard count >= 0 else {
                 throw ConnectionError.http3("Unable to receive an HTTP/3 body (\(count))")
             }
-            result.append(buffer.prefix(count))
         }
-        return result
     }
 
     private func acceptInitial(_ datagram: Data) throws {
@@ -688,6 +767,17 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
     }
 }
 
+struct GhostFileScheduledDatagram: Sendable {
+    let data: Data
+    let sendAtNanoseconds: UInt64
+}
+
+func ghostFileMonotonicNanoseconds() -> UInt64 {
+    var now = timespec()
+    clock_gettime(CLOCK_MONOTONIC, &now)
+    return UInt64(now.tv_sec) * 1_000_000_000 + UInt64(now.tv_nsec)
+}
+
 private struct PendingHTTP3Response {
     let headers: [(String, String)]
     let expectedBodyLength: Int
@@ -791,7 +881,10 @@ enum GhostFileNetworkDatagram {
     static let maximumSendBatchCount: Int = {
         guard let rawValue = ProcessInfo.processInfo.environment["GHOSTFILE_HTTP3_SEND_BATCH_COUNT"],
               let value = Int(rawValue), (1...1_024).contains(value) else {
-            return 64
+            // Sixteen packets keeps Network.framework submissions bounded
+            // without sacrificing loopback throughput. The former 64-packet
+            // default produced avoidable ~86 KiB UDP bursts on real links.
+            return 16
         }
         return value
     }()

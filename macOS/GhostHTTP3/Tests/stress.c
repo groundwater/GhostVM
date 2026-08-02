@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define CID_LEN 16
 #define DATAGRAM_CAPACITY 65535
@@ -123,6 +124,16 @@ typedef struct {
     bool saw_content_length;
 } parsed_headers;
 
+static size_t future_pacing_packets = 0;
+
+static bool send_time_is_future(const struct timespec *send_time) {
+    struct timespec now;
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &now) == 0,
+          "could not read Darwin monotonic clock");
+    return send_time->tv_sec > now.tv_sec ||
+        (send_time->tv_sec == now.tv_sec && send_time->tv_nsec > now.tv_nsec);
+}
+
 static void make_address(struct sockaddr_storage *storage, socklen_t *length,
                          uint16_t port) {
     struct sockaddr_in *address = (struct sockaddr_in *) storage;
@@ -156,6 +167,12 @@ static quiche_config *make_config_with_stream_limit(bool server,
     quiche_config_set_max_idle_timeout(config, 30000);
     quiche_config_set_max_recv_udp_payload_size(config, 1350);
     quiche_config_set_max_send_udp_payload_size(config, 1350);
+    // BBR2 is enabled only in this in-memory framework test to force observable
+    // future deadlines and verify the packaged Darwin send-time conversion.
+    // GhostFile production traffic retains quiche's default CUBIC controller.
+    quiche_config_set_cc_algorithm(config, QUICHE_CC_BBR2_GCONGESTION);
+    quiche_config_enable_pacing(config, true);
+    quiche_config_set_max_pacing_rate(config, 64 * 1024);
     quiche_config_set_initial_max_data(config, 64 * 1024 * 1024);
     quiche_config_set_initial_max_stream_data_bidi_local(config, 2 * 1024 * 1024);
     quiche_config_set_initial_max_stream_data_bidi_remote(config, 2 * 1024 * 1024);
@@ -176,6 +193,8 @@ static ssize_t deliver_first_client_packet(test_pair *pair, uint8_t *packet,
     ssize_t length = quiche_conn_send(pair->client.quic, packet,
                                       DATAGRAM_CAPACITY, send_info);
     CHECK(length > 0, "client did not produce an Initial packet: %zd", length);
+    CHECK(send_info->at.tv_sec > 0 || send_info->at.tv_nsec > 0,
+          "quiche returned no usable send timestamp on Darwin");
 
     uint32_t version = 0;
     uint8_t type = 0;
@@ -243,6 +262,9 @@ static size_t transfer(endpoint *from, endpoint *to, bool reorder,
             }
             CHECK(length > 0, "QUIC packet generation failed: %zd", length);
             packet->length = (size_t) length;
+            if (send_time_is_future(&packet->send_info.at)) {
+                future_pacing_packets++;
+            }
             batch_count++;
         }
         if (batch_count == 0) {
@@ -873,8 +895,12 @@ int main(int argc, char **argv) {
     }
     drive_until_finished(&pair, &server, &client, large_first,
                          LARGE_REQUEST_COUNT, "parallel large bodies");
+    CHECK(future_pacing_packets > 0,
+          "quiche produced no future pacing deadlines during large responses");
     printf("PASS parallel bodies: %d x %d KiB verified byte-for-byte\n",
            LARGE_REQUEST_COUNT, LARGE_BODY_LENGTH / 1024);
+    printf("PASS Darwin pacing timestamps: %zu future packet deadlines observed\n",
+           future_pacing_packets);
 
     size_t cancelled = client_send(&pair, &client, "/cancel",
                                     CANCEL_BODY_LENGTH, 0xc1, true, false,

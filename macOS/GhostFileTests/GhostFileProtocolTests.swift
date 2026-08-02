@@ -4,6 +4,22 @@ import XCTest
 @testable import GhostFile
 
 final class GhostFileProtocolTests: XCTestCase {
+    func testMountInstancesIdentifyOtherwiseIdenticalNetworkVolumes() throws {
+        let first = UUID(uuidString: "11111111-2222-3333-4444-555555555555")!
+        let second = UUID(uuidString: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")!
+        let base = "ghostfile://example.local:443/v1/shares/99999999-8888-7777-6666-555555555555"
+        let firstURL = try XCTUnwrap(URL(string: "\(base)?mount_instance=\(first.uuidString)"))
+        let secondURL = try XCTUnwrap(URL(string: "\(base)?mount_instance=\(second.uuidString)"))
+
+        XCTAssertEqual(GhostFileProtocol.mountInstanceID(from: firstURL), first)
+        XCTAssertEqual(GhostFileProtocol.mountInstanceID(from: secondURL), second)
+        XCTAssertNotEqual(
+            GhostFileProtocol.mountInstanceID(from: firstURL),
+            GhostFileProtocol.mountInstanceID(from: secondURL)
+        )
+        XCTAssertNil(GhostFileProtocol.mountInstanceID(from: try XCTUnwrap(URL(string: base))))
+    }
+
     func testRelativePathValidationRejectsEscapes() {
         XCTAssertEqual(GhostFilePath.validatedComponents("folder/file.txt"), ["folder", "file.txt"])
         XCTAssertEqual(GhostFilePath.validatedComponents(""), [])
@@ -24,6 +40,38 @@ final class GhostFileProtocolTests: XCTestCase {
         )
         XCTAssertNil(GhostFileByteRange.parse("bytes=20-30", fileSize: 20, maximumLength: 8))
         XCTAssertNil(GhostFileByteRange.parse("items=0-1", fileSize: 20, maximumLength: 8))
+    }
+}
+
+final class GhostFileBonjourLeaseTests: XCTestCase {
+    func testAdvertisedTTLIsShortAndHeartbeatRefreshesBeforeExpiry() {
+        XCTAssertEqual(GhostFileBonjourLease.advertisedTTL, 6)
+        XCTAssertLessThan(
+            GhostFileBonjourLease.heartbeatInterval,
+            .seconds(GhostFileBonjourLease.advertisedTTL)
+        )
+    }
+
+    func testTTLParsingBoundsUntrustedAdvertisements() {
+        XCTAssertEqual(GhostFileBonjourLease.ttl(from: [:]), 15)
+        XCTAssertEqual(GhostFileBonjourLease.ttl(from: ["ttl": Data("1".utf8)]), 4)
+        XCTAssertEqual(GhostFileBonjourLease.ttl(from: ["ttl": Data("6".utf8)]), 6)
+        XCTAssertEqual(GhostFileBonjourLease.ttl(from: ["ttl": Data("600".utf8)]), 60)
+        XCTAssertEqual(GhostFileBonjourLease.ttl(from: ["ttl": Data("invalid".utf8)]), 15)
+    }
+
+    func testLeaseExpiresAtAdvertisedTTL() {
+        let lastSeen = Date(timeIntervalSince1970: 1_000)
+        XCTAssertFalse(GhostFileBonjourLease.isExpired(
+            lastSeen: lastSeen,
+            ttl: 6,
+            now: Date(timeIntervalSince1970: 1_005.999)
+        ))
+        XCTAssertTrue(GhostFileBonjourLease.isExpired(
+            lastSeen: lastSeen,
+            ttl: 6,
+            now: Date(timeIntervalSince1970: 1_006)
+        ))
     }
 }
 
