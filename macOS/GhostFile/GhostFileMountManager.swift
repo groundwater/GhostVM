@@ -195,7 +195,7 @@ final class GhostFileMountManager: ObservableObject {
                 removesMountPointOnUnmount = false
             } else {
                 let mountRoot = FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent("GhostFile Mounts", isDirectory: true)
+                    .appendingPathComponent("GhostFiles", isDirectory: true)
                 try FileManager.default.createDirectory(at: mountRoot, withIntermediateDirectories: true)
                 let safeName = sanitizedVolumeName(volumeName)
                 mountPoint = uniqueMountPoint(root: mountRoot, name: safeName)

@@ -230,7 +230,7 @@ private struct GhostFileMountView: View {
                     TextField("Volume name", text: $volumeName)
                     LabeledContent("Mount point") {
                         HStack {
-                            Text(mountPoint?.path ?? "Automatic — ~/GhostFile Mounts")
+                            Text(mountPoint?.path ?? "Automatic — ~/GhostFiles")
                                 .foregroundStyle(mountPoint == nil ? .secondary : .primary)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
