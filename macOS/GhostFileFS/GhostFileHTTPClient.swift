@@ -329,9 +329,13 @@ actor GhostFileHTTP3Transport {
             grantAvailableStreamCredits()
             throw error
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            pending[streamID] = PendingResponse(continuation: continuation)
-            Task { await self.flushOutgoing() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                pending[streamID] = PendingResponse(continuation: continuation)
+                Task { await self.flushOutgoing() }
+            }
+        } onCancel: {
+            Task { await self.cancelPendingRequest(streamID: streamID) }
         }
     }
 
@@ -583,6 +587,13 @@ actor GhostFileHTTP3Transport {
         http3.handleTimeout()
         await flushOutgoing()
         if http3.isClosed { fail(TransportError.closed) }
+    }
+
+    private func cancelPendingRequest(streamID: UInt64) async {
+        guard let response = pending.removeValue(forKey: streamID) else { return }
+        http3.cancelRequest(streamID: streamID)
+        response.continuation.resume(throwing: CancellationError())
+        await flushOutgoing()
     }
 
     private func fail(_ error: Error) {

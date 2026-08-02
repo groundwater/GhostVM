@@ -356,6 +356,22 @@ final class GhostFileHTTP3Connection: @unchecked Sendable {
         return UInt64(streamID)
     }
 
+    func cancelRequest(streamID: UInt64, errorCode: UInt64 = 0x010c) {
+        guard let quicConnection else { return }
+        _ = quiche_conn_stream_shutdown(
+            quicConnection,
+            streamID,
+            QUICHE_SHUTDOWN_READ,
+            errorCode
+        )
+        _ = quiche_conn_stream_shutdown(
+            quicConnection,
+            streamID,
+            QUICHE_SHUTDOWN_WRITE,
+            errorCode
+        )
+    }
+
     func sendResponse(streamID: UInt64, headers: [(String, String)], body: Data) throws {
         try beginResponse(streamID: streamID, headers: headers, contentLength: body.count)
         guard !body.isEmpty else { return }

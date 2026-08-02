@@ -310,6 +310,81 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         XCTAssertTrue(statuses.allSatisfy { $0 == 200 })
     }
 
+    func testCancellingOpenedRequestFinishesPromptly() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-quic-cancellation-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try Data("cancel me".utf8).write(to: fixture.appendingPathComponent("cancel.txt"))
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let gate = GhostFileRequestGate()
+        let accessKey = "quic-cancellation-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileHTTP3Cancellation-\(UUID().uuidString)",
+                accessKey: accessKey,
+                requestDelay: { request in
+                    guard request.operation == "metadata", request.path == "cancel.txt" else { return }
+                    await gate.wait()
+                }
+            )
+            try server.start()
+            return server
+        }
+        defer {
+            Task {
+                await gate.open()
+                await MainActor.run { server.stop() }
+            }
+        }
+
+        let shareURL = try await waitForShareURL(server)
+        guard let portNumber = shareURL.port,
+              let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
+              let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
+              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+            throw TestError.missingShareURL
+        }
+        let transport = try GhostFileHTTP3Transport(
+            host: "127.0.0.1",
+            port: port,
+            accessKey: accessKey,
+            publicKeyPin: pin,
+            resourceBasePath: shareURL.path
+        )
+
+        let completed = expectation(description: "cancelled HTTP/3 request completed")
+        let requestTask = Task { () -> GhostFileCancellationOutcome in
+            defer { completed.fulfill() }
+            do {
+                _ = try await transport.request(
+                    operation: "metadata",
+                    relativePath: "cancel.txt",
+                    offset: nil,
+                    length: nil
+                )
+                return .succeeded
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .failed(String(describing: error))
+            }
+        }
+
+        await gate.waitForArrival()
+        let clock = ContinuousClock()
+        let cancelledAt = clock.now
+        requestTask.cancel()
+        await fulfillment(of: [completed], timeout: 0.5)
+        let cancellationLatency = cancelledAt.duration(to: clock.now)
+
+        await gate.open()
+        let outcome = await requestTask.value
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertLessThan(cancellationLatency, .milliseconds(500))
+    }
+
     private enum TestError: Error {
         case missingShareURL
         case responseMismatch
@@ -384,11 +459,24 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
 
 private actor GhostFileRequestGate {
     private var isOpen = false
+    private var hasArrival = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var arrivalWaiters: [CheckedContinuation<Void, Never>] = []
 
     func wait() async {
+        if !hasArrival {
+            hasArrival = true
+            let currentArrivalWaiters = arrivalWaiters
+            arrivalWaiters.removeAll()
+            currentArrivalWaiters.forEach { $0.resume() }
+        }
         guard !isOpen else { return }
         await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func waitForArrival() async {
+        guard !hasArrival else { return }
+        await withCheckedContinuation { arrivalWaiters.append($0) }
     }
 
     func open() {
@@ -397,4 +485,10 @@ private actor GhostFileRequestGate {
         waiters.removeAll()
         currentWaiters.forEach { $0.resume() }
     }
+}
+
+private enum GhostFileCancellationOutcome: Equatable {
+    case succeeded
+    case cancelled
+    case failed(String)
 }
