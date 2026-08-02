@@ -261,8 +261,8 @@ actor GhostFileHTTP3Transport {
     private var isNetworkReady = false
     private var hasValidatedPeer = false
     private var terminalError: Error?
-    private var readyWaiters: [CheckedContinuation<Void, Error>] = []
-    private var handshakeWaiters: [CheckedContinuation<Void, Error>] = []
+    private var readyWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
+    private var handshakeWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var pending: [UInt64: PendingResponse] = [:]
     private var streamCreditWaiters: [PendingStreamCredit] = []
     private var reservedStreamCredits: UInt64 = 0
@@ -347,14 +347,44 @@ actor GhostFileHTTP3Transport {
     }
 
     private func ensureHTTP3Ready() async throws {
+        try Task.checkCancellation()
         if let terminalError { throw terminalError }
         if !hasStarted { start() }
-        if !isNetworkReady {
-            try await withCheckedThrowingContinuation { readyWaiters.append($0) }
+        try await waitForNetworkReady()
+        try Task.checkCancellation()
+        try await waitForValidatedPeer()
+    }
+
+    private func waitForNetworkReady() async throws {
+        guard !isNetworkReady else { return }
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                readyWaiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task { await self.cancelNetworkReadyWaiter(id: waiterID) }
         }
-        if !hasValidatedPeer {
-            try await withCheckedThrowingContinuation { handshakeWaiters.append($0) }
+    }
+
+    private func waitForValidatedPeer() async throws {
+        guard !hasValidatedPeer else { return }
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                handshakeWaiters[waiterID] = continuation
+            }
+        } onCancel: {
+            Task { await self.cancelHandshakeWaiter(id: waiterID) }
         }
+    }
+
+    private func cancelNetworkReadyWaiter(id: UUID) {
+        readyWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
+    }
+
+    private func cancelHandshakeWaiter(id: UUID) {
+        handshakeWaiters.removeValue(forKey: id)?.resume(throwing: CancellationError())
     }
 
     private func start() {
@@ -404,7 +434,7 @@ actor GhostFileHTTP3Transport {
             isNetworkReady = true
             let waiters = readyWaiters
             readyWaiters.removeAll()
-            waiters.forEach { $0.resume() }
+            waiters.values.forEach { $0.resume() }
             await flushOutgoing()
         case .failed(let error):
             fail(error)
@@ -432,7 +462,7 @@ actor GhostFileHTTP3Transport {
                     hasValidatedPeer = true
                     let waiters = handshakeWaiters
                     handshakeWaiters.removeAll()
-                    waiters.forEach { $0.resume() }
+                    waiters.values.forEach { $0.resume() }
                 }
                 try processEvents()
                 grantAvailableStreamCredits()
@@ -600,8 +630,8 @@ actor GhostFileHTTP3Transport {
         guard terminalError == nil else { return }
         NSLog("GhostFile HTTP/3 transport failed: %@", String(describing: error))
         terminalError = error
-        readyWaiters.forEach { $0.resume(throwing: error) }
-        handshakeWaiters.forEach { $0.resume(throwing: error) }
+        readyWaiters.values.forEach { $0.resume(throwing: error) }
+        handshakeWaiters.values.forEach { $0.resume(throwing: error) }
         readyWaiters.removeAll()
         handshakeWaiters.removeAll()
         for response in pending.values { response.continuation.resume(throwing: error) }
@@ -613,6 +643,10 @@ actor GhostFileHTTP3Transport {
         streamCreditWaiters.removeAll()
         timeoutTask?.cancel()
         connection.cancel()
+    }
+
+    func invalidateForTesting() {
+        fail(TransportError.closed)
     }
 
     private nonisolated static func pin(for bytes: Data) -> String {

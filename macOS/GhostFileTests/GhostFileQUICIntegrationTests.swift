@@ -4,6 +4,71 @@ import XCTest
 @testable import GhostFile
 
 final class GhostFileHTTP3IntegrationTests: XCTestCase {
+    func testCancellingRequestDuringQUICHandshakeFinishesPromptly() async throws {
+        let queue = DispatchQueue(label: "org.ghostvm.ghostfile.tests.cancel-handshake-udp")
+        let listener = try NWListener(using: .udp, on: .any)
+        let ready = expectation(description: "silent UDP listener ready")
+        let receivedInitialDatagram = expectation(description: "silent peer received initial QUIC datagram")
+        listener.stateUpdateHandler = { state in
+            if case .ready = state { ready.fulfill() }
+        }
+        listener.newConnectionHandler = { connection in
+            // A UDP listener creates this flow only after the client's first
+            // datagram arrives. Keep the peer silent so the QUIC handshake
+            // remains pending at a deterministic cancellation point.
+            receivedInitialDatagram.fulfill()
+            connection.start(queue: queue)
+        }
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+        await fulfillment(of: [ready], timeout: 2)
+        guard let port = listener.port else { throw TestError.missingShareURL }
+
+        let transport = try GhostFileHTTP3Transport(
+            host: "127.0.0.1",
+            port: port,
+            accessKey: "cancel-handshake-test",
+            publicKeyPin: "not-a-real-pin",
+            resourceBasePath: "/v1/shares/00000000-0000-0000-0000-000000000001"
+        )
+
+        let completed = expectation(description: "handshake-waiting request completed after cancellation")
+        let requestTask = Task { () -> GhostFileCancellationOutcome in
+            defer { completed.fulfill() }
+            do {
+                _ = try await transport.request(
+                    operation: "capabilities",
+                    relativePath: nil,
+                    offset: nil,
+                    length: nil
+                )
+                return .succeeded
+            } catch is CancellationError {
+                return .cancelled
+            } catch {
+                return .failed(String(describing: error))
+            }
+        }
+
+        await fulfillment(of: [receivedInitialDatagram], timeout: 2)
+        let clock = ContinuousClock()
+        let cancelledAt = clock.now
+        requestTask.cancel()
+        await fulfillment(of: [completed], timeout: 0.5)
+        let cancellationLatency = cancelledAt.duration(to: clock.now)
+
+        // Unblock the deliberately broken implementation after the timeout
+        // assertion instead of waiting for the QUIC idle timeout.
+        await transport.invalidateForTesting()
+        let outcome = await requestTask.value
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertLessThan(
+            cancellationLatency,
+            .milliseconds(500),
+            "Caller cancellation remained stuck in QUIC handshake readiness"
+        )
+    }
+
     func testSmallFileInlineCacheExpiresAndRefreshes() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("ghostfile-cache-tests-\(UUID().uuidString)", isDirectory: true)
