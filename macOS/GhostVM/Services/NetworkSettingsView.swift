@@ -65,11 +65,12 @@ struct NetworkSettingsView: View {
 
 @available(macOS 13.0, *)
 struct HostContainerSettingsView: View {
+    @EnvironmentObject private var fileSystemExtensionManager: GhostVMFSExtensionManager
     @Binding var isEnabled: Bool
     let networkMode: NetworkMode
     let accessibilityIdentifier: String
 
-    @State private var fileSystemExtensionEnabled: Bool?
+    @State private var showingFileSystemExtensionAssistant = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -92,14 +93,11 @@ struct HostContainerSettingsView: View {
 
                 Text(fileSystemExtensionStatus)
                     .font(.caption)
-                    .foregroundStyle(fileSystemExtensionEnabled == false ? Color.orange : Color.secondary)
+                    .foregroundStyle(fileSystemExtensionManager.health.requiresAttention ? Color.orange : Color.secondary)
 
-                if fileSystemExtensionEnabled == false {
-                    Button("Open System Settings…") {
-                        guard let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") else {
-                            return
-                        }
-                        NSWorkspace.shared.open(url)
+                if fileSystemExtensionManager.health.requiresAttention {
+                    Button("Set Up / Repair File System Extension...") {
+                        showingFileSystemExtensionAssistant = true
                     }
                     .font(.caption)
                 }
@@ -107,9 +105,10 @@ struct HostContainerSettingsView: View {
         }
         .task(id: isEnabled) {
             guard isEnabled else { return }
-            fileSystemExtensionEnabled = await Task.detached(priority: .utility) {
-                GuestVolumeMount.extensionIsEnabled()
-            }.value
+            await fileSystemExtensionManager.refresh()
+        }
+        .sheet(isPresented: $showingFileSystemExtensionAssistant) {
+            GhostVMFSExtensionAssistantView(manager: fileSystemExtensionManager)
         }
         .onChange(of: networkMode) { _, newMode in
             if newMode != .nat {
@@ -119,13 +118,13 @@ struct HostContainerSettingsView: View {
     }
 
     private var fileSystemExtensionStatus: String {
-        switch fileSystemExtensionEnabled {
-        case true:
+        switch fileSystemExtensionManager.health {
+        case .ready:
             return "File System Extension: Enabled"
-        case false:
+        case .checking:
+            return "File System Extension: Checking..."
+        default:
             return "File System Extension: Not Enabled"
-        case nil:
-            return "File System Extension: Checking…"
         }
     }
 }

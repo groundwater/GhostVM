@@ -18,6 +18,21 @@
 	<dict>
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.fskit.fsmodule</string>
+		<key>FSActivateOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>g:m:o:u:</string>
+		</dict>
+		<key>FSCheckOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>nqy</string>
+		</dict>
+		<key>FSFormatOptionSyntax</key>
+		<dict>
+			<key>shortOptions</key>
+			<string>v</string>
+		</dict>
 		<key>FSMediaTypes</key>
 		<dict/>
 		<key>FSPersonalities</key>
@@ -36,7 +51,7 @@
 		<string>ghostvm</string>
 		<key>FSSupportedSchemes</key>
 		<array>
-			<string>ghostvm</string>
+			<string>ghostfile</string>
 		</array>
 		<key>FSSupportsBlockResources</key>
 		<false/>

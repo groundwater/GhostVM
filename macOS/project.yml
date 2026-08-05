@@ -376,6 +376,8 @@ targets:
         excludes:
           - "*.plist"
     dependencies:
+      - package: GhostHTTP
+        embed: true
       - sdk: FSKit.framework
       - sdk: ExtensionFoundation.framework
     settings:
@@ -449,6 +451,7 @@ targets:
     platform: macOS
     sources:
       - path: GhostVMTests
+      - path: GhostVM/Services/GhostVMFSExtensionManager.swift
     dependencies:
       - target: GhostVMKit
     settings:

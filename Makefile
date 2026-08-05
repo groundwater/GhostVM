@@ -33,6 +33,7 @@ XCODE_ALLOW_PROVISIONING_UPDATES ?= 1
 # Xcode project settings (generated via xcodegen)
 XCODE_PROJECT = macOS/GhostVM.xcodeproj
 XCODE_CONFIG ?= Release
+DEBUG_DMG_CONFIGURATION ?= Release
 BUILD_DIR ?= build/xcode
 APP_NAME = GhostVM
 VERSION_FILE = .version
@@ -741,6 +742,20 @@ dist:
 		fi; \
 	done
 	@# 4b. Sign the FSKit extension before signing its containing app.
+	@FOUND_GHOST_HTTP=0; for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/Frameworks/"GhostHTTP_*.framework; do \
+		if [ -d "$$fw" ]; then FOUND_GHOST_HTTP=1; fi; \
+	done; \
+	if [ "$$FOUND_GHOST_HTTP" != "1" ]; then \
+		echo "ERROR: GhostVMFS is missing its GhostHTTP package framework"; exit 1; \
+	fi
+	@test ! -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/MacOS/GhostVMFS.debug.dylib" || \
+		(echo "ERROR: GhostVMFS was packaged from a Debug build"; exit 1)
+	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/Frameworks/"*.framework; do \
+		if [ -d "$$fw" ]; then \
+			echo "  Signing $$(basename $$fw) (in GhostVMFS)"; \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$fw"; \
+		fi; \
+	done
 	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/MacOS/"*.dylib; do \
 		if [ -f "$$dylib" ]; then \
 			echo "  Signing $$(basename $$dylib) (in GhostVMFS)"; \
@@ -859,46 +874,50 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	hdiutil create -volname "GhostTools" \
 		-srcfolder "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage" \
 		-ov -format $(GHOSTTOOLS_DMG_FORMAT) "$(GHOSTTOOLS_DMG)"
-	@# Build app + cli (debug)
+	@# Use Release products even for the timestamped debug DMG. A Debug FSKit
+	@# extension contains Xcode trampoline dylibs and is not a distributable module.
 	@$(MAKE) --no-print-directory prepare-app-plists INJECT_TIMESTAMP=1 BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
-	xcodebuild -project $(XCODE_PROJECT) -scheme $(APP_NAME) -configuration Debug -derivedDataPath $(BUILD_DIR) \
+	xcodebuild -project $(XCODE_PROJECT) -scheme $(APP_NAME) -configuration $(DEBUG_DMG_CONFIGURATION) -derivedDataPath $(BUILD_DIR) \
 		CODE_SIGN_STYLE=Manual \
 		CODE_SIGN_IDENTITY=- \
 		DEVELOPMENT_TEAM= \
 		CODE_SIGNING_ALLOWED=NO \
 		CODE_SIGNING_REQUIRED=NO \
 		build
-	xcodebuild -project $(XCODE_PROJECT) -scheme vmctl -configuration Debug -derivedDataPath $(BUILD_DIR) \
+	xcodebuild -project $(XCODE_PROJECT) -scheme vmctl -configuration $(DEBUG_DMG_CONFIGURATION) -derivedDataPath $(BUILD_DIR) \
 		CODE_SIGN_STYLE=Manual \
 		CODE_SIGN_IDENTITY=- \
 		DEVELOPMENT_TEAM= \
 		CODE_SIGNING_ALLOWED=NO \
 		CODE_SIGNING_REQUIRED=NO \
 		build
-	@# Copy resources into debug app
-	@mkdir -p "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources"
-	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
-	@cp macOS/GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
-	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
-	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app/Contents/Resources/"
+	@# Copy resources into the timestamped app.
+	@mkdir -p "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app/Contents/Resources"
+	@cp macOS/GhostVM/Resources/ghostvm.png "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app/Contents/Resources/"
+	@cp macOS/GhostVM/Resources/ghostvm-dark.png "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app/Contents/Resources/"
+	@cp build/GhostVMIcon.icns "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app/Contents/Resources/GhostVMIcon.icns"
+	@cp "$(GHOSTTOOLS_DMG)" "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app/Contents/Resources/"
 	@# Verify we have a real signing identity for distribution
 	@if [ -z "$(DIST_CODESIGN_ID)" ]; then \
 		echo "Error: No 'Developer ID Application' identity found in keychain."; \
 		exit 1; \
 	fi
-	@# Verify notarization credentials are set
-	@if [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; then \
-		echo "ERROR: Notarization requires NOTARY_APPLE_ID, NOTARY_TEAM_ID, and NOTARY_PASSWORD"; \
+	@# Verify notarization credentials are set unless a local-only artifact was requested.
+	@if [ "$(SKIP_NOTARIZATION)" != "1" ] && [ -z "$(NOTARY_KEYCHAIN_PROFILE)" ] && { [ -z "$(NOTARY_APPLE_ID)" ] || [ -z "$(NOTARY_TEAM_ID)" ] || [ -z "$(NOTARY_PASSWORD)" ]; }; then \
+		echo "ERROR: Notarization requires NOTARY_KEYCHAIN_PROFILE or Apple ID credentials."; \
+		echo "Set SKIP_NOTARIZATION=1 to create a signed local-testing DMG."; \
 		exit 1; \
 	fi
-	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE) $(VMCTL_PROVISIONING_PROFILE)
+	@scripts/verify-profile-cert.sh "$(DIST_CODESIGN_ID)" $(APP_PROVISIONING_PROFILE) $(HELPER_PROVISIONING_PROFILE) $(VMCTL_PROVISIONING_PROFILE) $(FSKIT_PROVISIONING_PROFILE)
 	$(eval DEBUG_VERSION := $(strip $(shell echo $(BASE_VERSION) | sed 's/\.[^.]*$$//')).$(BUILD_TIMESTAMP))
 	@echo "Creating debug DMG (version $(DEBUG_VERSION))..."
 	@echo "Signing with: $(DIST_CODESIGN_ID)"
 	@rm -rf "$(DIST_DIR)"
 	@mkdir -p "$(DIST_DIR)/dmg-stage"
-	cp -R "$(BUILD_DIR)/Build/Products/Debug/$(APP_NAME).app" "$(DIST_DIR)/dmg-stage/"
-	cp -R "$(BUILD_DIR)/Build/Products/Debug/vmctl.app" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/"
+	cp -R "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app" "$(DIST_DIR)/dmg-stage/"
+	cp -R "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/vmctl.app" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/"
+	@pluginkit -r "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex" >/dev/null 2>&1 || true
+	@"$(GHOSTFILE_LSREGISTER)" -u "$(BUILD_DIR)/Build/Products/$(DEBUG_DMG_CONFIGURATION)/$(APP_NAME).app" >/dev/null 2>&1 || true
 	@if [ -n "$(HELPER_PROVISIONING_PROFILE)" ]; then \
 		test -f "$(HELPER_PROVISIONING_PROFILE)" || (echo "ERROR: HELPER_PROVISIONING_PROFILE not found: $(HELPER_PROVISIONING_PROFILE)" && exit 1); \
 		cp "$(HELPER_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/embedded.provisionprofile"; \
@@ -911,6 +930,10 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	@if [ -n "$(VMCTL_PROVISIONING_PROFILE)" ]; then \
 		test -f "$(VMCTL_PROVISIONING_PROFILE)" || (echo "ERROR: VMCTL_PROVISIONING_PROFILE not found: $(VMCTL_PROVISIONING_PROFILE)" && exit 1); \
 		cp "$(VMCTL_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/embedded.provisionprofile"; \
+	fi
+	@if [ -n "$(FSKIT_PROVISIONING_PROFILE)" ]; then \
+		test -f "$(FSKIT_PROVISIONING_PROFILE)" || (echo "ERROR: FSKIT_PROVISIONING_PROFILE not found: $(FSKIT_PROVISIONING_PROFILE)" && exit 1); \
+		cp "$(FSKIT_PROVISIONING_PROFILE)" "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/embedded.provisionprofile"; \
 	fi
 	@# Sign GhostVMHelper (frameworks, MacOS dylibs, then bundle)
 	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/PlugIns/Helpers/GhostVMHelper.app/Contents/Frameworks/"*.framework; do \
@@ -992,6 +1015,29 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
 		fi; \
 	done
+	@# Sign the FSKit extension before its containing app.
+	@FOUND_GHOST_HTTP=0; for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/Frameworks/"GhostHTTP_*.framework; do \
+		if [ -d "$$fw" ]; then FOUND_GHOST_HTTP=1; fi; \
+	done; \
+	if [ "$$FOUND_GHOST_HTTP" != "1" ]; then \
+		echo "ERROR: GhostVMFS is missing its GhostHTTP package framework"; exit 1; \
+	fi
+	@test ! -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/MacOS/GhostVMFS.debug.dylib" || \
+		(echo "ERROR: GhostVMFS was packaged from a Debug build"; exit 1)
+	@for fw in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/Frameworks/"*.framework; do \
+		if [ -e "$$fw" ]; then \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$fw"; \
+		fi; \
+	done
+	@for dylib in "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex/Contents/MacOS/"*.dylib; do \
+		if [ -e "$$dylib" ]; then \
+			codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$$dylib"; \
+		fi; \
+	done
+	codesign --force --options runtime --timestamp \
+		--entitlements macOS/GhostVMFS/entitlements.plist \
+		-s "$(DIST_CODESIGN_ID)" \
+		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex"
 	@# Re-sign GhostTools.dmg inside the app bundle
 	@mkdir -p "$(DIST_DIR)/ghosttools-stage"
 	@hdiutil attach "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" -mountpoint "$(DIST_DIR)/ghosttools-mount" -nobrowse
@@ -1024,13 +1070,20 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 		-ov -format UDZO "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg"
 	@rm -rf "$(DIST_DIR)/dmg-stage"
 	codesign --force --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg"
-	@# Notarize
-	xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg" \
-		--apple-id "$(NOTARY_APPLE_ID)" \
-		--team-id "$(NOTARY_TEAM_ID)" \
-		--password "$(NOTARY_PASSWORD)" \
-		--wait
-	xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg"
+	@# Notarize unless this is an explicitly local-only build.
+	@if [ "$(SKIP_NOTARIZATION)" = "1" ]; then \
+		echo "Skipping notarization (local-testing DMG)."; \
+	elif [ -n "$(NOTARY_KEYCHAIN_PROFILE)" ]; then \
+		xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg" \
+			--keychain-profile "$(NOTARY_KEYCHAIN_PROFILE)" --wait && \
+		xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg"; \
+	else \
+		xcrun notarytool submit "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg" \
+			--apple-id "$(NOTARY_APPLE_ID)" \
+			--team-id "$(NOTARY_TEAM_ID)" \
+			--password "$(NOTARY_PASSWORD)" --wait && \
+		xcrun stapler staple "$(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg"; \
+	fi
 	@echo "Debug distribution created: $(DIST_DIR)/$(DMG_NAME)-$(DEBUG_VERSION).dmg"
 	@echo "vmctl is at: $(APP_NAME).app/Contents/PlugIns/Helpers/vmctl.app/Contents/MacOS/vmctl"
 
