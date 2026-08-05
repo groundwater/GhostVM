@@ -99,7 +99,7 @@ public final class ContainerRunner: @unchecked Sendable {
     ///     pipes were drained to EOF, so no output is lost to a termination race.
     ///     Exit codes of signal-killed processes are reported as 128+signal.
     public func start(
-        onReady: @escaping () -> Void,
+        onReady: @escaping (String) -> Void,
         onOutput: @escaping (Stream, Data) -> Void,
         onExit: @escaping (Int32) -> Void
     ) throws {
@@ -175,7 +175,7 @@ public final class ContainerRunner: @unchecked Sendable {
     }
 
     private func fetchThenRun(
-        onReady: @escaping () -> Void,
+        onReady: @escaping (String) -> Void,
         onOutput: @escaping (Stream, Data) -> Void,
         onExit: @escaping (Int32) -> Void
     ) {
@@ -237,7 +237,7 @@ public final class ContainerRunner: @unchecked Sendable {
     }
 
     private func launchRuntime(
-        onReady: @escaping () -> Void,
+        onReady: @escaping (String) -> Void,
         onOutput: @escaping (Stream, Data) -> Void,
         onExit: @escaping (Int32) -> Void
     ) {
@@ -292,7 +292,8 @@ public final class ContainerRunner: @unchecked Sendable {
                 stdoutFD: stdoutPipe.fileHandleForWriting.fileDescriptor,
                 stderrFD: stderrPipe.fileHandleForWriting.fileDescriptor,
                 onReady: {
-                    onReady()
+                    let address = lease.ipv4Address.split(separator: "/", maxSplits: 1).first.map(String.init) ?? lease.ipv4Address
+                    onReady(address)
                 },
                 onExit: { status in
                     DispatchQueue.global(qos: .userInitiated).async {

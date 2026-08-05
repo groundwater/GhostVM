@@ -8,7 +8,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "GhostTools", targets: ["GhostTools"]),
-        .executable(name: "ghost-container", targets: ["ghost-container"])
+        .executable(name: "ghostbox", targets: ["ghostbox"])
     ],
     dependencies: [
         .package(path: "../../Packages/GhostHTTP")
@@ -25,13 +25,13 @@ let package = Package(
                 "CPty",
                 .product(name: "GhostHTTP", package: "GhostHTTP"),
             ],
-            exclude: ["Resources/Info.plist", "Resources/Info.template.plist", "Resources/entitlements.plist"],
+            exclude: ["Resources/Info.template.plist", "Resources/entitlements.plist"],
             linkerSettings: [
                 .unsafeFlags(["-Xlinker", "-sectcreate", "-Xlinker", "__TEXT", "-Xlinker", "__info_plist", "-Xlinker", "../../build/generated-plists/GhostTools-Info.plist"], .when(configuration: .release))
             ]
         ),
         .executableTarget(
-            name: "ghost-container",
+            name: "ghostbox",
             dependencies: []
         ),
         .testTarget(
@@ -41,8 +41,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "GhostContainerTests",
-            dependencies: ["ghost-container"]
+            name: "GhostboxTests",
+            dependencies: ["ghostbox"]
         )
     ]
 )

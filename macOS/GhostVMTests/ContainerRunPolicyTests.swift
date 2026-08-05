@@ -12,7 +12,12 @@ final class ContainerRunPolicyTests: XCTestCase {
         tty: Bool? = nil,
         columns: UInt16? = nil,
         rows: UInt16? = nil,
-        volumes: [ContainerRunVolume]? = nil
+        volumes: [ContainerRunVolume]? = nil,
+        environment: [String]? = nil,
+        workingDirectory: String? = nil,
+        user: String? = nil,
+        cpus: Int? = nil,
+        memoryBytes: UInt64? = nil
     ) -> ContainerRunRequest {
         ContainerRunRequest(
             version: version,
@@ -23,7 +28,12 @@ final class ContainerRunPolicyTests: XCTestCase {
             tty: tty,
             columns: columns,
             rows: rows,
-            volumes: volumes
+            volumes: volumes,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            user: user,
+            cpus: cpus,
+            memoryBytes: memoryBytes
         )
     }
 
@@ -57,7 +67,7 @@ final class ContainerRunPolicyTests: XCTestCase {
         XCTAssertTrue(run.attachStdin)
         XCTAssertEqual(
             run.containerArguments(vmHash: "12345", uniqueSuffix: "abcd1234"),
-            ["run", "-i", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "cat"]
+            ["run", "-i", "--cpus", "2", "--memory-bytes", "1073741824", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "cat"]
         )
     }
 
@@ -76,7 +86,7 @@ final class ContainerRunPolicyTests: XCTestCase {
         XCTAssertEqual(run.terminalRows, 40)
         XCTAssertEqual(
             run.containerArguments(vmHash: "12345", uniqueSuffix: "abcd1234"),
-            ["run", "-i", "-t", "--tty-size", "120", "40", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "/bin/sh"]
+            ["run", "-i", "-t", "--tty-size", "120", "40", "--cpus", "2", "--memory-bytes", "1073741824", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "/bin/sh"]
         )
     }
 
@@ -89,6 +99,26 @@ final class ContainerRunPolicyTests: XCTestCase {
         let volume = ContainerRunVolume(guestPath: "/home/user/src", destination: "/src", readOnly: true)
         let run = try ContainerRunPolicy.validate(request(volumes: [volume]))
         XCTAssertEqual(run.volumes, [volume])
+    }
+
+    func testVersion4RunConfigurationPasses() throws {
+        let run = try ContainerRunPolicy.validate(request(
+            version: 4,
+            environment: ["MODE=production"],
+            workingDirectory: "/app",
+            user: "1000:1000",
+            cpus: 4,
+            memoryBytes: 2 * 1024 * 1024 * 1024
+        ))
+        XCTAssertEqual(run.environment, ["MODE=production"])
+        XCTAssertEqual(run.workingDirectory, "/app")
+        XCTAssertEqual(run.user, "1000:1000")
+        XCTAssertEqual(run.cpus, 4)
+        XCTAssertEqual(run.memoryBytes, 2 * 1024 * 1024 * 1024)
+        XCTAssertEqual(
+            run.containerArguments(vmHash: "12345", uniqueSuffix: "abcd1234"),
+            ["run", "--env", "MODE=production", "--workdir", "/app", "--user", "1000:1000", "--cpus", "4", "--memory-bytes", "2147483648", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "echo", "hello"]
+        )
     }
 
     /// `container run` parses post-image arguments with captureForPassthrough,
@@ -107,7 +137,7 @@ final class ContainerRunPolicyTests: XCTestCase {
     // MARK: - Rejected requests
 
     func testRejectsUnsupportedVersion() {
-        assertRejected(request(version: 3), expected: .unsupportedVersion(found: 3))
+        assertRejected(request(version: 5), expected: .unsupportedVersion(found: 5))
     }
 
     func testRejectsTTYOnVersion1() {
@@ -118,6 +148,24 @@ final class ContainerRunPolicyTests: XCTestCase {
         assertRejected(
             request(version: 2, tty: true, columns: 0, rows: 24),
             expected: .invalidTerminalSize
+        )
+    }
+
+    func testRejectsVersion4OptionsOnOlderProtocol() {
+        assertRejected(
+            request(version: 3, environment: ["MODE=production"]),
+            expected: .runOptionsRequireProtocolVersion4
+        )
+    }
+
+    func testRejectsInvalidRunConfiguration() {
+        assertRejected(request(version: 4, environment: ["BAD-NAME=value"]), expected: .invalidEnvironment)
+        assertRejected(request(version: 4, workingDirectory: "relative"), expected: .invalidWorkingDirectory)
+        assertRejected(request(version: 4, user: "bad user"), expected: .invalidUser)
+        assertRejected(request(version: 4, cpus: 0), expected: .invalidCPUs(min: 1, max: 64))
+        assertRejected(
+            request(version: 4, memoryBytes: 64 * 1024 * 1024),
+            expected: .invalidMemory(min: ContainerRunPolicy.minimumMemoryBytes, max: ContainerRunPolicy.maximumMemoryBytes)
         )
     }
 
@@ -168,9 +216,10 @@ final class ContainerRunPolicyTests: XCTestCase {
         assertRejected(request(command: ["echo", "a\0b"]), expected: .commandArgumentContainsNUL)
     }
 
-    func testRejectsReadWriteVolume() {
+    func testAcceptsReadWriteVolume() throws {
         let volume = ContainerRunVolume(guestPath: "/data", destination: "/data", readOnly: false)
-        assertRejected(request(volumes: [volume]), expected: .readWriteGuestVolumesUnsupported)
+        let run = try ContainerRunPolicy.validate(request(volumes: [volume]))
+        XCTAssertEqual(run.volumes, [volume])
     }
 
     func testRejectsDuplicateVolumeDestination() {
@@ -191,13 +240,14 @@ final class ContainerRunPolicyTests: XCTestCase {
     func testContainerArguments() throws {
         let run = try ContainerRunPolicy.validate(request(image: "alpine", command: ["echo", "hello"]))
         let argv = run.containerArguments(vmHash: "12345", uniqueSuffix: "abcd1234")
-        XCTAssertEqual(argv, ["run", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "echo", "hello"])
+        XCTAssertEqual(argv, ["run", "--cpus", "2", "--memory-bytes", "1073741824", "--id", "gv-12345-abcd1234", "--image", "alpine", "--", "echo", "hello"])
     }
 
     func testContainerArgumentsSanitizesNameComponents() throws {
         let run = try ContainerRunPolicy.validate(request(image: "alpine", command: []))
         let argv = run.containerArguments(vmHash: "Weird Hash!", uniqueSuffix: "ABCD1234")
-        XCTAssertEqual(argv[2], "gv-weird-hash--abcd1234")
+        let idIndex = try XCTUnwrap(argv.firstIndex(of: "--id"))
+        XCTAssertEqual(argv[idIndex + 1], "gv-weird-hash--abcd1234")
         // Executable path is never part of argv; the runner supplies it.
         XCTAssertFalse(argv.contains("ghostvm-container-runtime"))
     }
@@ -208,7 +258,8 @@ final class ContainerRunPolicyTests: XCTestCase {
             vmHash: String(repeating: "h", count: 64),
             uniqueSuffix: String(repeating: "s", count: 32)
         )
-        let name = argv[2]
+        let idIndex = try XCTUnwrap(argv.firstIndex(of: "--id"))
+        let name = argv[idIndex + 1]
         XCTAssertLessThanOrEqual(name.count, ContainerRunPolicy.maxContainerNameLength)
         XCTAssertEqual(ContainerRunPolicy.maxContainerNameLength, 63)
         XCTAssertTrue(name.hasPrefix("gv-"))

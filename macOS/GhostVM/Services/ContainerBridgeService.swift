@@ -261,8 +261,15 @@ final class ContainerBridgeService: @unchecked Sendable {
             let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
                 do {
                     try runner.start(
-                        onReady: {
+                        onReady: { ipv4Address in
                             Self.clearSocketReceiveTimeout(fd: connection.fileDescriptor)
+                            if run.protocolVersion >= 4 {
+                                guard let frame = try? ContainerResponse.ready(version: run.protocolVersion, ipv4Address: ipv4Address).encodeLine(),
+                                      writer.writeFrame(frame) else {
+                                    runner.terminate()
+                                    return
+                                }
+                            }
                             let task = Task.detached {
                                 if run.protocolVersion >= 2 {
                                     await Self.relayFramedInput(

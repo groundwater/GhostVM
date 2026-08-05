@@ -29,6 +29,11 @@ private struct RuntimeOptions {
     let terminalColumns: UInt16
     let terminalRows: UInt16
     let mounts: [Mount]
+    let environment: [String]
+    let workingDirectory: String?
+    let user: String?
+    let cpus: Int
+    let memoryBytes: UInt64
     let command: [String]
 
     static func parse(_ arguments: [String]) throws -> RuntimeOptions {
@@ -46,6 +51,11 @@ private struct RuntimeOptions {
         var terminalColumns: UInt16 = 80
         var terminalRows: UInt16 = 24
         var mounts: [Mount] = []
+        var environment: [String] = []
+        var workingDirectory: String?
+        var user: String?
+        var cpus = 2
+        var memoryBytes: UInt64 = 1024 * 1024 * 1024
         var command: [String] = []
         var index = 1
         while index < arguments.count {
@@ -115,6 +125,15 @@ private struct RuntimeOptions {
             case "--id": id = value
             case "--image": image = value
             case "--network-id": networkIdentifier = value
+            case "--env": environment.append(value)
+            case "--workdir": workingDirectory = value
+            case "--user": user = value
+            case "--cpus":
+                guard let parsed = Int(value), parsed > 0 else { throw RuntimeError.usage }
+                cpus = parsed
+            case "--memory-bytes":
+                guard let parsed = UInt64(value), parsed > 0 else { throw RuntimeError.usage }
+                memoryBytes = parsed
             default: throw RuntimeError.usage
             }
             index += 2
@@ -134,6 +153,11 @@ private struct RuntimeOptions {
             terminalColumns: terminalColumns,
             terminalRows: terminalRows,
             mounts: mounts,
+            environment: environment,
+            workingDirectory: workingDirectory,
+            user: user,
+            cpus: cpus,
+            memoryBytes: memoryBytes,
             command: command
         )
     }
@@ -147,7 +171,7 @@ private enum RuntimeError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .usage:
-            return "usage: ghostvm-container-runtime run [-i|--interactive] [-t|--tty] [--tty-size COLUMNS ROWS] --root PATH --kernel PATH --id ID --image IMAGE [--network-id ID] [--mount HOST_PATH CONTAINER_PATH ro|rw] [-- COMMAND...]"
+            return "usage: ghostvm-container-runtime run [-i|--interactive] [-t|--tty] [--tty-size COLUMNS ROWS] [--env NAME=VALUE] [--workdir PATH] [--user USER] [--cpus COUNT] [--memory-bytes BYTES] --root PATH --kernel PATH --id ID --image IMAGE [--network-id ID] [--mount HOST_PATH CONTAINER_PATH ro|rw] [-- COMMAND...]"
         case .kernelNotFound(let path):
             return "container kernel not found at \(path); the image fetch helper must prepare runtime assets first"
         case .invalidMount(let source, let destination, let mode):
@@ -379,8 +403,8 @@ private final class RunContext: @unchecked Sendable {
     }
 
     private func configureContainer(_ configuration: inout LinuxContainer.Configuration) throws {
-        configuration.cpus = 2
-        configuration.memoryInBytes = 1024 * 1024 * 1024
+        configuration.cpus = options.cpus
+        configuration.memoryInBytes = options.memoryBytes
         configuration.interfaces = [
             VmnetNetwork.Interface(
                 reference: networkReference,
@@ -393,6 +417,12 @@ private final class RunContext: @unchecked Sendable {
         configuration.dns = DNS(nameservers: [ipv4Gateway])
         if !options.command.isEmpty {
             configuration.process.arguments = options.command
+        }
+        if let workingDirectory = options.workingDirectory {
+            configuration.process.workingDirectory = workingDirectory
+        }
+        if let user = options.user {
+            configuration.process.user = ContainerizationOCI.User(username: user)
         }
         for mount in options.mounts {
             configuration.mounts.append(
@@ -410,6 +440,12 @@ private final class RunContext: @unchecked Sendable {
         if options.tty {
             configuration.process.environmentVariables.removeAll { $0.hasPrefix("TERM=") }
             configuration.process.environmentVariables.append("TERM=xterm-256color")
+        }
+        for assignment in options.environment {
+            let separator = assignment.firstIndex(of: "=")!
+            let prefix = assignment[...separator]
+            configuration.process.environmentVariables.removeAll { $0.hasPrefix(prefix) }
+            configuration.process.environmentVariables.append(assignment)
         }
         configuration.process.stdout = FileWriter(stdoutHandle)
         configuration.process.stderr = options.tty ? nil : FileWriter(stderrHandle)

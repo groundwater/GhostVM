@@ -1,4 +1,4 @@
-@testable import ghost_container
+@testable import ghostbox
 import XCTest
 
 final class ProtocolTests: XCTestCase {
@@ -10,7 +10,7 @@ final class ProtocolTests: XCTestCase {
         let line = try encodeRequestLine(req)
         let s = String(data: line, encoding: .utf8)!
 
-        XCTAssertEqual(s, #"{"version":2,"operation":"run","image":"alpine","command":["echo","hello"],"stdin":false,"tty":false}"# + "\n")
+        XCTAssertEqual(s, #"{"version":4,"operation":"run","image":"alpine","command":["echo","hello"],"stdin":false,"tty":false}"# + "\n")
     }
 
     func testRequestWithEmptyCommand() throws {
@@ -18,7 +18,7 @@ final class ProtocolTests: XCTestCase {
         let line = try encodeRequestLine(req)
         let s = String(data: line, encoding: .utf8)!
 
-        XCTAssertEqual(s, #"{"version":2,"operation":"run","image":"ubuntu:24.04","command":[],"stdin":false,"tty":false}"# + "\n")
+        XCTAssertEqual(s, #"{"version":4,"operation":"run","image":"ubuntu:24.04","command":[],"stdin":false,"tty":false}"# + "\n")
     }
 
     func testRequestWithVolume() throws {
@@ -27,7 +27,7 @@ final class ProtocolTests: XCTestCase {
         let line = try encodeRequestLine(request)
         XCTAssertEqual(
             String(data: line, encoding: .utf8),
-            #"{"version":2,"operation":"run","image":"alpine","command":[],"stdin":false,"tty":false,"volumes":[{"guestPath":"/home/user/src","destination":"/src","readOnly":true}]}"# + "\n"
+            #"{"version":4,"operation":"run","image":"alpine","command":[],"stdin":false,"tty":false,"volumes":[{"guestPath":"/home/user/src","destination":"/src","readOnly":true}]}"# + "\n"
         )
     }
 
@@ -42,7 +42,23 @@ final class ProtocolTests: XCTestCase {
         )
         XCTAssertEqual(
             String(data: try encodeRequestLine(request), encoding: .utf8),
-            #"{"version":2,"operation":"run","image":"alpine","command":["/bin/sh"],"stdin":true,"tty":true,"columns":120,"rows":40}"# + "\n"
+            #"{"version":4,"operation":"run","image":"alpine","command":["/bin/sh"],"stdin":true,"tty":true,"columns":120,"rows":40}"# + "\n"
+        )
+    }
+
+    func testConfiguredRunRequestIncludesVersion4Fields() throws {
+        let request = makeRunRequest(
+            image: "alpine",
+            command: [],
+            environment: ["MODE=production"],
+            workingDirectory: "/app",
+            user: "1000:1000",
+            cpus: 4,
+            memoryBytes: 2_147_483_648
+        )
+        XCTAssertEqual(
+            String(data: try encodeRequestLine(request), encoding: .utf8),
+            #"{"version":4,"operation":"run","image":"alpine","command":[],"stdin":false,"tty":false,"environment":["MODE=production"],"workingDirectory":"/app","user":"1000:1000","cpus":4,"memoryBytes":2147483648}"# + "\n"
         )
     }
 
@@ -61,10 +77,18 @@ final class ProtocolTests: XCTestCase {
 
     // MARK: - Response decoding: success cases
 
+    func testDecodeReadyAddress() throws {
+        let json = #"{"version":4,"type":"ready","ipv4Address":"192.168.64.3"}"#.data(using: .utf8)!
+        guard case .ready(let address) = decodeResponse(json) else {
+            return XCTFail("Expected ready response")
+        }
+        XCTAssertEqual(address, "192.168.64.3")
+    }
+
     func testDecodeStdout() throws {
         let payload = "hello world".data(using: .utf8)!
         let b64 = payload.base64EncodedString()
-        let json = #"{"version":2,"type":"stdout","data":"\#(b64)"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"stdout","data":"\#(b64)"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .stdout(let data):
@@ -77,7 +101,7 @@ final class ProtocolTests: XCTestCase {
     func testDecodeStderr() throws {
         let payload = "error line".data(using: .utf8)!
         let b64 = payload.base64EncodedString()
-        let json = #"{"version":2,"type":"stderr","data":"\#(b64)"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"stderr","data":"\#(b64)"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .stderr(let data):
@@ -88,7 +112,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeExit() throws {
-        let json = #"{"version":2,"type":"exit","exitCode":42}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"exit","exitCode":42}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .exit(let code):
@@ -99,7 +123,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeExitZero() throws {
-        let json = #"{"version":2,"type":"exit","exitCode":0}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"exit","exitCode":0}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .exit(let code):
@@ -110,7 +134,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeExit255() throws {
-        let json = #"{"version":2,"type":"exit","exitCode":255}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"exit","exitCode":255}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .exit(let code):
@@ -121,7 +145,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeError() throws {
-        let json = #"{"version":2,"type":"error","message":"image not found"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"error","message":"image not found"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .error(let message):
@@ -134,7 +158,7 @@ final class ProtocolTests: XCTestCase {
     // MARK: - Response decoding: empty base64 is valid empty output
 
     func testDecodeStdoutEmptyBase64StringYieldsEmpty() throws {
-        let json = #"{"version":2,"type":"stdout","data":""}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"stdout","data":""}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .stdout(let data):
@@ -145,7 +169,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeStderrEmptyBase64StringYieldsEmpty() throws {
-        let json = #"{"version":2,"type":"stderr","data":""}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"stderr","data":""}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .stderr(let data):
@@ -156,7 +180,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeStdoutMissingDataIsProtocolError() throws {
-        let json = #"{"version":2,"type":"stdout"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"stdout"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -169,7 +193,7 @@ final class ProtocolTests: XCTestCase {
     // MARK: - Response decoding: strict protocol errors (never success)
 
     func testDecodeStdoutInvalidBase64IsProtocolError() throws {
-        let json = #"{"version":2,"type":"stdout","data":"!!! not base64"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"stdout","data":"!!! not base64"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -180,7 +204,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeExitMissingCodeIsProtocolError() throws {
-        let json = #"{"version":2,"type":"exit"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"exit"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -191,7 +215,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeExitOutOfRangeHighIsProtocolError() throws {
-        let json = #"{"version":2,"type":"exit","exitCode":256}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"exit","exitCode":256}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -202,7 +226,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeExitNegativeIsProtocolError() throws {
-        let json = #"{"version":2,"type":"exit","exitCode":-1}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"exit","exitCode":-1}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -213,7 +237,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeErrorMissingMessageIsProtocolError() throws {
-        let json = #"{"version":2,"type":"error"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"error"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -224,7 +248,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeErrorEmptyMessageIsProtocolError() throws {
-        let json = #"{"version":2,"type":"error","message":""}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"error","message":""}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:
@@ -258,7 +282,7 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testDecodeUnknownTypeIsProtocolError() throws {
-        let json = #"{"version":2,"type":"bogus"}"#.data(using: .utf8)!
+        let json = #"{"version":4,"type":"bogus"}"#.data(using: .utf8)!
 
         switch decodeResponse(json) {
         case .protocolError:

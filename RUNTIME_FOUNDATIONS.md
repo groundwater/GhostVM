@@ -84,9 +84,9 @@ path while primitive handlers are added.
 
 ## GhostTools CLI
 
-`ghost-container` is the internal diagnostic frontend. It is already built as
+`ghostbox` is the native diagnostic frontend. It is built as
 a GhostTools package product, copied into `GhostTools.app/Contents/MacOS`, and
-placed at the GhostTools DMG root for direct testing.
+placed at `GhostTools/bin/ghostbox` for direct testing.
 
 The next guest layer is a Docker Engine API adapter that shares the same runtime
 client and translates Docker operations into one or more runtime protocol

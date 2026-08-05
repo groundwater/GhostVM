@@ -147,3 +147,14 @@ for existing GhostTools installations. Version 2 adds `tty`, `columns`, and
 Host responses use the request's protocol version. In TTY mode, the container
 process receives a native PTY, stderr is merged into stdout, `TERM` is set to
 `xterm-256color`, and resize frames map to `LinuxContainer.resize(to:)`.
+
+Version 4 adds optional `environment`, `workingDirectory`, `user`, `cpus`, and
+`memoryBytes` run fields. Once the container starts, the host returns its
+private address before relaying output:
+
+```json
+{"version":4,"type":"ready","ipv4Address":"192.168.64.3"}
+```
+
+`ghostbox` binds requested TCP ports in the macOS guest and forwards them to
+that address. The host never binds an outer-Mac port on behalf of a guest run.

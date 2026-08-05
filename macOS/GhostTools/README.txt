@@ -25,25 +25,31 @@ To install manually:
 
    sudo cp /Volumes/GhostTools/GhostTools.app /Applications/
 
-The experimental container CLI can be run directly from the mounted DMG:
+The native container CLI can be run directly from the mounted DMG:
 
-   /Volumes/GhostTools/ghost-container run registry-1.docker.io/library/alpine:latest echo hello
+   /Volumes/GhostTools/bin/ghostbox run registry-1.docker.io/library/alpine:latest echo hello
 
 Host-backed Containers
 ----------------------
 
-This feature runs ephemeral Linux containers on the outer Mac through Apple's
-Containerization framework. It currently supports:
+Ghostbox runs ephemeral Linux containers on the outer Mac through Apple's
+Containerization framework. It supports:
 
-   ghost-container run IMAGE [COMMAND...]
-   ghost-container run -it IMAGE [COMMAND...]
-   ghost-container run -v /guest/path:/container/path:ro IMAGE [COMMAND...]
+   ghostbox run IMAGE [COMMAND...]
+   ghostbox run -it IMAGE [COMMAND...]
+   ghostbox run -v /guest/path:/container/path[:ro|rw] IMAGE [COMMAND...]
+   ghostbox run -p 8080:80 -e MODE=production -w /app IMAGE
+   ghostbox run -u 1000:1000 --cpus 2 --memory 1g IMAGE
 
 Use -i to attach stdin and -t to allocate a terminal. Combined -it sessions
 support terminal resize events and Ctrl-C through the container PTY. Alpine
 images provide /bin/sh by default:
 
-   ghost-container run -it registry-1.docker.io/library/alpine:latest /bin/sh
+   ghostbox run -it registry-1.docker.io/library/alpine:latest /bin/sh
+
+Published ports currently support TCP and bind to the guest's 127.0.0.1 by
+default. Provide an explicit guest IPv4 address before the host port to change
+the bind address.
 
 The outer Mac must be Apple silicon. In GhostVM, open Edit Settings for this VM,
 select NAT (Shared), and enable Host-backed Containers before starting the VM.
@@ -55,9 +61,9 @@ Enabling the bridge grants any process in the guest permission to request the
 limited host-side container run operation. Images are pulled using the host
 user's registry access and remain in the host image store after the ephemeral
 container exits, so private registry access and disk usage are part of this
-trust grant. A read-only volume exposes only the requested guest directory to
-the container. Outer-host paths, read-write mounts, builds, ports, and
-persistent containers are not supported.
+trust grant. Volumes expose the requested guest directory to the container and
+default to read-write; append `:ro` for a read-only mount. Outer-host paths,
+builds, and persistent containers are not supported.
 
 GhostTools requires Accessibility permission in the guest to enable
 pointer, keyboard, and UI automation features. Grant this in

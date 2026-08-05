@@ -467,16 +467,16 @@ tools: ghosttools-icon
 	@echo "Building GhostTools..."
 	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=$(INJECT_TIMESTAMP)
 	@# Force relink so the embedded __TEXT/__info_plist picks up the new timestamp
-	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/release/ghost-container"
+	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/release/ghostbox"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c release
 	@# Assemble .app bundle
 	@rm -rf "$(GHOSTTOOLS_APP)"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/MacOS"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
-	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
+	@cp "$(GHOSTTOOLS_BUILD_DIR)/release/ghostbox" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
-	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container"
+	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox"
 	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@# Generate release notes from git log since last tag
 	@LAST_TAG=$$(git describe --tags --abbrev=0 2>/dev/null); \
@@ -498,12 +498,12 @@ debug-tools:
 		-output $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug \
 		$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools
 	vtool -set-build-version macos 26.0 26.0 -replace \
-		-output $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug \
-		$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container
+		-output $(GHOSTTOOLS_BUILD_DIR)/debug/ghostbox-debug \
+		$(GHOSTTOOLS_BUILD_DIR)/debug/ghostbox
 	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug
-	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug
+	codesign --force -s "-" $(GHOSTTOOLS_BUILD_DIR)/debug/ghostbox-debug
 	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools-debug"
-	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container-debug"
+	@echo "Debug binary: $(GHOSTTOOLS_BUILD_DIR)/debug/ghostbox-debug"
 	@echo "Copy to guest and use: lldb GhostTools-debug"
 
 # Generate GhostTools .icns from source PNG
@@ -560,12 +560,12 @@ $(GHOSTVM_ICON_ICNS): $(GHOSTVM_ICON_SRC)
 dmg: tools
 	@echo "Creating GhostTools.dmg..."
 	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/bin"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@# Include ghost-container at DMG root level for direct testing from mounted volume
-	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/ghost-container"
+	@# Keep guest-facing command-line tools under one conventional directory.
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/bin/ghostbox"
+	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/bin/ghostbox"
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil create -volname "GhostTools" \
 		-srcfolder "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage" \
@@ -794,12 +794,12 @@ dist:
 	@# 5b. Re-create GhostTools.dmg with Developer ID signing for notarization
 	@echo "  Re-signing GhostTools for distribution..."
 	@rm -rf "$(DIST_DIR)/ghosttools-stage"
-	@mkdir -p "$(DIST_DIR)/ghosttools-stage"
+	@mkdir -p "$(DIST_DIR)/ghosttools-stage/bin"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(DIST_DIR)/ghosttools-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/"
-	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(DIST_DIR)/ghosttools-stage/"
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox" "$(DIST_DIR)/ghosttools-stage/bin/ghostbox"
 	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
-	codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/ghost-container"
+	codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/bin/ghostbox"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
 	hdiutil create -volname "GhostTools" \
 		-srcfolder "$(DIST_DIR)/ghosttools-stage" \
@@ -852,24 +852,24 @@ dist:
 debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 	@# Build GhostTools (debug)
 	@$(MAKE) --no-print-directory prepare-tools-plist INJECT_TIMESTAMP=1 BUILD_TIMESTAMP=$(BUILD_TIMESTAMP)
-	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container"
+	@rm -f "$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools" "$(GHOSTTOOLS_BUILD_DIR)/debug/ghostbox"
 	swift build --package-path $(GHOSTTOOLS_DIR) --scratch-path $(GHOSTTOOLS_BUILD_DIR) -c debug
 	@rm -rf "$(GHOSTTOOLS_APP)"
 	@mkdir -p "$(GHOSTTOOLS_APP)/Contents/MacOS" "$(GHOSTTOOLS_APP)/Contents/Resources"
 	@cp "$(GHOSTTOOLS_BUILD_DIR)/debug/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
-	@cp "$(GHOSTTOOLS_BUILD_DIR)/debug/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
+	@cp "$(GHOSTTOOLS_BUILD_DIR)/debug/ghostbox" "$(GHOSTTOOLS_APP)/Contents/MacOS/"
 	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools" "$(GHOSTTOOLS_APP)/Contents/MacOS/GhostTools"
-	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container"
+	vtool -set-build-version macos 26.0 26.0 -replace -output "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox" "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox"
 	@cp "$(PLIST_TOOLS)" "$(GHOSTTOOLS_APP)/Contents/Info.plist"
 	@cp "$(GHOSTTOOLS_ICON_ICNS)" "$(GHOSTTOOLS_APP)/Contents/Resources/"
 	codesign --force --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_APP)"
 	@# Package GhostTools.dmg
 	@rm -rf "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
-	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage"
+	@mkdir -p "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/bin"
 	@cp -R "$(GHOSTTOOLS_APP)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
 	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghost-container" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/"
-	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/ghost-container"
+	@cp "$(GHOSTTOOLS_APP)/Contents/MacOS/ghostbox" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/bin/ghostbox"
+	codesign --force -s "$(GHOSTTOOLS_SIGN_ID)" "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage/bin/ghostbox"
 	@rm -f "$(GHOSTTOOLS_DMG)"
 	hdiutil create -volname "GhostTools" \
 		-srcfolder "$(GHOSTTOOLS_BUILD_DIR)/dmg-stage" \
@@ -1039,12 +1039,15 @@ debug-dmg: $(XCODE_PROJECT) ghostvm-icon ghosttools-icon
 		-s "$(DIST_CODESIGN_ID)" \
 		"$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Extensions/GhostVMFS.appex"
 	@# Re-sign GhostTools.dmg inside the app bundle
-	@mkdir -p "$(DIST_DIR)/ghosttools-stage"
+	@mkdir -p "$(DIST_DIR)/ghosttools-stage/bin"
 	@hdiutil attach "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg" -mountpoint "$(DIST_DIR)/ghosttools-mount" -nobrowse
 	@ditto "$(DIST_DIR)/ghosttools-mount/GhostTools.app" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	@hdiutil detach "$(DIST_DIR)/ghosttools-mount"
+	@cp "$(GHOSTTOOLS_DIR)/README.txt" "$(DIST_DIR)/ghosttools-stage/README.txt"
 	@xattr -cr "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
 	codesign --force --options runtime --timestamp --deep --entitlements "$(GHOSTTOOLS_DIR)/Sources/GhostTools/Resources/entitlements.plist" -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/GhostTools.app"
+	@cp "$(DIST_DIR)/ghosttools-stage/GhostTools.app/Contents/MacOS/ghostbox" "$(DIST_DIR)/ghosttools-stage/bin/ghostbox"
+	codesign --force --options runtime --timestamp -s "$(DIST_CODESIGN_ID)" "$(DIST_DIR)/ghosttools-stage/bin/ghostbox"
 	@rm -f "$(DIST_DIR)/dmg-stage/$(APP_NAME).app/Contents/Resources/GhostTools.dmg"
 	hdiutil create -volname "GhostTools" \
 		-srcfolder "$(DIST_DIR)/ghosttools-stage" \

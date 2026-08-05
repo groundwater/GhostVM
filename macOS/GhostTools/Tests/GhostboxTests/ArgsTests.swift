@@ -1,4 +1,4 @@
-@testable import ghost_container
+@testable import ghostbox
 import XCTest
 
 final class ArgsTests: XCTestCase {
@@ -31,34 +31,34 @@ final class ArgsTests: XCTestCase {
     func testRunWithImageOnly() {
         let result = parseArguments(["run", "alpine"])
         guard case .success(let opts) = result,
-              case .run(let image, let command, let volumes, let interactive, let tty) = opts.action else {
+              case .run(let run) = opts.action else {
             return XCTFail("Expected .run, got \(result)")
         }
-        XCTAssertEqual(image, "alpine")
-        XCTAssertEqual(command, [])
-        XCTAssertEqual(volumes, [])
-        XCTAssertFalse(interactive)
-        XCTAssertFalse(tty)
+        XCTAssertEqual(run.image, "alpine")
+        XCTAssertEqual(run.command, [])
+        XCTAssertEqual(run.volumes, [])
+        XCTAssertFalse(run.interactive)
+        XCTAssertFalse(run.tty)
     }
 
     func testRunWithCommand() {
         let result = parseArguments(["run", "alpine", "echo", "hello"])
         guard case .success(let opts) = result,
-              case .run(let image, let command, _, _, _) = opts.action else {
+              case .run(let run) = opts.action else {
             return XCTFail("Expected .run, got \(result)")
         }
-        XCTAssertEqual(image, "alpine")
-        XCTAssertEqual(command, ["echo", "hello"])
+        XCTAssertEqual(run.image, "alpine")
+        XCTAssertEqual(run.command, ["echo", "hello"])
     }
 
     func testCommandMayBeginWithDash() {
         let result = parseArguments(["run", "alpine", "-c", "--flag", "-n"])
         guard case .success(let opts) = result,
-              case .run(let image, let command, _, _, _) = opts.action else {
+              case .run(let run) = opts.action else {
             return XCTFail("Expected .run, got \(result)")
         }
-        XCTAssertEqual(image, "alpine")
-        XCTAssertEqual(command, ["-c", "--flag", "-n"])
+        XCTAssertEqual(run.image, "alpine")
+        XCTAssertEqual(run.command, ["-c", "--flag", "-n"])
     }
 
     func testRejectsFlagBeforeImage() {
@@ -66,7 +66,7 @@ final class ArgsTests: XCTestCase {
         guard case .failure(let err) = result else {
             return XCTFail("Expected failure for flag-before-image, got \(result)")
         }
-        XCTAssertEqual(err.errorDescription, "invalid IMAGE: image name must not start with '-'")
+        XCTAssertEqual(err.errorDescription, "unknown run option '--some-flag'")
     }
 
     func testRejectsUnknownSubcommand() {
@@ -152,10 +152,10 @@ final class ArgsTests: XCTestCase {
         argv.append(contentsOf: (0..<64).map { "c\($0)" })
         let result = parseArguments(argv)
         guard case .success(let opts) = result,
-              case .run(_, let command, _, _, _) = opts.action else {
+              case .run(let run) = opts.action else {
             return XCTFail("Expected .run with 64 command args, got \(result)")
         }
-        XCTAssertEqual(command.count, 64)
+        XCTAssertEqual(run.command.count, 64)
     }
 
     func testRejectsNullInCommandArg() {
@@ -205,29 +205,39 @@ final class ArgsTests: XCTestCase {
     func testParsesReadOnlyVolumeBeforeImage() {
         let result = parseArguments(["run", "-v", "/home/user/src:/src:ro", "alpine", "ls", "/src"])
         guard case .success(let options) = result,
-              case .run(let image, let command, let volumes, _, _) = options.action else {
+              case .run(let run) = options.action else {
             return XCTFail("Expected volume run, got \(result)")
         }
-        XCTAssertEqual(image, "alpine")
-        XCTAssertEqual(command, ["ls", "/src"])
-        XCTAssertEqual(volumes, [HostContainerVolume(guestPath: "/home/user/src", destination: "/src", readOnly: true)])
+        XCTAssertEqual(run.image, "alpine")
+        XCTAssertEqual(run.command, ["ls", "/src"])
+        XCTAssertEqual(run.volumes, [HostContainerVolume(guestPath: "/home/user/src", destination: "/src", readOnly: true)])
     }
 
     func testParsesLongVolumeFlag() {
         let result = parseArguments(["run", "--volume=/data:/mnt/data:ro", "alpine"])
         guard case .success(let options) = result,
-              case .run(_, _, let volumes, _, _) = options.action else {
+              case .run(let run) = options.action else {
             return XCTFail("Expected volume run, got \(result)")
         }
-        XCTAssertEqual(volumes.first?.destination, "/mnt/data")
+        XCTAssertEqual(run.volumes.first?.destination, "/mnt/data")
     }
 
-    func testRejectsImplicitReadWriteVolume() {
+    func testParsesImplicitReadWriteVolume() {
         let result = parseArguments(["run", "-v", "/data:/data", "alpine"])
-        guard case .failure(let error) = result else {
-            return XCTFail("Expected read-write volume rejection")
+        guard case .success(let options) = result,
+              case .run(let run) = options.action else {
+            return XCTFail("Expected read-write volume run")
         }
-        XCTAssertEqual(error.errorDescription, "invalid volume: guest directory mounts are currently read-only; append ':ro'")
+        XCTAssertEqual(run.volumes, [HostContainerVolume(guestPath: "/data", destination: "/data", readOnly: false)])
+    }
+
+    func testParsesExplicitReadWriteVolume() {
+        let result = parseArguments(["run", "-v", "/data:/data:rw", "alpine"])
+        guard case .success(let options) = result,
+              case .run(let run) = options.action else {
+            return XCTFail("Expected read-write volume run")
+        }
+        XCTAssertEqual(run.volumes.first?.readOnly, false)
     }
 
     func testRejectsDuplicateVolumeDestination() {
@@ -249,23 +259,57 @@ final class ArgsTests: XCTestCase {
         for flag in ["-it", "-ti"] {
             let result = parseArguments(["run", flag, "alpine", "/bin/sh"])
             guard case .success(let options) = result,
-                  case .run(_, let command, _, let interactive, let tty) = options.action else {
+                  case .run(let run) = options.action else {
                 return XCTFail("Expected interactive TTY run for \(flag), got \(result)")
             }
-            XCTAssertEqual(command, ["/bin/sh"])
-            XCTAssertTrue(interactive)
-            XCTAssertTrue(tty)
+            XCTAssertEqual(run.command, ["/bin/sh"])
+            XCTAssertTrue(run.interactive)
+            XCTAssertTrue(run.tty)
         }
     }
 
     func testParsesSeparateInteractiveTTYFlagsMixedWithVolume() {
         let result = parseArguments(["run", "-i", "-v", "/data:/data:ro", "-t", "alpine"])
         guard case .success(let options) = result,
-              case .run(_, _, let volumes, let interactive, let tty) = options.action else {
+              case .run(let run) = options.action else {
             return XCTFail("Expected interactive TTY volume run, got \(result)")
         }
-        XCTAssertEqual(volumes.count, 1)
-        XCTAssertTrue(interactive)
-        XCTAssertTrue(tty)
+        XCTAssertEqual(run.volumes.count, 1)
+        XCTAssertTrue(run.interactive)
+        XCTAssertTrue(run.tty)
+    }
+
+    func testParsesCompleteRunConfiguration() {
+        let result = parseArguments([
+            "run", "-p", "127.0.0.1:8080:80", "-e", "MODE=production",
+            "-w", "/app", "-u", "1000:1000", "--cpus", "4", "--memory", "2g", "alpine",
+        ])
+        guard case .success(let options) = result, case .run(let run) = options.action else {
+            return XCTFail("Expected configured run, got \(result)")
+        }
+        XCTAssertEqual(run.publishedPorts, [PublishedPort(hostAddress: "127.0.0.1", hostPort: 8080, containerPort: 80)])
+        XCTAssertEqual(run.environment, ["MODE=production"])
+        XCTAssertEqual(run.workingDirectory, "/app")
+        XCTAssertEqual(run.user, "1000:1000")
+        XCTAssertEqual(run.cpus, 4)
+        XCTAssertEqual(run.memoryBytes, 2 * 1024 * 1024 * 1024)
+    }
+
+    func testPublishDefaultsToGuestLoopbackAndTCP() {
+        XCTAssertEqual(
+            try? parsePublishedPort("8080:80/tcp").get(),
+            PublishedPort(hostAddress: "127.0.0.1", hostPort: 8080, containerPort: 80)
+        )
+    }
+
+    func testRejectsUDPPublish() {
+        guard case .failure(.invalidPublish("only TCP is supported")) = parsePublishedPort("8080:80/udp") else {
+            return XCTFail("Expected UDP rejection")
+        }
+    }
+
+    func testParsesMemoryUnits() {
+        XCTAssertEqual(try? parseMemory("512m").get(), 512 * 1024 * 1024)
+        XCTAssertEqual(try? parseMemory("2GiB").get(), 2 * 1024 * 1024 * 1024)
     }
 }

@@ -11,7 +11,8 @@ public enum ContainerBridgeConstants {
     public static let port: UInt32 = 5004
 
     /// Wire protocol version. Version 2 adds framed stdin and TTY resize events.
-    public static let protocolVersion = 2
+    /// Version 4 adds run configuration and container network metadata.
+    public static let protocolVersion = 4
     public static let minimumProtocolVersion = 1
 
     /// Maximum accepted size of a single request line in bytes (before the newline).
@@ -34,6 +35,11 @@ public struct ContainerRunRequest: Codable, Equatable, Sendable {
     public var columns: UInt16?
     public var rows: UInt16?
     public var volumes: [ContainerRunVolume]?
+    public var environment: [String]?
+    public var workingDirectory: String?
+    public var user: String?
+    public var cpus: Int?
+    public var memoryBytes: UInt64?
 
     public init(
         version: Int,
@@ -44,7 +50,12 @@ public struct ContainerRunRequest: Codable, Equatable, Sendable {
         tty: Bool? = nil,
         columns: UInt16? = nil,
         rows: UInt16? = nil,
-        volumes: [ContainerRunVolume]? = nil
+        volumes: [ContainerRunVolume]? = nil,
+        environment: [String]? = nil,
+        workingDirectory: String? = nil,
+        user: String? = nil,
+        cpus: Int? = nil,
+        memoryBytes: UInt64? = nil
     ) {
         self.version = version
         self.operation = operation
@@ -55,6 +66,11 @@ public struct ContainerRunRequest: Codable, Equatable, Sendable {
         self.columns = columns
         self.rows = rows
         self.volumes = volumes
+        self.environment = environment
+        self.workingDirectory = workingDirectory
+        self.user = user
+        self.cpus = cpus
+        self.memoryBytes = memoryBytes
     }
 
     /// Decodes one request line (without the trailing newline).
@@ -133,6 +149,7 @@ public struct ContainerRunVolume: Codable, Equatable, Sendable {
 }
 
 public enum ContainerResponseType: String, Codable, Sendable {
+    case ready
     case stdout
     case stderr
     case exit
@@ -150,17 +167,23 @@ public struct ContainerResponse: Codable, Equatable, Sendable {
     public var data: String?
     public var exitCode: Int32?
     public var message: String?
+    public var ipv4Address: String?
 
-    public init(version: Int = ContainerBridgeConstants.protocolVersion, type: ContainerResponseType, data: String? = nil, exitCode: Int32? = nil, message: String? = nil) {
+    public init(version: Int = ContainerBridgeConstants.protocolVersion, type: ContainerResponseType, data: String? = nil, exitCode: Int32? = nil, message: String? = nil, ipv4Address: String? = nil) {
         self.version = version
         self.type = type
         self.data = data
         self.exitCode = exitCode
         self.message = message
+        self.ipv4Address = ipv4Address
     }
 
     public static func stdout(_ chunk: Data, version: Int = ContainerBridgeConstants.protocolVersion) -> ContainerResponse {
         ContainerResponse(version: version, type: .stdout, data: chunk.base64EncodedString())
+    }
+
+    public static func ready(version: Int = ContainerBridgeConstants.protocolVersion, ipv4Address: String? = nil) -> ContainerResponse {
+        ContainerResponse(version: version, type: .ready, ipv4Address: ipv4Address)
     }
 
     public static func stderr(_ chunk: Data, version: Int = ContainerBridgeConstants.protocolVersion) -> ContainerResponse {

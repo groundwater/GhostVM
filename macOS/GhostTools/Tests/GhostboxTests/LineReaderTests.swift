@@ -1,4 +1,4 @@
-@testable import ghost_container
+@testable import ghostbox
 import XCTest
 
 final class LineReaderTests: XCTestCase {

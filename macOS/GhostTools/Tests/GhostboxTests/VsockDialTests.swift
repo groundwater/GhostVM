@@ -1,4 +1,4 @@
-@testable import ghost_container
+@testable import ghostbox
 import XCTest
 
 final class VsockDialTests: XCTestCase {
@@ -6,14 +6,14 @@ final class VsockDialTests: XCTestCase {
     /// The Darwin sockaddr_vm layout must be exactly 12 bytes (no padding/zero
     /// field): svm_len(1) + svm_family(1) + svm_reserved1(2) + svm_port(4) + svm_cid(4).
     func testSockaddrVmSizeIs12Bytes() {
-        XCTAssertEqual(MemoryLayout<ghost_container.sockaddr_vm>.size, 12)
-        XCTAssertEqual(MemoryLayout<ghost_container.sockaddr_vm>.stride, 12)
+        XCTAssertEqual(MemoryLayout<ghostbox.sockaddr_vm>.size, 12)
+        XCTAssertEqual(MemoryLayout<ghostbox.sockaddr_vm>.stride, 12)
     }
 
     func testSockaddrVmFieldsInitialized() {
-        let addr = ghost_container.sockaddr_vm(port: 5004, cid: 2)
+        let addr = ghostbox.sockaddr_vm(port: 5004, cid: 2)
         XCTAssertEqual(addr.svm_len, 12)
-        XCTAssertEqual(addr.svm_family, UInt8(ghost_container.AF_VSOCK))
+        XCTAssertEqual(addr.svm_family, UInt8(ghostbox.AF_VSOCK))
         XCTAssertEqual(addr.svm_reserved1, 0)
         XCTAssertEqual(addr.svm_port, 5004)
         XCTAssertEqual(addr.svm_cid, 2)

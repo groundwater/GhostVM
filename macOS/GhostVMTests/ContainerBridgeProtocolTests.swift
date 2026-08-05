@@ -121,6 +121,16 @@ final class ContainerBridgeProtocolTests: XCTestCase {
         XCTAssertEqual(request.rows, 40)
     }
 
+    func testDecodeVersion4RunConfiguration() throws {
+        let line = Data(#"{"version":4,"operation":"run","image":"alpine","command":[],"environment":["MODE=production"],"workingDirectory":"/app","user":"1000:1000","cpus":4,"memoryBytes":2147483648}"#.utf8)
+        let request = try ContainerRunRequest.decode(line: line)
+        XCTAssertEqual(request.environment, ["MODE=production"])
+        XCTAssertEqual(request.workingDirectory, "/app")
+        XCTAssertEqual(request.user, "1000:1000")
+        XCTAssertEqual(request.cpus, 4)
+        XCTAssertEqual(request.memoryBytes, 2_147_483_648)
+    }
+
     func testInputFrameRoundTrip() throws {
         let frame = ContainerInputFrame.resize(columns: 132, rows: 43)
         let line = try frame.encodeLine()
@@ -184,7 +194,7 @@ final class ContainerBridgeProtocolTests: XCTestCase {
     func testStdoutResponseShape() throws {
         let payload = Data([0x00, 0xFF, 0x61]) // binary-safe via base64
         let json = try jsonObject(for: .stdout(payload))
-        XCTAssertEqual(json["version"] as? Int, 2)
+        XCTAssertEqual(json["version"] as? Int, 4)
         XCTAssertEqual(json["type"] as? String, "stdout")
         XCTAssertEqual(json["data"] as? String, payload.base64EncodedString())
         XCTAssertNil(json["exitCode"])
@@ -200,7 +210,7 @@ final class ContainerBridgeProtocolTests: XCTestCase {
 
     func testExitResponseShape() throws {
         let json = try jsonObject(for: .exit(137))
-        XCTAssertEqual(json["version"] as? Int, 2)
+        XCTAssertEqual(json["version"] as? Int, 4)
         XCTAssertEqual(json["type"] as? String, "exit")
         XCTAssertEqual(json["exitCode"] as? Int32, 137)
         XCTAssertNil(json["data"])
@@ -209,11 +219,18 @@ final class ContainerBridgeProtocolTests: XCTestCase {
 
     func testErrorResponseShape() throws {
         let json = try jsonObject(for: .error("something failed"))
-        XCTAssertEqual(json["version"] as? Int, 2)
+        XCTAssertEqual(json["version"] as? Int, 4)
         XCTAssertEqual(json["type"] as? String, "error")
         XCTAssertEqual(json["message"] as? String, "something failed")
         XCTAssertNil(json["data"])
         XCTAssertNil(json["exitCode"])
+    }
+
+    func testRunReadyResponseIncludesContainerAddress() throws {
+        let json = try jsonObject(for: .ready(ipv4Address: "192.168.64.3"))
+        XCTAssertEqual(json["version"] as? Int, 4)
+        XCTAssertEqual(json["type"] as? String, "ready")
+        XCTAssertEqual(json["ipv4Address"] as? String, "192.168.64.3")
     }
 
     func testResponseRoundTrip() throws {
@@ -227,7 +244,7 @@ final class ContainerBridgeProtocolTests: XCTestCase {
 
     func testConstants() {
         XCTAssertEqual(ContainerBridgeConstants.port, 5004)
-        XCTAssertEqual(ContainerBridgeConstants.protocolVersion, 2)
+        XCTAssertEqual(ContainerBridgeConstants.protocolVersion, 4)
         XCTAssertEqual(ContainerBridgeConstants.minimumProtocolVersion, 1)
         XCTAssertEqual(ContainerBridgeConstants.maxRequestLineBytes, 64 * 1024)
     }

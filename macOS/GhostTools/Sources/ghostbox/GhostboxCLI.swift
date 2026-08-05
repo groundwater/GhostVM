@@ -1,33 +1,39 @@
 import Foundation
 
-let gcVersion = "0.1.0"
+let ghostboxVersion = "0.1.0"
 
-let gcHelp = """
-Usage: ghost-container run [-i] [-t] [-v GUEST_PATH:CONTAINER_PATH:ro] IMAGE [COMMAND...]
+let ghostboxHelp = """
+Usage: ghostbox run [OPTIONS] IMAGE [COMMAND...]
 
-Run a container image on the outer Mac through Apple container.
+Run a container image on the outer Mac through Apple Containerization.
 
 Arguments:
   IMAGE     Fully qualified OCI image reference
   COMMAND   Optional command and args to run inside the container
 
 Examples:
-  ghost-container run registry-1.docker.io/library/alpine:latest echo hello
-  ghost-container run -it registry-1.docker.io/library/alpine:latest /bin/sh
-  ghost-container run -v /home/user/src:/src:ro registry-1.docker.io/library/alpine:latest ls /src
-  ghost-container run registry-1.docker.io/library/ubuntu:24.04
+  ghostbox run registry-1.docker.io/library/alpine:latest echo hello
+  ghostbox run -it registry-1.docker.io/library/alpine:latest /bin/sh
+  ghostbox run -v /home/user/src:/src:ro registry-1.docker.io/library/alpine:latest ls /src
+  ghostbox run -p 8080:80 -e MODE=production -w /app --cpus 2 --memory 1g example.com/app:latest
 
 Options:
-  -i, --interactive  Keep stdin attached
-  -t, --tty          Allocate a terminal (combine as -it)
-  -v, --volume SPEC  Mount a guest directory read-only (GUEST:CONTAINER:ro)
-  --help, -h     Show this help
-  --version, -v  Show version
+  -i, --interactive       Keep stdin attached
+  -t, --tty               Allocate a terminal (combine as -it)
+  -v, --volume SPEC       Mount GUEST:CONTAINER[:ro|rw]
+  -p, --publish SPEC      Forward [HOST_IP:]HOST_PORT:CONTAINER_PORT[/tcp]
+  -e, --env NAME[=VALUE]  Set or inherit an environment variable
+  -w, --workdir PATH      Set the container working directory
+  -u, --user USER[:GROUP] Set the container user
+  -c, --cpus COUNT        Set the CPU count
+  -m, --memory SIZE       Set memory, for example 512m or 2g
+  --help, -h              Show this help
+  --version               Show version
 """
 
 /// Entry point — parses argv, dispatches to run, exits with appropriate status.
 @main
-struct GhostContainerCLI {
+struct GhostboxCLI {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
 
@@ -52,39 +58,30 @@ struct GhostContainerCLI {
     static func run(_ opts: CLIOptions) -> Int32 {
         switch opts.action {
         case .help:
-            FileHandle.standardOutput.write(Data(gcHelp.utf8))
+            FileHandle.standardOutput.write(Data((ghostboxHelp + "\n").utf8))
             return 0
         case .version:
-            FileHandle.standardOutput.write(Data("\(gcVersion)\n".utf8))
+            FileHandle.standardOutput.write(Data("\(ghostboxVersion)\n".utf8))
             return 0
-        case .run(let image, let command, let volumes, let interactive, let tty):
-            return runContainer(
-                image: image,
-                command: command,
-                volumes: volumes,
-                interactive: interactive,
-                tty: tty,
-                port: kDefaultVsockPort
-            )
+        case .run(let options):
+            return runContainer(options: options, port: kDefaultVsockPort)
         }
     }
 }
 
 /// Connect to the host via vsock, attach stdin, and stream responses.
 func runContainer(
-    image: String,
-    command: [String],
-    volumes: [HostContainerVolume] = [],
-    interactive: Bool = false,
-    tty: Bool = false,
+    options: GhostboxRunOptions,
     port: UInt32
 ) -> Int32 {
+    let interactive = options.interactive
+    let tty = options.tty
     if tty && isatty(STDOUT_FILENO) == 0 {
-        writeStderr("ghost-container: -t requires stdout to be a terminal\n")
+        writeStderr("ghostbox: -t requires stdout to be a terminal\n")
         return 125
     }
     if tty && interactive && isatty(STDIN_FILENO) == 0 {
-        writeStderr("ghost-container: -it requires stdin to be a terminal\n")
+        writeStderr("ghostbox: -it requires stdin to be a terminal\n")
         return 125
     }
 
@@ -94,7 +91,7 @@ func runContainer(
         do {
             rawTerminal = try RawTerminal(fd: STDIN_FILENO)
         } catch {
-            writeStderr("ghost-container: failed to enter raw terminal mode: \(error)\n")
+            writeStderr("ghostbox: failed to enter raw terminal mode: \(error)\n")
             return 125
         }
     }
@@ -113,14 +110,23 @@ func runContainer(
         writeRunStderr(Data(string.utf8))
     }
 
+    let portForwarders: [PublishedPortForwarder]
+    do {
+        portForwarders = try options.publishedPorts.map(PublishedPortForwarder.init)
+    } catch {
+        writeRunStderr("ghostbox: cannot publish port: \(error.localizedDescription)\n")
+        return 125
+    }
+    defer { portForwarders.forEach { $0.stop() } }
+
     let fd: Int32
     do {
         fd = try vsockDialHost(port: port)
     } catch let err as VsockDialError {
-        writeRunStderr("ghost-container: cannot connect to host: \(err)\n")
+        writeRunStderr("ghostbox: cannot connect to host: \(err)\n")
         return 125
     } catch {
-        writeRunStderr("ghost-container: unexpected error: \(error)\n")
+        writeRunStderr("ghostbox: unexpected error: \(error)\n")
         return 125
     }
 
@@ -132,7 +138,7 @@ func runContainer(
     if interactive || tty {
         let inputSocket = Darwin.dup(fd)
         guard inputSocket >= 0 else {
-            writeRunStderr("ghost-container: failed to duplicate input socket (errno \(errno))\n")
+            writeRunStderr("ghostbox: failed to duplicate input socket (errno \(errno))\n")
             return 125
         }
         inputWriter = ContainerInputWriter(fd: inputSocket)
@@ -142,9 +148,14 @@ func runContainer(
     defer { inputWriter?.close() }
 
     let request = makeRunRequest(
-        image: image,
-        command: command,
-        volumes: volumes,
+        image: options.image,
+        command: options.command,
+        volumes: options.volumes,
+        environment: options.environment,
+        workingDirectory: options.workingDirectory,
+        user: options.user,
+        cpus: options.cpus,
+        memoryBytes: options.memoryBytes,
         interactive: interactive,
         tty: tty,
         columns: terminalSize?.columns,
@@ -154,12 +165,12 @@ func runContainer(
     do {
         line = try encodeRequestLine(request)
     } catch {
-        writeRunStderr("ghost-container: failed to encode request: \(error)\n")
+        writeRunStderr("ghostbox: failed to encode request: \(error)\n")
         return 125
     }
 
     guard writeAll(fd: fd, line) else {
-        writeRunStderr("ghost-container: failed to send request (EPIPE/errno \(errno))\n")
+        writeRunStderr("ghostbox: failed to send request (EPIPE/errno \(errno))\n")
         return 125
     }
 
@@ -194,25 +205,27 @@ func runContainer(
         do {
             rawLine = try reader.readLine()
         } catch LineReaderError.lineTooLong(let max) {
-            writeRunStderr("ghost-container: response line exceeded \(max) bytes\n")
+            writeRunStderr("ghostbox: response line exceeded \(max) bytes\n")
             return 125
         } catch LineReaderError.ioError(let err, let op) {
-            writeRunStderr("ghost-container: \(op) error: errno \(err) (\(String(cString: strerror(err))))\n")
+            writeRunStderr("ghostbox: \(op) error: errno \(err) (\(String(cString: strerror(err))))\n")
             return 125
         } catch {
-            writeRunStderr("ghost-container: unexpected read error: \(error)\n")
+            writeRunStderr("ghostbox: unexpected read error: \(error)\n")
             return 125
         }
 
         guard let json = rawLine, !json.isEmpty else {
-            writeRunStderr("ghost-container: connection closed before exit response\n")
+            writeRunStderr("ghostbox: connection closed before exit response\n")
             return 125
         }
 
         switch decodeResponse(json) {
+        case .ready(let ipv4Address):
+            portForwarders.forEach { $0.start(targetAddress: ipv4Address) }
         case .stdout(let data):
             if !writeStdout(data) {
-                writeRunStderr("ghost-container: failed to write stdout to fd 1 (errno \(errno): \(String(cString: strerror(errno))))\n")
+                writeRunStderr("ghostbox: failed to write stdout to fd 1 (errno \(errno): \(String(cString: strerror(errno))))\n")
                 return 125
             }
         case .stderr(let data):
@@ -220,16 +233,16 @@ func runContainer(
                 // Best-effort diagnostic: writing the diagnostic itself may also
                 // fail (e.g. fd 2 closed). If it does, we cannot report further;
                 // just surface the original failure via the exit status.
-                _ = writeRunStderr("ghost-container: failed to write stderr to fd 2 (errno \(errno): \(String(cString: strerror(errno))))\n")
+                _ = writeRunStderr("ghostbox: failed to write stderr to fd 2 (errno \(errno): \(String(cString: strerror(errno))))\n")
                 return 125
             }
         case .exit(let code):
             return code
         case .error(let message):
-            writeRunStderr("ghost-container: host error: \(message)\n")
+            writeRunStderr("ghostbox: host error: \(message)\n")
             return 125
         case .protocolError(let message):
-            writeRunStderr("ghost-container: protocol error: \(message)\n")
+            writeRunStderr("ghostbox: protocol error: \(message)\n")
             return 125
         }
     }
@@ -258,6 +271,23 @@ func encodeRequestLine(_ request: HostContainerRequest) throws -> Data {
             "{\"guestPath\":\(jsonString(volume.guestPath)),\"destination\":\(jsonString(volume.destination)),\"readOnly\":\(volume.readOnly ? "true" : "false")}"
         }.joined(separator: ",")
         json += "]"
+    }
+    if !request.environment.isEmpty {
+        json += ",\"environment\":["
+        json += request.environment.map(jsonString).joined(separator: ",")
+        json += "]"
+    }
+    if let workingDirectory = request.workingDirectory {
+        json += ",\"workingDirectory\":\(jsonString(workingDirectory))"
+    }
+    if let user = request.user {
+        json += ",\"user\":\(jsonString(user))"
+    }
+    if let cpus = request.cpus {
+        json += ",\"cpus\":\(cpus)"
+    }
+    if let memoryBytes = request.memoryBytes {
+        json += ",\"memoryBytes\":\(memoryBytes)"
     }
     json += "}"
     json.append("\n")

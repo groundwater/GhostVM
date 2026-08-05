@@ -1,7 +1,7 @@
 import Foundation
 
 /// Wire-protocol version supported by this client.
-let kProtocolVersion: Int = 2
+let kProtocolVersion: Int = 4
 
 /// Default vsock port for the host container bridge.
 let kDefaultVsockPort: UInt32 = 5004
@@ -25,6 +25,11 @@ struct HostContainerRequest: Codable {
     let columns: UInt16?
     let rows: UInt16?
     let volumes: [HostContainerVolume]
+    let environment: [String]
+    let workingDirectory: String?
+    let user: String?
+    let cpus: Int?
+    let memoryBytes: UInt64?
 }
 
 struct HostContainerVolume: Codable, Equatable {
@@ -39,6 +44,11 @@ func makeRunRequest(
     image: String,
     command: [String],
     volumes: [HostContainerVolume] = [],
+    environment: [String] = [],
+    workingDirectory: String? = nil,
+    user: String? = nil,
+    cpus: Int? = nil,
+    memoryBytes: UInt64? = nil,
     interactive: Bool = false,
     tty: Bool = false,
     columns: UInt16? = nil,
@@ -53,7 +63,12 @@ func makeRunRequest(
         tty: tty,
         columns: columns,
         rows: rows,
-        volumes: volumes
+        volumes: volumes,
+        environment: environment,
+        workingDirectory: workingDirectory,
+        user: user,
+        cpus: cpus,
+        memoryBytes: memoryBytes
     )
 }
 
@@ -104,6 +119,7 @@ struct HostContainerResponse: Codable {
     let data: String?
     let exitCode: Int32?
     let message: String?
+    let ipv4Address: String?
 }
 
 /// Discrete decoded response for internal handling.
@@ -112,6 +128,7 @@ struct HostContainerResponse: Codable {
 ///   a wrong/missing version, or was missing a required field. It is never
 ///   decoded as success or silent empty output.
 enum DecodedResponse {
+    case ready(ipv4Address: String)
     case stdout(Data)
     case stderr(Data)
     case exit(Int32)
@@ -123,7 +140,7 @@ enum DecodedResponse {
 ///
 /// Strict rules:
 /// - `version` is **required** and must equal `kProtocolVersion`, otherwise `.protocolError`.
-/// - `type` must be one of `stdout`, `stderr`, `exit`, `error`.
+/// - `type` must be one of `ready`, `stdout`, `stderr`, `exit`, `error`.
 /// - `stdout`/`stderr` require `data` encoded as base64. An empty base64 string is
 ///   valid empty output. Missing or invalid data produces `.protocolError`.
 /// - `exit` **requires** `exitCode`; missing/out-of-range → `.protocolError`.
@@ -140,6 +157,11 @@ func decodeResponse(_ json: Data) -> DecodedResponse {
     }
 
     switch resp.type {
+    case "ready":
+        guard let address = resp.ipv4Address, !address.isEmpty else {
+            return .protocolError("ready response missing container IPv4 address")
+        }
+        return .ready(ipv4Address: address)
     case "stdout":
         return decodeOutputStream(resp.data, kind: "stdout")
     case "stderr":
