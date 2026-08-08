@@ -1,0 +1,1514 @@
+#!/bin/sh
+
+set -eu
+
+SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+GHOSTBOX=${GHOSTBOX:-$SCRIPT_DIR/ghostbox}
+INITFS_REFERENCE=${INITFS_REFERENCE:-ghcr.io/apple/containerization/vminit@sha256:a69ff331d77997042afc3c7389969be176dfb657ec9ed46366c0e057ec40a297}
+GHOSTBOX_DOCKER_WAIT_TIMEOUT=${GHOSTBOX_DOCKER_WAIT_TIMEOUT:-10}
+GHOSTBOX_DOCKER_BUILD_TIMEOUT=${GHOSTBOX_DOCKER_BUILD_TIMEOUT:-600}
+BUILDKIT_IMAGE=${BUILDKIT_IMAGE:-docker.io/moby/buildkit@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b}
+REGISTRY_IMAGE=${REGISTRY_IMAGE:-docker.io/library/registry@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373}
+
+if [ -n "${GHOSTBOX_DOCKER_STATE:-}" ]; then
+    STATE_DIR=$GHOSTBOX_DOCKER_STATE
+elif [ -n "${XDG_STATE_HOME:-}" ]; then
+    STATE_DIR=$XDG_STATE_HOME/ghostbox-docker
+else
+    STATE_DIR=${HOME:?HOME is required}/.local/state/ghostbox-docker
+fi
+
+runtime_lock=
+container_ref=
+process_config_ref=
+stdout_ref=
+stderr_ref=
+stdout_pid=
+stderr_pid=
+build_context_mount=
+build_dockerfile_mount=
+build_dir=
+registry_container_ref=
+registry_process_config_ref=
+registry_health_process_ref=
+registry_health_config_ref=
+build_registry_image_ref=
+build_registry_push_ref=
+build_image_store=
+registry_forward_pid=
+stdin_ref=
+stdin_pid=
+run_forward_pids=
+run_mount_refs=
+
+usage() {
+    cat <<'EOF'
+Usage: ghostbox-docker COMMAND
+
+Commands:
+  build [OPTIONS] PATH                 Build an image from a Dockerfile
+  pull [--platform PLATFORM] IMAGE  Pull an image into Ghostbox
+  run [OPTIONS] IMAGE [COMMAND...]  Run a foreground container
+EOF
+}
+
+pull_usage() {
+    cat <<'EOF'
+Usage: ghostbox-docker pull [--platform PLATFORM] IMAGE
+EOF
+}
+
+run_usage() {
+    cat <<'EOF'
+Usage: ghostbox-docker run [OPTIONS] IMAGE [COMMAND] [ARG...]
+
+Options:
+      --rm                      Remove the container when it exits (required)
+      --name NAME               Assign a container name
+  -e, --env NAME[=VALUE]        Set an environment variable
+      --env-file PATH           Read environment variables from a file
+  -w, --workdir PATH            Set the working directory
+  -u, --user UID[:GID]          Set the numeric user and group
+      --entrypoint PATH         Override the image entrypoint
+  -h, --hostname NAME           Set the container hostname
+      --read-only               Make the root filesystem read-only
+      --init                    Run an init process
+      --cpus COUNT              Set an integer CPU limit
+  -m, --memory BYTES            Set a memory limit (b, k, m, or g suffix)
+      --network MODE            Use default/bridge networking or none
+      --pull POLICY             always, missing, or never
+      --platform PLATFORM       Container platform (linux/arm64 only)
+  -i, --interactive             Keep standard input open
+  -v, --volume SRC:DST[:MODE]   Bind mount; MODE supports ro and cache-ttl=0..300
+      --mount SPEC              Attach type=bind; supports cache-ttl=0..300
+  -p, --publish SPEC            Publish 127.0.0.1:HOST:CONTAINER/tcp
+
+Detached containers, TTYs, named volumes/networks, and public port bindings are not implemented.
+EOF
+}
+
+build_usage() {
+    cat <<'EOF'
+Usage: ghostbox-docker build [OPTIONS] PATH
+
+Options:
+  -f, --file PATH          Name of the Dockerfile
+  -t, --tag NAME[:TAG]     Name and optionally tag the image
+      --build-arg NAME=VALUE
+      --no-cache
+      --platform PLATFORM
+      --progress MODE
+      --pull
+      --target STAGE
+EOF
+}
+
+run_with_timeout() {
+    timeout=$1
+    shift
+    /usr/bin/perl -e 'alarm shift @ARGV; exec @ARGV' "$timeout" "$@"
+}
+
+normalize_image_reference() {
+    reference=$1
+    case "$reference" in
+        *://*)
+            printf 'docker: invalid image reference: %s\n' "$reference" >&2
+            return 125
+            ;;
+    esac
+
+    first=${reference%%/*}
+    if [ "$first" = "$reference" ]; then
+        reference=docker.io/library/$reference
+    else
+        case "$first" in
+            *.*|*:*|localhost)
+                if [ "$first" = docker.io ]; then
+                    remainder=${reference#*/}
+                    case "$remainder" in
+                        */*) ;;
+                        *) reference=docker.io/library/$remainder ;;
+                    esac
+                fi
+                ;;
+            *)
+                reference=docker.io/$reference
+                ;;
+        esac
+    fi
+
+    case "$reference" in
+        *@*) ;;
+        *)
+            last=${reference##*/}
+            case "$last" in
+                *:*) ;;
+                *) reference=$reference:latest ;;
+            esac
+            ;;
+    esac
+    printf '%s\n' "$reference"
+}
+
+release_runtime_lock() {
+    if [ -n "$runtime_lock" ]; then
+        rmdir "$runtime_lock" >/dev/null 2>&1 || true
+        runtime_lock=
+    fi
+}
+
+cleanup_run() {
+    set +e
+    if [ -n "$run_forward_pids" ]; then
+        while IFS= read -r record; do
+            [ -n "$record" ] || continue
+            forward_pid=${record#x}
+            kill "$forward_pid" >/dev/null 2>&1
+            sleep 0.1
+            kill -KILL "$forward_pid" >/dev/null 2>&1
+            wait "$forward_pid" 2>/dev/null
+        done <<EOF
+$run_forward_pids
+EOF
+        run_forward_pids=
+    fi
+    if [ -n "$container_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:container:stop "$container_ref" >/dev/null 2>&1
+    fi
+    if [ -n "$stdin_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:reader-stream:close "$stdin_ref" >/dev/null 2>&1
+    fi
+    if [ -n "$stdout_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:writer:close "$stdout_ref" >/dev/null 2>&1
+    fi
+    if [ -n "$stderr_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:writer:close "$stderr_ref" >/dev/null 2>&1
+    fi
+    if [ -n "$stdout_pid" ]; then
+        wait "$stdout_pid" 2>/dev/null
+        stdout_pid=
+    fi
+    if [ -n "$stderr_pid" ]; then
+        wait "$stderr_pid" 2>/dev/null
+        stderr_pid=
+    fi
+    if [ -n "$stdin_pid" ]; then
+        kill "$stdin_pid" >/dev/null 2>&1
+        wait "$stdin_pid" 2>/dev/null
+        stdin_pid=
+    fi
+    if [ -n "$container_ref" ] && [ -n "${manager_ref:-}" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:manager:delete "$manager_ref" "$container_ref" >/dev/null 2>&1
+        container_ref=
+    fi
+    if [ -n "$process_config_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:process-config:delete "$process_config_ref" >/dev/null 2>&1
+        process_config_ref=
+    fi
+    if [ -n "$run_mount_refs" ]; then
+        while IFS= read -r record; do
+            [ -n "$record" ] || continue
+            run_with_timeout 2 "$GHOSTBOX" cn:mount:delete "${record#x}" >/dev/null 2>&1
+        done <<EOF
+$run_mount_refs
+EOF
+        run_mount_refs=
+    fi
+    stdin_ref=
+    release_runtime_lock
+    set -e
+}
+
+cleanup_build() {
+    set +e
+    cleanup_run
+    set +e
+    if [ -n "$registry_forward_pid" ]; then
+        kill "$registry_forward_pid" >/dev/null 2>&1
+        wait "$registry_forward_pid" 2>/dev/null
+        registry_forward_pid=
+    fi
+    if [ -n "$registry_health_process_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:process:delete "$registry_health_process_ref" >/dev/null 2>&1
+        registry_health_process_ref=
+    fi
+    if [ -n "$registry_health_config_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:process-config:delete "$registry_health_config_ref" >/dev/null 2>&1
+        registry_health_config_ref=
+    fi
+    if [ -n "$registry_container_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:container:stop "$registry_container_ref" >/dev/null 2>&1
+        if [ -n "${manager_ref:-}" ]; then
+            run_with_timeout 2 "$GHOSTBOX" cn:manager:delete "$manager_ref" "$registry_container_ref" >/dev/null 2>&1
+        fi
+        registry_container_ref=
+    fi
+    if [ -n "$registry_process_config_ref" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:process-config:delete "$registry_process_config_ref" >/dev/null 2>&1
+        registry_process_config_ref=
+    fi
+    if [ -n "$build_registry_image_ref" ] && [ -n "$build_image_store" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:image-store:delete "$build_image_store" \
+            "$build_registry_image_ref" --perform-cleanup=false >/dev/null 2>&1
+        build_registry_image_ref=
+    fi
+    if [ -n "$build_context_mount" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:mount:delete "$build_context_mount" >/dev/null 2>&1
+        build_context_mount=
+    fi
+    if [ -n "$build_dockerfile_mount" ]; then
+        run_with_timeout 2 "$GHOSTBOX" cn:mount:delete "$build_dockerfile_mount" >/dev/null 2>&1
+        build_dockerfile_mount=
+    fi
+    if [ -n "$build_dir" ]; then
+        rm -rf -- "$build_dir"
+        build_dir=
+    fi
+    set -e
+}
+
+read_runtime_state() {
+    runtime_file=$STATE_DIR/runtime
+    if [ ! -f "$runtime_file" ]; then
+        resource_base=ghostbox-docker-$(id -u)-$(date +%s)-$$
+        manager_name=$resource_base-manager
+        network_name=$resource_base-network
+        runtime_tmp=$STATE_DIR/runtime.tmp.$$
+        printf '%s\n%s\n' "$manager_name" "$network_name" >"$runtime_tmp"
+        mv "$runtime_tmp" "$runtime_file"
+    else
+        {
+            IFS= read -r manager_name
+            IFS= read -r network_name
+        } <"$runtime_file"
+    fi
+
+    case "$manager_name" in
+        ''|*[!A-Za-z0-9_.-]*)
+            printf 'docker run: invalid runtime state in %s\n' "$runtime_file" >&2
+            return 125
+            ;;
+    esac
+    case "$network_name" in
+        ''|*[!A-Za-z0-9_.-]*)
+            printf 'docker run: invalid runtime state in %s\n' "$runtime_file" >&2
+            return 125
+            ;;
+    esac
+    manager_ref=@manager/$manager_name
+    network_ref=@network/$network_name
+}
+
+ensure_runtime() {
+    umask 077
+    mkdir -p "$STATE_DIR"
+    chmod 700 "$STATE_DIR"
+
+    runtime_lock=$STATE_DIR/runtime.lock
+    lock_attempt=0
+    until mkdir "$runtime_lock" 2>/dev/null; do
+        lock_attempt=$((lock_attempt + 1))
+        if [ "$lock_attempt" -ge 50 ]; then
+            printf '%s\n' 'docker run: timed out waiting for the runtime lock' >&2
+            runtime_lock=
+            return 125
+        fi
+        sleep 0.1
+    done
+
+    read_runtime_state
+    if run_with_timeout 10 "$GHOSTBOX" cn:manager:image-store "$manager_ref" >/dev/null 2>&1; then
+        release_runtime_lock
+        return 0
+    fi
+
+    if ! run_with_timeout 10 "$GHOSTBOX" cn:network:subnet "$network_ref" >/dev/null 2>&1; then
+        run_with_timeout 10 "$GHOSTBOX" cn:network:vmnet-create "$network_name" --mode shared >/dev/null
+    fi
+    kernel=$(run_with_timeout 600 "$GHOSTBOX" cn:kernel:install-recommended)
+    image_store=$(run_with_timeout 10 "$GHOSTBOX" cn:image-store:default)
+    run_with_timeout 10 "$GHOSTBOX" cn:manager:create-from-reference "$manager_name" \
+        --kernel "$kernel" \
+        --initfs-reference "$INITFS_REFERENCE" \
+        --image-store "$image_store" \
+        --network "$network_ref" >/dev/null
+    release_runtime_lock
+}
+
+pull_image() {
+    platform=linux/arm64
+    image=
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                pull_usage
+                return 0
+                ;;
+            --platform)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker pull: --platform requires a value' >&2
+                    return 125
+                fi
+                platform=$2
+                shift 2
+                ;;
+            --platform=*)
+                platform=${1#*=}
+                if [ -z "$platform" ]; then
+                    printf '%s\n' 'docker pull: --platform requires a value' >&2
+                    return 125
+                fi
+                shift
+                ;;
+            --*)
+                printf "docker pull: unsupported option '%s'\n" "$1" >&2
+                return 125
+                ;;
+            -*)
+                printf "docker pull: unsupported option '%s'\n" "$1" >&2
+                return 125
+                ;;
+            *)
+                if [ -n "$image" ]; then
+                    printf '%s\n' 'docker pull: exactly one image is required' >&2
+                    return 125
+                fi
+                image=$1
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$image" ]; then
+        pull_usage >&2
+        return 125
+    fi
+    if [ ! -x "$GHOSTBOX" ]; then
+        printf "docker pull: Ghostbox executable not found: %s\n" "$GHOSTBOX" >&2
+        return 127
+    fi
+
+    image=$(normalize_image_reference "$image")
+    image_store=$(run_with_timeout 10 "$GHOSTBOX" cn:image-store:default)
+    image_reference=$(run_with_timeout 600 "$GHOSTBOX" cn:image-store:pull "$image_store" \
+        "$image" --platform "$platform")
+    printf 'Pulled %s (%s)\n' "$image" "$image_reference"
+}
+
+build_image() {
+    dockerfile=Dockerfile
+    tag=
+    platform=linux/arm64
+    progress=auto
+    no_cache=false
+    pull=false
+    target=
+    build_args=
+    context=
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help)
+                build_usage
+                return 0
+                ;;
+            -f|--file)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker build: --file requires a value' >&2
+                    return 125
+                fi
+                dockerfile=$2
+                shift 2
+                ;;
+            --file=*)
+                dockerfile=${1#*=}
+                shift
+                ;;
+            -t|--tag)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker build: --tag requires a value' >&2
+                    return 125
+                fi
+                if [ -n "$tag" ]; then
+                    printf '%s\n' 'docker build: multiple tags are not implemented yet' >&2
+                    return 125
+                fi
+                tag=$2
+                shift 2
+                ;;
+            --tag=*)
+                if [ -n "$tag" ]; then
+                    printf '%s\n' 'docker build: multiple tags are not implemented yet' >&2
+                    return 125
+                fi
+                tag=${1#*=}
+                shift
+                ;;
+            --build-arg)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker build: --build-arg requires a value' >&2
+                    return 125
+                fi
+                case "$2" in
+                    *'
+'*)
+                        printf '%s\n' 'docker build: newlines in --build-arg are not implemented' >&2
+                        return 125
+                        ;;
+                esac
+                build_args=$build_args${build_args:+"
+"}$2
+                shift 2
+                ;;
+            --build-arg=*)
+                argument=${1#*=}
+                case "$argument" in
+                    ''|*'
+'*)
+                        printf '%s\n' 'docker build: invalid --build-arg value' >&2
+                        return 125
+                        ;;
+                esac
+                build_args=$build_args${build_args:+"
+"}$argument
+                shift
+                ;;
+            --no-cache)
+                no_cache=true
+                shift
+                ;;
+            --pull)
+                pull=true
+                shift
+                ;;
+            --platform)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker build: --platform requires a value' >&2
+                    return 125
+                fi
+                platform=$2
+                shift 2
+                ;;
+            --platform=*)
+                platform=${1#*=}
+                shift
+                ;;
+            --progress)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker build: --progress requires a value' >&2
+                    return 125
+                fi
+                progress=$2
+                shift 2
+                ;;
+            --progress=*)
+                progress=${1#*=}
+                shift
+                ;;
+            --target)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    printf '%s\n' 'docker build: --target requires a value' >&2
+                    return 125
+                fi
+                target=$2
+                shift 2
+                ;;
+            --target=*)
+                target=${1#*=}
+                shift
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*)
+                printf "docker build: unsupported option '%s'\n" "$1" >&2
+                return 125
+                ;;
+            *)
+                if [ -n "$context" ]; then
+                    printf '%s\n' 'docker build: exactly one build context is required' >&2
+                    return 125
+                fi
+                context=$1
+                shift
+                ;;
+        esac
+    done
+
+    if [ "$#" -gt 0 ] || [ -z "$context" ]; then
+        build_usage >&2
+        return 125
+    fi
+    if [ "$platform" != linux/arm64 ]; then
+        printf 'docker build: unsupported platform %s; Ghostbox currently builds linux/arm64\n' "$platform" >&2
+        return 125
+    fi
+    case "$progress" in
+        auto|plain|tty|rawjson) ;;
+        *)
+            printf 'docker build: unsupported progress mode %s\n' "$progress" >&2
+            return 125
+            ;;
+    esac
+    case "$GHOSTBOX_DOCKER_BUILD_TIMEOUT" in
+        ''|*[!0-9]*|0|0*)
+            printf '%s\n' 'docker build: GHOSTBOX_DOCKER_BUILD_TIMEOUT must be a positive integer without leading zeroes' >&2
+            return 125
+            ;;
+    esac
+    if [ ! -x "$GHOSTBOX" ]; then
+        printf "docker build: Ghostbox executable not found: %s\n" "$GHOSTBOX" >&2
+        return 127
+    fi
+    if [ ! -d "$context" ]; then
+        printf 'docker build: build context is not a directory: %s\n' "$context" >&2
+        return 125
+    fi
+    context_dir=$(CDPATH='' cd -- "$context" && pwd -P)
+
+    case "$dockerfile" in
+        /*) dockerfile_path=$dockerfile ;;
+        Dockerfile) dockerfile_path=$context_dir/Dockerfile ;;
+        *) dockerfile_path=$(pwd -P)/$dockerfile ;;
+    esac
+    if [ ! -f "$dockerfile_path" ]; then
+        printf 'docker build: Dockerfile not found: %s\n' "$dockerfile_path" >&2
+        return 125
+    fi
+    dockerfile_dir=$(CDPATH='' cd -- "$(dirname "$dockerfile_path")" && pwd -P)
+    dockerfile_name=$(basename "$dockerfile_path")
+
+    build_id=$(date +%s)-$$
+    if [ -z "$tag" ]; then
+        tag=ghostbox-docker-untagged:$build_id
+    fi
+    tag=$(normalize_image_reference "$tag")
+
+    trap cleanup_build EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    ensure_runtime
+    build_dir=$STATE_DIR/builds/$build_id
+    mkdir -p "$build_dir"
+
+    build_context_mount=$(run_with_timeout 10 "$GHOSTBOX" cn:mount:guest-share \
+        "docker-build-$build_id-context" --source "$context_dir" \
+        --destination /workspace/context --read-only=true)
+    build_dockerfile_mount=$(run_with_timeout 10 "$GHOSTBOX" cn:mount:guest-share \
+        "docker-build-$build_id-dockerfile" --source "$dockerfile_dir" \
+        --destination /workspace/dockerfile --read-only=true)
+
+    image_store=$(run_with_timeout 10 "$GHOSTBOX" cn:manager:image-store "$manager_ref")
+    build_image_store=$image_store
+    run_with_timeout 600 "$GHOSTBOX" cn:image-store:pull "$image_store" \
+        "$BUILDKIT_IMAGE" --platform linux/arm64 >/dev/null
+    run_with_timeout 600 "$GHOSTBOX" cn:image-store:pull "$image_store" \
+        "$REGISTRY_IMAGE" --platform linux/arm64 >/dev/null
+
+    registry_name=docker-build-$build_id-registry
+    registry_process_name=$registry_name-process
+    registry_container_ref=@container/$registry_name
+    registry_process_config_ref=@process-config/$registry_process_name
+    run_with_timeout 10 "$GHOSTBOX" cn:process-config:create "$registry_process_name" \
+        -- /entrypoint.sh /etc/docker/registry/config.yml >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:manager:create-container "$manager_ref" "$registry_name" \
+        --reference "$REGISTRY_IMAGE" \
+        --process "$registry_process_config_ref" \
+        --networking true \
+        --cpus 1 \
+        --memory 536870912 >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:container:create "$registry_container_ref" >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:container:start "$registry_container_ref" >/dev/null
+
+    registry_health_name=$registry_name-health
+    registry_health_config_ref=@process-config/$registry_health_name
+    # The shell program is expanded inside the registry container.
+    # shellcheck disable=SC2016
+    run_with_timeout 10 "$GHOSTBOX" cn:process-config:create "$registry_health_name" \
+        -- /bin/sh -c 'attempt=0; until wget -qO- http://127.0.0.1:5000/v2/ | grep -q "{}"; do attempt=$((attempt + 1)); [ "$attempt" -lt 50 ] || exit 1; sleep 0.1; done' >/dev/null
+    registry_health_process_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:container:exec "$registry_container_ref" \
+        health --configuration "$registry_health_config_ref")
+    run_with_timeout 10 "$GHOSTBOX" cn:process:start "$registry_health_process_ref" >/dev/null
+    registry_health_status=$(run_with_timeout 10 "$GHOSTBOX" cn:process:wait "$registry_health_process_ref" \
+        --timeout-seconds 10)
+    registry_health_exit=$(printf '%s' "$registry_health_status" | plutil -extract exitCode raw -o - -)
+    if [ "$registry_health_exit" -ne 0 ]; then
+        printf '%s\n' 'docker build: local registry failed its health check' >&2
+        return 1
+    fi
+    run_with_timeout 10 "$GHOSTBOX" cn:process:delete "$registry_health_process_ref" >/dev/null
+    registry_health_process_ref=
+    run_with_timeout 10 "$GHOSTBOX" cn:process-config:delete "$registry_health_config_ref" >/dev/null
+    registry_health_config_ref=
+
+    interfaces=$(run_with_timeout 10 "$GHOSTBOX" cn:container:interfaces "$registry_container_ref")
+    # Ghostbox emits interface references as a whitespace-delimited list.
+    # shellcheck disable=SC2086
+    set -- $interfaces
+    if [ "$#" -eq 0 ]; then
+        printf '%s\n' 'docker build: local registry has no network interface' >&2
+        return 1
+    fi
+    registry_address=$(run_with_timeout 10 "$GHOSTBOX" cn:interface:ipv4-address "$1")
+    registry_address=${registry_address#\"}
+    registry_address=${registry_address%\"}
+    registry_address=${registry_address%/*}
+    build_registry_push_ref=$registry_address:5000/ghostbox-build:$build_id
+    registry_port=$((20000 + ($$ % 20000)))
+    build_registry_image_ref=127.0.0.1:$registry_port/ghostbox-build:$build_id
+    forward_timeout=$((GHOSTBOX_DOCKER_BUILD_TIMEOUT + 30))
+    run_with_timeout "$forward_timeout" "$GHOSTBOX" cn:container:forward "$registry_container_ref" \
+        -p "127.0.0.1:$registry_port:5000/tcp" >"$build_dir/registry-forward.log" 2>&1 &
+    registry_forward_pid=$!
+    sleep 0.2
+
+    container_name=docker-build-$build_id
+    process_config_name=$container_name-process
+    stdout_name=$container_name-stdout
+    stderr_name=$container_name-stderr
+    container_ref=@container/$container_name
+    process_config_ref=@process-config/$process_config_name
+    stdout_ref=@writer/$stdout_name
+    stderr_ref=@writer/$stderr_name
+
+    set -- /usr/bin/buildctl-daemonless.sh build \
+        --frontend dockerfile.v0 \
+        --local context=/workspace/context \
+        --local dockerfile=/workspace/dockerfile \
+        --opt "filename=$dockerfile_name" \
+        --opt platform=linux/arm64 \
+        --progress "$progress" \
+        --output "type=image,name=$build_registry_push_ref,push=true,registry.insecure=true"
+    if [ "$no_cache" = true ]; then
+        set -- "$@" --no-cache
+    fi
+    if [ "$pull" = true ]; then
+        set -- "$@" --opt image-resolve-mode=pull
+    fi
+    if [ -n "$target" ]; then
+        set -- "$@" --opt "target=$target"
+    fi
+    if [ -n "$build_args" ]; then
+        while IFS= read -r argument; do
+            set -- "$@" --opt "build-arg:$argument"
+        done <<EOF
+$build_args
+EOF
+    fi
+
+    run_with_timeout 10 "$GHOSTBOX" cn:writer:create "$stdout_name" >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:writer:create "$stderr_name" >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:process-config:create "$process_config_name" \
+        --environment PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+        --environment HOME=/home/user \
+        --environment USER=user \
+        --environment XDG_RUNTIME_DIR=/run/user/1000 \
+        --environment TMPDIR=/home/user/.local/tmp \
+        --environment BUILDKIT_HOST=unix:///run/user/1000/buildkit/buildkitd.sock \
+        --environment 'BUILDKITD_FLAGS=--oci-worker-no-process-sandbox --oci-worker-snapshotter=native' \
+        --user '{"uid":1000,"gid":1000}' \
+        --stdout "$stdout_ref" \
+        --stderr "$stderr_ref" \
+        -- "$@" >/dev/null
+
+    set -- cn:manager:create-container "$manager_ref" "$container_name" \
+        --reference "$BUILDKIT_IMAGE" \
+        --process "$process_config_ref" \
+        --networking true \
+        --cpus 1 \
+        --memory 536870912
+    default_mounts=$(run_with_timeout 10 "$GHOSTBOX" cn:container:default-mounts)
+    for mount_ref in $default_mounts "$build_context_mount" "$build_dockerfile_mount"; do
+        set -- "$@" --mounts "$mount_ref"
+    done
+    run_with_timeout 10 "$GHOSTBOX" "$@" >/dev/null
+
+    attach_timeout=$((GHOSTBOX_DOCKER_BUILD_TIMEOUT + 10))
+    run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:writer:attach "$stdout_ref" &
+    stdout_pid=$!
+    run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:writer:attach "$stderr_ref" >&2 &
+    stderr_pid=$!
+    run_with_timeout 10 "$GHOSTBOX" cn:container:create "$container_ref" >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:container:start "$container_ref" >/dev/null
+    status=$(run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:container:wait "$container_ref" \
+        --timeout-seconds "$GHOSTBOX_DOCKER_BUILD_TIMEOUT")
+    build_exit=$(printf '%s' "$status" | plutil -extract exitCode raw -o - -)
+    if [ "$build_exit" -ne 0 ]; then
+        return "$build_exit"
+    fi
+
+    cleanup_run
+    run_with_timeout 600 "$GHOSTBOX" cn:image-store:pull "$image_store" "$build_registry_image_ref" \
+        --platform linux/arm64 --insecure=true >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:image-store:tag "$image_store" "$build_registry_image_ref" "$tag" >/dev/null
+    image_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:image-store:get "$image_store" "$tag" --pull=false)
+    digest=$(run_with_timeout 10 "$GHOSTBOX" cn:image:digest "$image_ref")
+    digest=${digest#\"}
+    digest=${digest%\"}
+
+    cleanup_build
+    trap - EXIT HUP INT TERM
+    printf '%s\n' "$digest"
+}
+
+run_option_value() {
+    option=$1
+    count=$2
+    value=${3-}
+    if [ "$count" -lt 2 ] || [ -z "$value" ]; then
+        printf 'docker run: %s requires a value\n' "$option" >&2
+        return 125
+    fi
+    case "$value" in
+        *'
+'*)
+            printf 'docker run: newlines in %s are not implemented\n' "$option" >&2
+            return 125
+            ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+parse_memory_bytes() {
+    memory_value=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$memory_value" in
+        *gib) memory_number=${memory_value%gib}; memory_multiplier=1073741824 ;;
+        *gb) memory_number=${memory_value%gb}; memory_multiplier=1073741824 ;;
+        *g) memory_number=${memory_value%g}; memory_multiplier=1073741824 ;;
+        *mib) memory_number=${memory_value%mib}; memory_multiplier=1048576 ;;
+        *mb) memory_number=${memory_value%mb}; memory_multiplier=1048576 ;;
+        *m) memory_number=${memory_value%m}; memory_multiplier=1048576 ;;
+        *kib) memory_number=${memory_value%kib}; memory_multiplier=1024 ;;
+        *kb) memory_number=${memory_value%kb}; memory_multiplier=1024 ;;
+        *k) memory_number=${memory_value%k}; memory_multiplier=1024 ;;
+        *b) memory_number=${memory_value%b}; memory_multiplier=1 ;;
+        *) memory_number=$memory_value; memory_multiplier=1 ;;
+    esac
+    case "$memory_number" in
+        ''|*[!0-9]*|0|0*)
+            printf 'docker run: invalid memory limit %s\n' "$1" >&2
+            return 125
+            ;;
+    esac
+    if [ "${#memory_number}" -gt 12 ]; then
+        printf 'docker run: memory limit is too large: %s\n' "$1" >&2
+        return 125
+    fi
+    maximum_memory_number=$((9223372036854775807 / memory_multiplier))
+    if [ "$memory_number" -gt "$maximum_memory_number" ]; then
+        printf 'docker run: memory limit is too large: %s\n' "$1" >&2
+        return 125
+    fi
+    memory_bytes=$((memory_number * memory_multiplier))
+    if [ "$memory_bytes" -lt 6291456 ]; then
+        printf '%s\n' 'docker run: minimum memory limit is 6m' >&2
+        return 125
+    fi
+    printf '%s\n' "$memory_bytes"
+}
+
+image_array_records() {
+    image_array_key=$1
+    image_array_count=$(printf '%s' "$image_config" | \
+        plutil -extract "config.$image_array_key" raw -o - - 2>/dev/null) || return 0
+    image_array_index=0
+    while [ "$image_array_index" -lt "$image_array_count" ]; do
+        image_array_value=$(printf '%s' "$image_config" | \
+            plutil -extract "config.$image_array_key.$image_array_index" raw -o - -)
+        case "$image_array_value" in
+            *'
+'*)
+                printf 'docker run: newlines in image %s values are not implemented\n' "$image_array_key" >&2
+                return 125
+                ;;
+        esac
+        printf 'x%s\n' "$image_array_value"
+        image_array_index=$((image_array_index + 1))
+    done
+}
+
+image_command_array_records() {
+    image_command_key=$1
+    image_command_count=$(printf '%s' "$image_config" | \
+        plutil -extract "config.$image_command_key" raw -o - - 2>/dev/null) || return 0
+    image_command_index=0
+    while [ "$image_command_index" -lt "$image_command_count" ]; do
+        image_command_value=$(printf '%s' "$image_config" | \
+            plutil -extract "config.$image_command_key.$image_command_index" raw -o - -)
+        image_command_encoded=$(printf '%s' "$image_command_value" | base64 | tr -d '\n')
+        printf 'x%s\n' "$image_command_encoded"
+        image_command_index=$((image_command_index + 1))
+    done
+}
+
+image_config_value() {
+    printf '%s' "$image_config" | plutil -extract "config.$1" raw -o - - 2>/dev/null || true
+}
+
+upsert_run_environment() {
+    environment_assignment=$1
+    environment_name=${environment_assignment%%=*}
+    if [ -z "$environment_name" ] || [ "$environment_name" = "$environment_assignment" ]; then
+        printf 'docker run: invalid environment assignment: %s\n' "$environment_assignment" >&2
+        return 125
+    fi
+    updated_environment=
+    if [ -n "$resolved_environment" ]; then
+        while IFS= read -r environment_record; do
+            [ -n "$environment_record" ] || continue
+            existing_assignment=${environment_record#x}
+            existing_name=${existing_assignment%%=*}
+            if [ "$existing_name" != "$environment_name" ]; then
+                updated_environment=$updated_environment${updated_environment:+"
+"}$environment_record
+            fi
+        done <<EOF
+$resolved_environment
+EOF
+    fi
+    resolved_environment=$updated_environment${updated_environment:+"
+"}x$environment_assignment
+}
+
+unset_run_environment() {
+    environment_name=$1
+    updated_environment=
+    if [ -n "$resolved_environment" ]; then
+        while IFS= read -r environment_record; do
+            [ -n "$environment_record" ] || continue
+            existing_assignment=${environment_record#x}
+            existing_name=${existing_assignment%%=*}
+            if [ "$existing_name" != "$environment_name" ]; then
+                updated_environment=$updated_environment${updated_environment:+"
+"}$environment_record
+            fi
+        done <<EOF
+$resolved_environment
+EOF
+    fi
+    resolved_environment=$updated_environment
+}
+
+apply_run_environment_value() {
+    environment_value=$1
+    case "$environment_value" in
+        *=*) upsert_run_environment "$environment_value" ;;
+        '')
+            printf '%s\n' 'docker run: environment variable name cannot be empty' >&2
+            return 125
+            ;;
+        *)
+            if inherited_value=$(/usr/bin/printenv "$environment_value"); then
+                case "$inherited_value" in
+                    *'
+'*)
+                        printf 'docker run: newlines in inherited environment values are not implemented\n' >&2
+                        return 125
+                        ;;
+                esac
+                upsert_run_environment "$environment_value=$inherited_value"
+            else
+                unset_run_environment "$environment_value"
+            fi
+            ;;
+    esac
+}
+
+apply_run_env_file() {
+    environment_file=$1
+    if [ ! -f "$environment_file" ]; then
+        printf 'docker run: env file not found: %s\n' "$environment_file" >&2
+        return 125
+    fi
+    carriage_return=$(printf '\r')
+    while IFS= read -r environment_line || [ -n "$environment_line" ]; do
+        case "$environment_line" in
+            *"$carriage_return") environment_line=${environment_line%"$carriage_return"} ;;
+        esac
+        case "$environment_line" in
+            ''|'#'*) continue ;;
+            'export '*) environment_line=${environment_line#export } ;;
+        esac
+        apply_run_environment_value "$environment_line"
+    done <"$environment_file"
+}
+
+normalize_run_user() {
+    user_value=$1
+    case "$user_value" in
+        *:*:*)
+            printf 'docker run: only numeric UID[:GID] users are implemented: %s\n' "$user_value" >&2
+            return 125
+            ;;
+        *:*) user_uid=${user_value%%:*}; user_gid=${user_value#*:} ;;
+        *) user_uid=$user_value; user_gid=0 ;;
+    esac
+    case "$user_uid" in
+        ''|*[!0-9]*)
+            printf 'docker run: only numeric UID[:GID] users are implemented: %s\n' "$user_value" >&2
+            return 125
+            ;;
+    esac
+    case "$user_gid" in
+        ''|*[!0-9]*)
+            printf 'docker run: only numeric UID[:GID] users are implemented: %s\n' "$user_value" >&2
+            return 125
+            ;;
+    esac
+    printf '{"uid":%s,"gid":%s}\n' "$user_uid" "$user_gid"
+}
+
+create_run_bind_mount() {
+    bind_source=$1
+    bind_destination=$2
+    bind_read_only=$3
+    bind_create_source=$4
+    bind_cache_ttl=${5-}
+    case "$bind_destination" in
+        /*) ;;
+        *)
+            printf 'docker run: mount destination must be absolute: %s\n' "$bind_destination" >&2
+            return 125
+            ;;
+    esac
+    case "$bind_source" in
+        /*) ;;
+        *) bind_source=$(pwd -P)/$bind_source ;;
+    esac
+    if [ ! -e "$bind_source" ]; then
+        if [ "$bind_create_source" = true ]; then
+            mkdir -p -- "$bind_source"
+        else
+            printf 'docker run: bind source does not exist: %s\n' "$bind_source" >&2
+            return 125
+        fi
+    fi
+    if [ -d "$bind_source" ]; then
+        bind_source=$(CDPATH='' cd -- "$bind_source" && pwd -P)
+    else
+        bind_parent=$(CDPATH='' cd -- "$(dirname "$bind_source")" && pwd -P)
+        bind_source=$bind_parent/$(basename "$bind_source")
+    fi
+    mount_index=$((mount_index + 1))
+    if [ -n "$bind_cache_ttl" ]; then
+        mount_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:mount:guest-share \
+            "$run_resource_name-mount-$mount_index" --source "$bind_source" \
+            --destination "$bind_destination" --read-only="$bind_read_only" \
+            --cache-ttl "$bind_cache_ttl")
+    else
+        mount_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:mount:guest-share \
+            "$run_resource_name-mount-$mount_index" --source "$bind_source" \
+            --destination "$bind_destination" --read-only="$bind_read_only")
+    fi
+    run_mount_refs=$run_mount_refs${run_mount_refs:+"
+"}x$mount_ref
+}
+
+create_run_volume_mount() {
+    volume_spec=$1
+    volume_source=${volume_spec%%:*}
+    volume_rest=${volume_spec#*:}
+    if [ -z "$volume_source" ] || [ "$volume_rest" = "$volume_spec" ]; then
+        printf 'docker run: only bind SRC:DST[:ro] volumes are implemented: %s\n' "$volume_spec" >&2
+        return 125
+    fi
+    case "$volume_source" in
+        /*|./*|../*) ;;
+        *)
+            printf 'docker run: named volumes are not implemented: %s\n' "$volume_source" >&2
+            return 125
+            ;;
+    esac
+    case "$volume_rest" in
+        *:*)
+            volume_destination=${volume_rest%%:*}
+            volume_mode=${volume_rest#*:}
+            volume_read_only=false
+            volume_cache_ttl=
+            old_ifs=$IFS
+            IFS=,
+            set -f
+            # shellcheck disable=SC2086
+            set -- $volume_mode
+            set +f
+            IFS=$old_ifs
+            for volume_option in "$@"; do
+                case "$volume_option" in
+                    ro) volume_read_only=true ;;
+                    rw|'') volume_read_only=false ;;
+                    cache-ttl=*) volume_cache_ttl=${volume_option#cache-ttl=} ;;
+                    *)
+                        printf 'docker run: unsupported volume mode: %s\n' "$volume_option" >&2
+                        return 125
+                        ;;
+                esac
+            done
+            ;;
+        *) volume_destination=$volume_rest; volume_read_only=false; volume_cache_ttl= ;;
+    esac
+    case "$volume_cache_ttl" in
+        '') ;;
+        *[!0-9]*)
+            printf 'docker run: volume cache-ttl must be an integer from 0 through 300: %s\n' "$volume_cache_ttl" >&2
+            return 125
+            ;;
+        *)
+            if [ "$volume_cache_ttl" -gt 300 ]; then
+                printf 'docker run: volume cache-ttl must be an integer from 0 through 300: %s\n' "$volume_cache_ttl" >&2
+                return 125
+            fi
+            ;;
+    esac
+    create_run_bind_mount "$volume_source" "$volume_destination" "$volume_read_only" true "$volume_cache_ttl"
+}
+
+create_run_mount() {
+    mount_spec=$1
+    mount_type=
+    mount_source=
+    mount_destination=
+    mount_read_only=false
+    mount_cache_ttl=
+    old_ifs=$IFS
+    IFS=,
+    set -f
+    # Split the comma-delimited mount specification with globbing disabled.
+    # shellcheck disable=SC2086
+    set -- $mount_spec
+    set +f
+    IFS=$old_ifs
+    for mount_field in "$@"; do
+        case "$mount_field" in
+            type=*) mount_type=${mount_field#type=} ;;
+            src=*|source=*) mount_source=${mount_field#*=} ;;
+            dst=*|destination=*|target=*) mount_destination=${mount_field#*=} ;;
+            ro|readonly|read-only) mount_read_only=true ;;
+            readonly=true|read-only=true) mount_read_only=true ;;
+            readonly=false|read-only=false) mount_read_only=false ;;
+            cache-ttl=*) mount_cache_ttl=${mount_field#cache-ttl=} ;;
+            *)
+                printf 'docker run: unsupported --mount field: %s\n' "$mount_field" >&2
+                return 125
+                ;;
+        esac
+    done
+    if [ "$mount_type" != bind ] || [ -z "$mount_source" ] || [ -z "$mount_destination" ]; then
+        printf 'docker run: --mount currently requires type=bind,src=PATH,dst=PATH\n' >&2
+        return 125
+    fi
+    case "$mount_cache_ttl" in
+        '') ;;
+        *[!0-9]*)
+            printf 'docker run: --mount cache-ttl must be an integer from 0 through 300: %s\n' "$mount_cache_ttl" >&2
+            return 125
+            ;;
+        *)
+            if [ "$mount_cache_ttl" -gt 300 ]; then
+                printf 'docker run: --mount cache-ttl must be an integer from 0 through 300: %s\n' "$mount_cache_ttl" >&2
+                return 125
+            fi
+            ;;
+    esac
+    create_run_bind_mount "$mount_source" "$mount_destination" "$mount_read_only" false "$mount_cache_ttl"
+}
+
+normalize_run_publish() {
+    publish_spec=$1
+    case "$publish_spec" in
+        */tcp) publish_spec=${publish_spec%/tcp} ;;
+        */*)
+            printf 'docker run: only TCP publishing is implemented: %s\n' "$1" >&2
+            return 125
+            ;;
+    esac
+    publish_ip=${publish_spec%%:*}
+    publish_rest=${publish_spec#*:}
+    publish_host_port=${publish_rest%%:*}
+    publish_container_port=${publish_rest#*:}
+    if [ "$publish_ip" != 127.0.0.1 ] || [ "$publish_rest" = "$publish_spec" ] || \
+        [ "$publish_container_port" = "$publish_rest" ]; then
+        printf 'docker run: publish must use 127.0.0.1:HOST:CONTAINER[/tcp]\n' >&2
+        return 125
+    fi
+    case "$publish_rest" in
+        *:*:*)
+            printf 'docker run: invalid publish specification: %s\n' "$1" >&2
+            return 125
+            ;;
+    esac
+    case "$publish_host_port" in ''|*[!0-9]*) printf 'docker run: invalid publish specification: %s\n' "$1" >&2; return 125 ;; esac
+    case "$publish_container_port" in ''|*[!0-9]*) printf 'docker run: invalid publish specification: %s\n' "$1" >&2; return 125 ;; esac
+    if [ "$publish_host_port" -lt 1 ] || [ "$publish_host_port" -gt 65535 ] || \
+        [ "$publish_container_port" -lt 1 ] || [ "$publish_container_port" -gt 65535 ]; then
+        printf 'docker run: published ports must be between 1 and 65535\n' >&2
+        return 125
+    fi
+    printf '127.0.0.1:%s:%s/tcp\n' "$publish_host_port" "$publish_container_port"
+}
+
+append_command_records() {
+    records_to_append=$1
+    [ -n "$records_to_append" ] || return 0
+    while IFS= read -r command_record; do
+        [ -n "$command_record" ] || continue
+        resolved_command=$resolved_command${resolved_command:+"
+"}$command_record
+    done <<EOF
+$records_to_append
+EOF
+}
+
+run_image() {
+    remove=false
+    image=
+    requested_name=
+    hostname=
+    workdir=
+    user_value=
+    entrypoint=
+    entrypoint_set=false
+    read_only=false
+    use_init=false
+    cpus=1
+    memory=536870912
+    networking=true
+    pull_policy=missing
+    platform=linux/arm64
+    interactive=false
+    environment_operations=
+    mount_operations=
+    publish_records=
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --help)
+                run_usage
+                return 0
+                ;;
+            --rm) remove=true; shift ;;
+            -d|--detach)
+                printf '%s\n' 'docker run: detached mode is not implemented' >&2
+                return 125
+                ;;
+            --name|-w|--workdir|-u|--user|--entrypoint|-h|--hostname|--cpus|-m|--memory|--network|--net|--pull|--platform|-e|--env|--env-file|-v|--volume|--mount|-p|--publish)
+                option=$1
+                value=$(run_option_value "$option" "$#" "${2-}") || return $?
+                case "$option" in
+                    --name) requested_name=$value ;;
+                    -w|--workdir) workdir=$value ;;
+                    -u|--user) user_value=$value ;;
+                    --entrypoint) entrypoint=$value; entrypoint_set=true ;;
+                    -h|--hostname) hostname=$value ;;
+                    --cpus) cpus=$value ;;
+                    -m|--memory) memory=$value ;;
+                    --network|--net) network_mode=$value ;;
+                    --pull) pull_policy=$value ;;
+                    --platform) platform=$value ;;
+                    -e|--env) environment_operations=$environment_operations${environment_operations:+"
+"}v$value ;;
+                    --env-file) environment_operations=$environment_operations${environment_operations:+"
+"}f$value ;;
+                    -v|--volume) mount_operations=$mount_operations${mount_operations:+"
+"}v$value ;;
+                    --mount) mount_operations=$mount_operations${mount_operations:+"
+"}m$value ;;
+                    -p|--publish)
+                        normalized_publish=$(normalize_run_publish "$value") || return $?
+                        publish_records=$publish_records${publish_records:+"
+"}x$normalized_publish
+                        ;;
+                esac
+                shift 2
+                ;;
+            --name=*|--workdir=*|--user=*|--entrypoint=*|--hostname=*|--cpus=*|--memory=*|--network=*|--net=*|--pull=*|--platform=*|--env=*|--env-file=*|--volume=*|--mount=*|--publish=*)
+                option=${1%%=*}
+                value=${1#*=}
+                value=$(run_option_value "$option" 2 "$value") || return $?
+                case "$option" in
+                    --name) requested_name=$value ;;
+                    --workdir) workdir=$value ;;
+                    --user) user_value=$value ;;
+                    --entrypoint) entrypoint=$value; entrypoint_set=true ;;
+                    --hostname) hostname=$value ;;
+                    --cpus) cpus=$value ;;
+                    --memory) memory=$value ;;
+                    --network|--net) network_mode=$value ;;
+                    --pull) pull_policy=$value ;;
+                    --platform) platform=$value ;;
+                    --env) environment_operations=$environment_operations${environment_operations:+"
+"}v$value ;;
+                    --env-file) environment_operations=$environment_operations${environment_operations:+"
+"}f$value ;;
+                    --volume) mount_operations=$mount_operations${mount_operations:+"
+"}v$value ;;
+                    --mount) mount_operations=$mount_operations${mount_operations:+"
+"}m$value ;;
+                    --publish)
+                        normalized_publish=$(normalize_run_publish "$value") || return $?
+                        publish_records=$publish_records${publish_records:+"
+"}x$normalized_publish
+                        ;;
+                esac
+                shift
+                ;;
+            --read-only) read_only=true; shift ;;
+            --init) use_init=true; shift ;;
+            -i|--interactive) interactive=true; shift ;;
+            --)
+                shift
+                if [ "$#" -gt 0 ]; then image=$1; shift; fi
+                break
+                ;;
+            -*)
+                printf "docker run: unsupported option '%s'\n" "$1" >&2
+                return 125
+                ;;
+            *) image=$1; shift; break ;;
+        esac
+    done
+
+    cli_command_records=
+    for command_argument in "$@"; do
+        command_encoded=$(printf '%s' "$command_argument" | base64 | tr -d '\n')
+        cli_command_records=$cli_command_records${cli_command_records:+"
+"}x$command_encoded
+    done
+    if [ "$remove" != true ]; then
+        printf '%s\n' 'docker run: --rm is required until persistent containers are implemented' >&2
+        return 125
+    fi
+    if [ -z "$image" ]; then run_usage >&2; return 125; fi
+    case "$requested_name" in
+        '') ;;
+        *[!A-Za-z0-9_.-]*|[!A-Za-z0-9]*)
+            printf 'docker run: invalid container name: %s\n' "$requested_name" >&2
+            return 125
+            ;;
+    esac
+    if [ "${#requested_name}" -gt 128 ]; then
+        printf 'docker run: container name exceeds 128 bytes: %s\n' "$requested_name" >&2
+        return 125
+    fi
+    case "$hostname" in *'
+'*) printf '%s\n' 'docker run: invalid hostname' >&2; return 125 ;; esac
+    if [ -n "$workdir" ]; then
+        case "$workdir" in /*) ;; *) printf 'docker run: workdir must be absolute: %s\n' "$workdir" >&2; return 125 ;; esac
+    fi
+    case "$cpus" in ''|*[!0-9]*|0|0*) printf 'docker run: --cpus currently requires a positive integer\n' >&2; return 125 ;; esac
+    memory=$(parse_memory_bytes "$memory") || return $?
+    network_mode=${network_mode:-default}
+    case "$network_mode" in default|bridge) networking=true ;; none) networking=false ;; *) printf 'docker run: unsupported network mode: %s\n' "$network_mode" >&2; return 125 ;; esac
+    if [ "$networking" = false ] && [ -n "$publish_records" ]; then
+        printf '%s\n' 'docker run: port publishing is incompatible with --network=none' >&2
+        return 125
+    fi
+    case "$pull_policy" in always|missing|never) ;; *) printf 'docker run: invalid pull policy: %s\n' "$pull_policy" >&2; return 125 ;; esac
+    if [ "$platform" != linux/arm64 ]; then printf 'docker run: unsupported platform: %s\n' "$platform" >&2; return 125; fi
+    case "$GHOSTBOX_DOCKER_WAIT_TIMEOUT" in
+        ''|*[!0-9]*|0|0*) printf '%s\n' 'docker run: GHOSTBOX_DOCKER_WAIT_TIMEOUT must be a positive integer without leading zeroes' >&2; return 125 ;;
+    esac
+    if [ ! -x "$GHOSTBOX" ]; then printf "docker run: Ghostbox executable not found: %s\n" "$GHOSTBOX" >&2; return 127; fi
+
+    trap cleanup_run EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    image=$(normalize_image_reference "$image")
+    ensure_runtime
+    image_store=$(run_with_timeout 10 "$GHOSTBOX" cn:manager:image-store "$manager_ref")
+    case "$pull_policy" in
+        always)
+            image_ref=$(run_with_timeout 600 "$GHOSTBOX" cn:image-store:pull "$image_store" "$image" --platform "$platform")
+            ;;
+        missing)
+            if ! image_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:image-store:get "$image_store" "$image" --pull=false 2>/dev/null); then
+                image_ref=$(run_with_timeout 600 "$GHOSTBOX" cn:image-store:pull "$image_store" "$image" --platform "$platform")
+            fi
+            ;;
+        never)
+            if ! image_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:image-store:get "$image_store" "$image" --pull=false); then
+                printf 'docker run: image not found locally: %s\n' "$image" >&2
+                return 125
+            fi
+            ;;
+    esac
+
+    image_config=$(run_with_timeout 10 "$GHOSTBOX" cn:image:config "$image_ref" "$platform")
+    image_entrypoint_records=$(image_command_array_records Entrypoint)
+    image_cmd_records=$(image_command_array_records Cmd)
+    image_environment_records=$(image_array_records Env)
+    image_workdir=$(image_config_value WorkingDir)
+    image_user=$(image_config_value User)
+
+    resolved_environment=
+    if [ -n "$image_environment_records" ]; then
+        while IFS= read -r environment_record; do
+            [ -n "$environment_record" ] || continue
+            upsert_run_environment "${environment_record#x}"
+        done <<EOF
+$image_environment_records
+EOF
+    fi
+    if [ -n "$environment_operations" ]; then
+        while IFS= read -r environment_operation; do
+            [ -n "$environment_operation" ] || continue
+            case "$environment_operation" in
+                v*) apply_run_environment_value "${environment_operation#v}" ;;
+                f*) apply_run_env_file "${environment_operation#f}" ;;
+            esac
+        done <<EOF
+$environment_operations
+EOF
+    fi
+
+    resolved_command=
+    if [ "$entrypoint_set" = true ]; then
+        entrypoint_encoded=$(printf '%s' "$entrypoint" | base64 | tr -d '\n')
+        append_command_records "x$entrypoint_encoded"
+        append_command_records "$cli_command_records"
+    elif [ -n "$image_entrypoint_records" ]; then
+        append_command_records "$image_entrypoint_records"
+        if [ -n "$cli_command_records" ]; then append_command_records "$cli_command_records"; else append_command_records "$image_cmd_records"; fi
+    elif [ -n "$cli_command_records" ]; then
+        append_command_records "$cli_command_records"
+    else
+        append_command_records "$image_cmd_records"
+    fi
+    if [ -z "$resolved_command" ]; then printf '%s\n' 'docker run: no command specified' >&2; return 125; fi
+    [ -n "$workdir" ] || workdir=${image_workdir:-/}
+    [ -n "$user_value" ] || user_value=$image_user
+    user_json=
+    if [ -n "$user_value" ]; then user_json=$(normalize_run_user "$user_value") || return $?; fi
+
+    run_resource_name=docker-run-$(date +%s)-$$
+    container_name=${requested_name:-$run_resource_name}
+    process_config_name=$run_resource_name-process
+    stdout_name=$run_resource_name-stdout
+    stderr_name=$run_resource_name-stderr
+    mount_index=0
+
+    stdout_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:writer:create "$stdout_name")
+    stderr_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:writer:create "$stderr_name")
+    if [ "$interactive" = true ]; then
+        stdin_ref=$(run_with_timeout 10 "$GHOSTBOX" cn:reader-stream:create "$run_resource_name-stdin")
+    fi
+    if [ -n "$mount_operations" ]; then
+        while IFS= read -r mount_operation; do
+            [ -n "$mount_operation" ] || continue
+            case "$mount_operation" in
+                v*) create_run_volume_mount "${mount_operation#v}" ;;
+                m*) create_run_mount "${mount_operation#m}" ;;
+            esac
+        done <<EOF
+$mount_operations
+EOF
+    fi
+
+    set -- cn:process-config:create "$process_config_name" --no-new-privileges true \
+        --working-directory "$workdir" --stdout "$stdout_ref" --stderr "$stderr_ref"
+    if [ -n "$stdin_ref" ]; then set -- "$@" --stdin "$stdin_ref"; fi
+    if [ -n "$user_json" ]; then set -- "$@" --user "$user_json"; fi
+    if [ -n "$resolved_environment" ]; then
+        while IFS= read -r environment_record; do
+            [ -n "$environment_record" ] || continue
+            set -- "$@" --environment "${environment_record#x}"
+        done <<EOF
+$resolved_environment
+EOF
+    fi
+    set -- "$@" --
+    while IFS= read -r command_record; do
+        [ -n "$command_record" ] || continue
+        command_with_marker=$(printf '%s' "${command_record#x}" | base64 -d; printf x)
+        set -- "$@" "${command_with_marker%x}"
+    done <<EOF
+$resolved_command
+EOF
+    process_config_ref=$(run_with_timeout 10 "$GHOSTBOX" "$@")
+
+    set -- cn:manager:create-container "$manager_ref" "$container_name" --reference "$image" \
+        --process "$process_config_ref" --networking "$networking" --read-only "$read_only" \
+        --cpus "$cpus" --memory "$memory"
+    if [ -n "$hostname" ]; then set -- "$@" --hostname "$hostname"; fi
+    if [ "$use_init" = true ]; then set -- "$@" --use-init true; fi
+    if [ -n "$run_mount_refs" ]; then
+        default_mounts=$(run_with_timeout 10 "$GHOSTBOX" cn:container:default-mounts)
+        for mount_ref in $default_mounts; do set -- "$@" --mounts "$mount_ref"; done
+        while IFS= read -r mount_record; do
+            [ -n "$mount_record" ] || continue
+            set -- "$@" --mounts "${mount_record#x}"
+        done <<EOF
+$run_mount_refs
+EOF
+    fi
+    container_ref=$(run_with_timeout 10 "$GHOSTBOX" "$@")
+
+    attach_timeout=$((GHOSTBOX_DOCKER_WAIT_TIMEOUT + 10))
+    run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:writer:attach "$stdout_ref" &
+    stdout_pid=$!
+    run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:writer:attach "$stderr_ref" >&2 &
+    stderr_pid=$!
+    if [ -n "$stdin_ref" ]; then
+        run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:reader-stream:attach "$stdin_ref" &
+        stdin_pid=$!
+    fi
+    run_with_timeout 10 "$GHOSTBOX" cn:container:create "$container_ref" >/dev/null
+    run_with_timeout 10 "$GHOSTBOX" cn:container:start "$container_ref" >/dev/null
+    if [ -n "$publish_records" ]; then
+        forward_timeout=$((GHOSTBOX_DOCKER_WAIT_TIMEOUT + 10))
+        while IFS= read -r publish_record; do
+            [ -n "$publish_record" ] || continue
+            if [ "${GHOSTBOX_FORWARD_DIAGNOSTICS:-}" = 1 ]; then
+                run_with_timeout "$forward_timeout" "$GHOSTBOX" cn:container:forward "$container_ref" \
+                    -p "${publish_record#x}" >/dev/null &
+            else
+                run_with_timeout "$forward_timeout" "$GHOSTBOX" cn:container:forward "$container_ref" \
+                    -p "${publish_record#x}" >/dev/null 2>&1 &
+            fi
+            forward_pid=$!
+            run_forward_pids=$run_forward_pids${run_forward_pids:+"
+"}x$forward_pid
+        done <<EOF
+$publish_records
+EOF
+    fi
+    status=$(run_with_timeout "$attach_timeout" "$GHOSTBOX" cn:container:wait "$container_ref" \
+        --timeout-seconds "$GHOSTBOX_DOCKER_WAIT_TIMEOUT")
+    container_exit=$(printf '%s' "$status" | plutil -extract exitCode raw -o - -)
+
+    cleanup_run
+    trap - EXIT HUP INT TERM
+    return "$container_exit"
+}
+
+if [ "$#" -eq 0 ]; then
+    usage >&2
+    exit 125
+fi
+
+command=$1
+shift
+case "$command" in
+    build)
+        build_image "$@"
+        ;;
+    pull)
+        pull_image "$@"
+        ;;
+    run)
+        run_image "$@"
+        ;;
+    --help|-h|help)
+        usage
+        ;;
+    *)
+        printf "docker: unsupported command '%s'\n" "$command" >&2
+        exit 125
+        ;;
+esac

@@ -4,6 +4,27 @@ import GhostVMKit
 import GhostHTTP
 import os
 
+private struct GuestCreateRequest: Encodable {
+    let path: String
+    let type: GuestFileCreateType
+    let mode: UInt32
+}
+
+private struct GuestSymbolicLinkRequest: Encodable {
+    let path: String
+    let destination: String
+}
+
+private struct GuestSetAttributesRequest: Encodable {
+    let path: String
+    let attributes: GuestFileAttributes
+}
+
+private struct GuestRenameRequest: Encodable {
+    let path: String
+    let destinationPath: String
+}
+
 /// HTTP client for communicating with GhostTools running in the guest VM
 /// Supports both vsock (production) and TCP (development) connections
 @MainActor
@@ -260,6 +281,174 @@ public final class GhostClient: GhostClientProtocol {
             return try JSONDecoder().decode(FSListResponse.self, from: body)
         }
         throw GhostClientError.notConnected
+    }
+
+    public func fileMetadata(path: String) async throws -> GuestFileMetadata {
+        let response = try await sendGuestFilesystemRequest(path: "/api/v1/fs/metadata", guestPath: path)
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200 else {
+            throw guestFilesystemError(response)
+        }
+        return try JSONDecoder().decode(GuestFileMetadata.self, from: response.body)
+    }
+
+    public func listDirectoryMetadata(path: String) async throws -> GuestDirectoryMetadata {
+        let response = try await sendGuestFilesystemRequest(path: "/api/v1/fs/list", guestPath: path)
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200 else {
+            throw guestFilesystemError(response)
+        }
+        return try JSONDecoder().decode(GuestDirectoryMetadata.self, from: response.body)
+    }
+
+    public func readFile(path: String, offset: UInt64, length: Int) async throws -> Data {
+        guard length >= 0, length <= 1024 * 1024 else {
+            throw GhostClientError.connectionFailed("Filesystem read length exceeds 1 MiB")
+        }
+        let encodedPath = Self.encodeQueryValue(path)
+        guard let vm = virtualMachine else {
+            throw GhostClientError.notConnected
+        }
+        let response = try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "/api/v1/fs/read?path=\(encodedPath)&offset=\(offset)&length=\(length)",
+            body: nil
+        )
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200 else {
+            throw guestFilesystemError(response)
+        }
+        return response.body
+    }
+
+    public func readSymbolicLink(path: String) async throws -> String {
+        let response = try await sendGuestFilesystemRequest(path: "/api/v1/fs/readlink", guestPath: path)
+        let statusCode = response.head.status.rawValue
+        guard statusCode == 200, let target = String(data: response.body, encoding: .utf8) else {
+            throw guestFilesystemError(response)
+        }
+        return target
+    }
+
+    public func createFileSystemItem(
+        path: String,
+        type: GuestFileCreateType,
+        mode: UInt32
+    ) async throws -> GuestFileMetadata {
+        try await sendGuestFilesystemMutation(
+            method: "POST",
+            endpoint: "/api/v1/fs/create",
+            body: JSONEncoder().encode(GuestCreateRequest(path: path, type: type, mode: mode))
+        )
+    }
+
+    public func createSymbolicLink(path: String, destination: String) async throws -> GuestFileMetadata {
+        try await sendGuestFilesystemMutation(
+            method: "POST",
+            endpoint: "/api/v1/fs/symlink",
+            body: JSONEncoder().encode(GuestSymbolicLinkRequest(path: path, destination: destination))
+        )
+    }
+
+    public func writeFile(path: String, offset: UInt64, data: Data) async throws -> GuestFileMetadata {
+        guard offset <= UInt64(Int64.max), data.count <= 1024 * 1024 else {
+            throw POSIXError(.EINVAL)
+        }
+        guard let vm = virtualMachine else { throw GhostClientError.notConnected }
+        let response = try await sendHTTPRequest(
+            vm: vm,
+            method: "PATCH",
+            path: "/api/v1/fs/write?path=\(Self.encodeQueryValue(path))&offset=\(offset)",
+            body: data,
+            contentType: "application/octet-stream"
+        )
+        return try decodeGuestFilesystemMetadata(response)
+    }
+
+    public func setFileAttributes(
+        path: String,
+        attributes: GuestFileAttributes
+    ) async throws -> GuestFileMetadata {
+        try await sendGuestFilesystemMutation(
+            method: "PATCH",
+            endpoint: "/api/v1/fs/attributes",
+            body: JSONEncoder().encode(GuestSetAttributesRequest(path: path, attributes: attributes))
+        )
+    }
+
+    public func removeFileSystemItem(path: String) async throws {
+        guard let vm = virtualMachine else { throw GhostClientError.notConnected }
+        let response = try await sendHTTPRequest(
+            vm: vm,
+            method: "DELETE",
+            path: "/api/v1/fs/remove?path=\(Self.encodeQueryValue(path))",
+            body: nil
+        )
+        guard response.head.status.rawValue == 204 else {
+            throw guestFilesystemError(response)
+        }
+    }
+
+    public func renameFileSystemItem(
+        path: String,
+        destinationPath: String
+    ) async throws -> GuestFileMetadata {
+        try await sendGuestFilesystemMutation(
+            method: "POST",
+            endpoint: "/api/v1/fs/rename",
+            body: JSONEncoder().encode(GuestRenameRequest(path: path, destinationPath: destinationPath))
+        )
+    }
+
+    private func sendGuestFilesystemMutation(
+        method: String,
+        endpoint: String,
+        body: Data
+    ) async throws -> GuestFileMetadata {
+        guard let vm = virtualMachine else { throw GhostClientError.notConnected }
+        let response = try await sendHTTPRequest(
+            vm: vm,
+            method: method,
+            path: endpoint,
+            body: body,
+            contentType: "application/json"
+        )
+        return try decodeGuestFilesystemMetadata(response)
+    }
+
+    private func decodeGuestFilesystemMetadata(_ response: HTTPBufferedResponse) throws -> GuestFileMetadata {
+        guard response.head.status.rawValue == 200 else {
+            throw guestFilesystemError(response)
+        }
+        return try JSONDecoder().decode(GuestFileMetadata.self, from: response.body)
+    }
+
+    private func guestFilesystemError(_ response: HTTPBufferedResponse) -> any Error {
+        if let payload = try? JSONDecoder().decode(GuestFilesystemErrorPayload.self, from: response.body),
+           let rawErrno = payload.errno,
+           let code = POSIXErrorCode(rawValue: rawErrno) {
+            return POSIXError(code)
+        }
+        return GhostClientError.invalidResponse(response.head.status.rawValue)
+    }
+
+    private func sendGuestFilesystemRequest(path endpoint: String, guestPath: String) async throws -> HTTPBufferedResponse {
+        guard let vm = virtualMachine else {
+            throw GhostClientError.notConnected
+        }
+        return try await sendHTTPRequest(
+            vm: vm,
+            method: "GET",
+            path: "\(endpoint)?path=\(Self.encodeQueryValue(guestPath))",
+            body: nil
+        )
+    }
+
+    private static func encodeQueryValue(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
     }
 
     /// Create a directory in the guest

@@ -17,6 +17,21 @@ public final class VMFileLayout {
     public var pidFileURL: URL { bundleURL.appendingPathComponent("vmctl.pid") }
     public var snapshotsDirectoryURL: URL { bundleURL.appendingPathComponent("Snapshots") }
     public var suspendStateURL: URL { bundleURL.appendingPathComponent("suspend.vzvmsave") }
+    public var containerRuntimeDirectoryURL: URL {
+        bundleURL.appendingPathComponent("Containers", isDirectory: true)
+    }
+    public var containerRuntimeMetadataURL: URL {
+        containerRuntimeDirectoryURL.appendingPathComponent("containers.json")
+    }
+    public var containerRuntimeImagesURL: URL {
+        containerRuntimeDirectoryURL.appendingPathComponent("images", isDirectory: true)
+    }
+    public var containerRuntimeLogsURL: URL {
+        containerRuntimeDirectoryURL.appendingPathComponent("logs", isDirectory: true)
+    }
+    public var containerRuntimeVolumesURL: URL {
+        containerRuntimeDirectoryURL.appendingPathComponent("volumes", isDirectory: true)
+    }
     // MARK: - Helper App Bundle
 
     /// Directory containing the helper app bundle

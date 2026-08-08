@@ -130,6 +130,7 @@ final class VMStoredConfigTests: XCTestCase {
         XCTAssertEqual(decoded.restoreImagePath, config.restoreImagePath)
         XCTAssertEqual(decoded.installed, config.installed)
         XCTAssertEqual(decoded.lastInstallBuild, config.lastInstallBuild)
+        XCTAssertFalse(decoded.hostContainersEnabled)
         XCTAssertNil(decoded.windowWidth)
         XCTAssertNil(decoded.windowHeight)
     }
@@ -183,6 +184,34 @@ final class VMStoredConfigTests: XCTestCase {
         decoder.dateDecodingStrategy = .secondsSince1970
         let config = try decoder.decode(VMStoredConfig.self, from: json.data(using: .utf8)!)
         XCTAssertFalse(config.isSuspended)
+    }
+
+    func testHostContainersDefaultsToFalseAndRoundTrips() throws {
+        let json = """
+        {
+            "version": 1,
+            "createdAt": 0,
+            "modifiedAt": 0,
+            "cpus": 2,
+            "memoryBytes": 4294967296,
+            "diskBytes": 34359738368,
+            "restoreImagePath": "/restore.ipsw",
+            "hardwareModelPath": "HardwareModel.bin",
+            "machineIdentifierPath": "MachineIdentifier.bin",
+            "auxiliaryStoragePath": "AuxiliaryStorage.bin",
+            "diskPath": "disk.img",
+            "sharedFolderReadOnly": true,
+            "installed": false
+        }
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        var config = try decoder.decode(VMStoredConfig.self, from: json.data(using: .utf8)!)
+        XCTAssertFalse(config.hostContainersEnabled)
+
+        config.hostContainersEnabled = true
+        let data = try JSONEncoder().encode(config)
+        XCTAssertTrue(try decoder.decode(VMStoredConfig.self, from: data).hostContainersEnabled)
     }
 
     func testIsSuspendedEncodeDecode() throws {
@@ -289,6 +318,11 @@ final class VMFileLayoutTests: XCTestCase {
         XCTAssertEqual(layout.auxiliaryStorageURL.path, "/Users/test/VMs/MyVM.GhostVM/AuxiliaryStorage.bin")
         XCTAssertEqual(layout.pidFileURL.path, "/Users/test/VMs/MyVM.GhostVM/vmctl.pid")
         XCTAssertEqual(layout.snapshotsDirectoryURL.path, "/Users/test/VMs/MyVM.GhostVM/Snapshots")
+        XCTAssertEqual(layout.containerRuntimeDirectoryURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers")
+        XCTAssertEqual(layout.containerRuntimeMetadataURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/containers.json")
+        XCTAssertEqual(layout.containerRuntimeImagesURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/images")
+        XCTAssertEqual(layout.containerRuntimeLogsURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/logs")
+        XCTAssertEqual(layout.containerRuntimeVolumesURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/volumes")
     }
 
     func testSuspendStateURL() {

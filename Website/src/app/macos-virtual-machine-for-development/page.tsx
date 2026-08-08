@@ -233,7 +233,7 @@ export default function MacOSVirtualMachineForDevelopment() {
             <strong>Mac with Apple Silicon</strong> (M1, M2, M3, M4, or later)
           </li>
           <li>
-            <strong>macOS 15 Sequoia or later</strong>
+            <strong>macOS 26 Tahoe or later</strong>
           </li>
           <li>
             <strong>8GB+ RAM</strong> recommended (16GB+ for comfortable
@@ -273,7 +273,7 @@ export default function MacOSVirtualMachineForDevelopment() {
         <h3>4. Testing macOS Versions</h3>
         <p>
           Run different macOS versions side by side. Test your app on Sonoma
-          while your host runs Sequoia. No need for multiple physical machines.
+          while your host runs Tahoe. No need for multiple physical machines.
         </p>
 
         <h3>5. AI Agent Workspaces</h3>

@@ -35,6 +35,7 @@ final class AppSettingsUITests: XCTestCase {
             XCTAssertTrue(app.textFields["settings.ipswPathField"].waitForExistence(timeout: 3), "IPSW cache field should exist")
             XCTAssertTrue(app.textFields["settings.feedURLField"].waitForExistence(timeout: 3), "Feed URL field should exist")
             XCTAssertTrue(app.buttons["settings.verifyButton"].waitForExistence(timeout: 3), "Verify button should exist")
+            XCTAssertTrue(app.buttons["settings.fileSystemExtensionButton"].waitForExistence(timeout: 3), "File system extension setup button should exist")
         }
 
         XCTContext.runActivity(named: "App icon picker exists") { _ in

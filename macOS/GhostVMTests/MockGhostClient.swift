@@ -16,6 +16,25 @@ final class MockGhostClient: GhostClientProtocol {
     var clearFileQueueCalled = false
     var getClipboardCallCount = 0
     var checkHealthCallCount = 0
+    var fileSystemMetadataResult = GuestFileMetadata(
+        name: "item",
+        type: .file,
+        size: 0,
+        mode: 0o100644,
+        uid: 501,
+        gid: 20,
+        inode: 1,
+        device: 1,
+        linkCount: 1,
+        modifiedSeconds: 0,
+        modifiedNanoseconds: 0
+    )
+    var createdFileSystemItems: [(path: String, type: GuestFileCreateType, mode: UInt32)] = []
+    var createdSymbolicLinks: [(path: String, destination: String)] = []
+    var fileWrites: [(path: String, offset: UInt64, data: Data)] = []
+    var fileAttributeChanges: [(path: String, attributes: GuestFileAttributes)] = []
+    var removedFileSystemItems: [String] = []
+    var renamedFileSystemItems: [(path: String, destinationPath: String)] = []
 
     func getClipboard() async throws -> ClipboardGetResponse {
         getClipboardCallCount += 1
@@ -65,6 +84,39 @@ final class MockGhostClient: GhostClientProtocol {
 
     // MARK: - File system stubs
     func listDirectory(path: String) async throws -> FSListResponse { throw MockError.notImplemented }
+    func fileMetadata(path: String) async throws -> GuestFileMetadata { throw MockError.notImplemented }
+    func listDirectoryMetadata(path: String) async throws -> GuestDirectoryMetadata { throw MockError.notImplemented }
+    func readFile(path: String, offset: UInt64, length: Int) async throws -> Data { throw MockError.notImplemented }
+    func readSymbolicLink(path: String) async throws -> String { throw MockError.notImplemented }
+    func createFileSystemItem(path: String, type: GuestFileCreateType, mode: UInt32) async throws -> GuestFileMetadata {
+        if let error = shouldThrow { throw error }
+        createdFileSystemItems.append((path, type, mode))
+        return fileSystemMetadataResult
+    }
+    func createSymbolicLink(path: String, destination: String) async throws -> GuestFileMetadata {
+        if let error = shouldThrow { throw error }
+        createdSymbolicLinks.append((path, destination))
+        return fileSystemMetadataResult
+    }
+    func writeFile(path: String, offset: UInt64, data: Data) async throws -> GuestFileMetadata {
+        if let error = shouldThrow { throw error }
+        fileWrites.append((path, offset, data))
+        return fileSystemMetadataResult
+    }
+    func setFileAttributes(path: String, attributes: GuestFileAttributes) async throws -> GuestFileMetadata {
+        if let error = shouldThrow { throw error }
+        fileAttributeChanges.append((path, attributes))
+        return fileSystemMetadataResult
+    }
+    func removeFileSystemItem(path: String) async throws {
+        if let error = shouldThrow { throw error }
+        removedFileSystemItems.append(path)
+    }
+    func renameFileSystemItem(path: String, destinationPath: String) async throws -> GuestFileMetadata {
+        if let error = shouldThrow { throw error }
+        renamedFileSystemItems.append((path, destinationPath))
+        return fileSystemMetadataResult
+    }
     func mkdir(path: String) async throws {}
     func deleteFile(path: String) async throws {}
     func moveFile(from: String, to: String) async throws {}

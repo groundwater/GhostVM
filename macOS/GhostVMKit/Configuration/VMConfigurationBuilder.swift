@@ -13,7 +13,12 @@ public final class VMConfigurationBuilder {
         self.storedConfig = storedConfig
     }
 
-    public func makeConfiguration(headless: Bool, connectSerialToStandardIO: Bool, runtimeSharedFolder: RuntimeSharedFolderOverride?) throws -> VZVirtualMachineConfiguration {
+    public func makeConfiguration(
+        headless: Bool,
+        connectSerialToStandardIO: Bool,
+        runtimeSharedFolder: RuntimeSharedFolderOverride?,
+        natNetworkAttachment: VZNetworkDeviceAttachment? = nil
+    ) throws -> VZVirtualMachineConfiguration {
         let config = VZVirtualMachineConfiguration()
 
         config.bootLoader = VZMacOSBootLoader()
@@ -63,7 +68,7 @@ public final class VMConfigurationBuilder {
         switch networkConfig.mode {
         case .nat:
             print("[VMConfigurationBuilder] Using NAT networking")
-            networkDevice.attachment = VZNATNetworkDeviceAttachment()
+            networkDevice.attachment = natNetworkAttachment ?? VZNATNetworkDeviceAttachment()
 
         case .bridged:
             print("[VMConfigurationBuilder] Attempting bridged networking with interface: \(networkConfig.bridgeInterfaceIdentifier ?? "nil")")

@@ -22,6 +22,7 @@ public enum HTTPQueryParser {
 public enum HTTPStatus: Int, Sendable {
     case switchingProtocols = 101
     case ok = 200
+    case partialContent = 206
     case created = 201
     case noContent = 204
     case badRequest = 400
@@ -30,17 +31,21 @@ public enum HTTPStatus: Int, Sendable {
     case notFound = 404
     case methodNotAllowed = 405
     case requestTimeout = 408
+    case conflict = 409
     case payloadTooLarge = 413
+    case rangeNotSatisfiable = 416
     case headerTooLarge = 431
     case badGateway = 502
     case serviceUnavailable = 503
     case gatewayTimeout = 504
+    case insufficientStorage = 507
     case internalServerError = 500
 
     public var reasonPhrase: String {
         switch self {
         case .switchingProtocols: return "Switching Protocols"
         case .ok: return "OK"
+        case .partialContent: return "Partial Content"
         case .created: return "Created"
         case .noContent: return "No Content"
         case .badRequest: return "Bad Request"
@@ -49,11 +54,14 @@ public enum HTTPStatus: Int, Sendable {
         case .notFound: return "Not Found"
         case .methodNotAllowed: return "Method Not Allowed"
         case .requestTimeout: return "Request Timeout"
+        case .conflict: return "Conflict"
         case .payloadTooLarge: return "Payload Too Large"
+        case .rangeNotSatisfiable: return "Range Not Satisfiable"
         case .headerTooLarge: return "Request Header Fields Too Large"
         case .badGateway: return "Bad Gateway"
         case .serviceUnavailable: return "Service Unavailable"
         case .gatewayTimeout: return "Gateway Timeout"
+        case .insufficientStorage: return "Insufficient Storage"
         case .internalServerError: return "Internal Server Error"
         }
     }
@@ -682,7 +690,9 @@ public enum HTTPCodec {
                 throw HTTPError.headerTooLarge(maxBytes: maxHeaderBytes)
             }
 
-            let count = Darwin.read(fd, &chunk, chunk.count)
+            let count = chunk.withUnsafeMutableBytes { buffer in
+                Darwin.read(fd, buffer.baseAddress, buffer.count)
+            }
             if count > 0 {
                 buffer.append(contentsOf: chunk[0..<count])
             } else if count == 0 {

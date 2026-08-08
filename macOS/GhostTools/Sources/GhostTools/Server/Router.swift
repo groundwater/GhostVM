@@ -60,7 +60,7 @@ final class Router: @unchecked Sendable {
             return handleFrontmostApp(request)
         } else if path == "/api/v1/apps" || path.hasPrefix("/api/v1/apps/") {
             return handleApps(request: request, body: body)
-        } else if path == "/api/v1/fs" || path == "/api/v1/fs/mkdir" || path == "/api/v1/fs/delete" || path == "/api/v1/fs/move" {
+        } else if path == "/api/v1/fs" || path.hasPrefix("/api/v1/fs/") {
             return handleFS(request: request, body: body)
         } else if path == "/api/v1/exec" {
             return handleExec(request: request, body: body)
@@ -553,13 +553,98 @@ final class Router: @unchecked Sendable {
             let queryPath = parseQuery(request.path, key: "path") ?? NSHomeDirectory()
             return listDirectory(at: queryPath)
         }
-        guard request.method == .POST else {
+
+        if path == "/api/v1/fs/metadata" && request.method == .GET {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return metadata(at: queryPath)
+        }
+
+        if path == "/api/v1/fs/list" && request.method == .GET {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return listDirectoryMetadata(at: queryPath)
+        }
+
+        if path == "/api/v1/fs/read" && request.method == .GET {
+            guard
+                let queryPath = parseQuery(request.path, key: "path"),
+                let offsetValue = parseQuery(request.path, key: "offset"),
+                let offset = UInt64(offsetValue),
+                let lengthValue = parseQuery(request.path, key: "length"),
+                let length = Int(lengthValue),
+                length >= 0,
+                length <= 1024 * 1024
+            else {
+                return HTTPResponse.error(.badRequest, message: "Valid path, offset, and length are required")
+            }
+            return readFile(at: queryPath, offset: offset, length: length)
+        }
+
+        if path == "/api/v1/fs/readlink" && request.method == .GET {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return readSymbolicLink(at: queryPath)
+        }
+
+        if path == "/api/v1/fs/write" && request.method == .PATCH {
+            guard
+                let queryPath = parseQuery(request.path, key: "path"),
+                let offsetValue = parseQuery(request.path, key: "offset"),
+                let offset = UInt64(offsetValue),
+                offset <= UInt64(Int64.max)
+            else {
+                return HTTPResponse.error(.badRequest, message: "Valid path and offset are required")
+            }
+            do {
+                return writeFile(at: queryPath, offset: offset, data: try body.readAll(maxSize: 1024 * 1024))
+            } catch {
+                return HTTPResponse.error(.badRequest, message: "Invalid write body: \(error.localizedDescription)")
+            }
+        }
+
+        if path == "/api/v1/fs/remove" && request.method == .DELETE {
+            guard let queryPath = parseQuery(request.path, key: "path") else {
+                return HTTPResponse.error(.badRequest, message: "Path required")
+            }
+            return removeFileSystemItem(at: queryPath)
+        }
+
+        guard request.method == .POST || request.method == .PATCH else {
             return HTTPResponse.error(.methodNotAllowed, message: "Method not allowed")
         }
 
         let raw: Data
         do { raw = try body.readAll() } catch {
             return HTTPResponse.error(.badRequest, message: "Failed to read body: \(error)")
+        }
+
+        if path == "/api/v1/fs/create" && request.method == .POST {
+            guard let payload = try? JSONDecoder().decode(FSCreateRequest.self, from: raw) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid create request")
+            }
+            return createFileSystemItem(payload)
+        }
+        if path == "/api/v1/fs/symlink" && request.method == .POST {
+            guard let payload = try? JSONDecoder().decode(FSSymbolicLinkRequest.self, from: raw) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid symbolic-link request")
+            }
+            return createSymbolicLink(payload)
+        }
+        if path == "/api/v1/fs/attributes" && request.method == .PATCH {
+            guard let payload = try? JSONDecoder().decode(FSSetAttributesRequest.self, from: raw) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid attribute request")
+            }
+            return setFileAttributes(payload)
+        }
+        if path == "/api/v1/fs/rename" && request.method == .POST {
+            guard let payload = try? JSONDecoder().decode(FSRenameRequest.self, from: raw) else {
+                return HTTPResponse.error(.badRequest, message: "Invalid rename request")
+            }
+            return renameFileSystemItem(payload)
         }
 
         if path == "/api/v1/fs/mkdir" {
@@ -623,6 +708,262 @@ final class Router: @unchecked Sendable {
         } catch {
             return HTTPResponse.error(.internalServerError, message: "list failed: \(error.localizedDescription)")
         }
+    }
+
+    private func metadata(at path: String) -> HTTPResponse {
+        do {
+            return HTTPResponse.json(try JSONEncoder().encode(try fileMetadata(at: path)))
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func listDirectoryMetadata(at path: String) -> HTTPResponse {
+        do {
+            let names = try FileManager.default.contentsOfDirectory(atPath: path)
+            let entries = try names.sorted().map { name in
+                try fileMetadata(at: (path as NSString).appendingPathComponent(name))
+            }
+            return HTTPResponse.json(try JSONEncoder().encode(GuestDirectoryMetadata(path: path, entries: entries)))
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func readFile(at path: String, offset: UInt64, length: Int) -> HTTPResponse {
+        do {
+            let metadata = try fileMetadata(at: path)
+            guard metadata.type == .file else {
+                return HTTPResponse.error(.badRequest, message: "Path is not a regular file")
+            }
+            let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
+            defer { try? handle.close() }
+            try handle.seek(toOffset: offset)
+            let data = try handle.read(upToCount: length) ?? Data()
+            return HTTPResponse(
+                status: .ok,
+                headers: ["Content-Type": "application/octet-stream"],
+                body: .bytes(data)
+            )
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func readSymbolicLink(at path: String) -> HTTPResponse {
+        do {
+            let target = try FileManager.default.destinationOfSymbolicLink(atPath: path)
+            return HTTPResponse(
+                status: .ok,
+                headers: ["Content-Type": "text/plain; charset=utf-8"],
+                body: .bytes(Data(target.utf8))
+            )
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func createFileSystemItem(_ request: FSCreateRequest) -> HTTPResponse {
+        do {
+            let permissions = mode_t(request.mode & 0o7777)
+            switch request.type {
+            case .file:
+                let descriptor = Darwin.open(request.path, O_WRONLY | O_CREAT | O_EXCL, permissions)
+                guard descriptor >= 0 else { throw currentPOSIXError() }
+                guard Darwin.close(descriptor) == 0 else { throw currentPOSIXError() }
+            case .directory:
+                guard Darwin.mkdir(request.path, permissions) == 0 else { throw currentPOSIXError() }
+            }
+            return filesystemMetadataResponse(at: request.path)
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func createSymbolicLink(_ request: FSSymbolicLinkRequest) -> HTTPResponse {
+        guard !request.destination.contains("\0") else {
+            return HTTPResponse.error(.badRequest, message: "Invalid symbolic-link destination")
+        }
+        do {
+            guard Darwin.symlink(request.destination, request.path) == 0 else { throw currentPOSIXError() }
+            return filesystemMetadataResponse(at: request.path)
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func writeFile(at path: String, offset: UInt64, data: Data) -> HTTPResponse {
+        do {
+            var info = stat()
+            guard Darwin.lstat(path, &info) == 0 else { throw currentPOSIXError() }
+            guard info.st_mode & S_IFMT == S_IFREG else { throw POSIXError(.EINVAL) }
+            let descriptor = Darwin.open(path, O_WRONLY)
+            guard descriptor >= 0 else { throw currentPOSIXError() }
+            defer { Darwin.close(descriptor) }
+            var written = 0
+            try data.withUnsafeBytes { bytes in
+                while written < bytes.count {
+                    let result = Darwin.pwrite(
+                        descriptor,
+                        bytes.baseAddress?.advanced(by: written),
+                        bytes.count - written,
+                        off_t(offset) + off_t(written)
+                    )
+                    if result < 0, errno == EINTR { continue }
+                    guard result > 0 else { throw currentPOSIXError() }
+                    written += result
+                }
+            }
+            return filesystemMetadataResponse(at: path)
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func setFileAttributes(_ request: FSSetAttributesRequest) -> HTTPResponse {
+        do {
+            if let size = request.attributes.size {
+                guard size <= UInt64(Int64.max) else { throw POSIXError(.EOVERFLOW) }
+                guard Darwin.truncate(request.path, off_t(size)) == 0 else { throw currentPOSIXError() }
+            }
+            if let mode = request.attributes.mode {
+                guard Darwin.chmod(request.path, mode_t(mode & 0o7777)) == 0 else { throw currentPOSIXError() }
+            }
+            if request.attributes.modifiedSeconds != nil || request.attributes.accessedSeconds != nil {
+                func requestedTime(seconds: Int64?, nanoseconds: Int32?) -> timespec {
+                    guard let seconds else { return timespec(tv_sec: 0, tv_nsec: Int(UTIME_OMIT)) }
+                    return timespec(tv_sec: Int(seconds), tv_nsec: Int(nanoseconds ?? 0))
+                }
+                let times = [
+                    requestedTime(
+                        seconds: request.attributes.accessedSeconds,
+                        nanoseconds: request.attributes.accessedNanoseconds
+                    ),
+                    requestedTime(
+                        seconds: request.attributes.modifiedSeconds,
+                        nanoseconds: request.attributes.modifiedNanoseconds
+                    ),
+                ]
+                let result = times.withUnsafeBufferPointer {
+                    Darwin.utimensat(AT_FDCWD, request.path, $0.baseAddress, 0)
+                }
+                guard result == 0 else { throw currentPOSIXError() }
+            }
+            return filesystemMetadataResponse(at: request.path)
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func removeFileSystemItem(at path: String) -> HTTPResponse {
+        do {
+            var info = stat()
+            guard Darwin.lstat(path, &info) == 0 else { throw currentPOSIXError() }
+            let result = info.st_mode & S_IFMT == S_IFDIR ? Darwin.rmdir(path) : Darwin.unlink(path)
+            guard result == 0 else { throw currentPOSIXError() }
+            return HTTPResponse(status: .noContent)
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func renameFileSystemItem(_ request: FSRenameRequest) -> HTTPResponse {
+        do {
+            guard Darwin.rename(request.path, request.destinationPath) == 0 else { throw currentPOSIXError() }
+            return filesystemMetadataResponse(at: request.destinationPath)
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func filesystemMetadataResponse(at path: String) -> HTTPResponse {
+        do {
+            return HTTPResponse.json(try JSONEncoder().encode(try fileMetadata(at: path)))
+        } catch {
+            return filesystemError(error)
+        }
+    }
+
+    private func filesystemError(_ error: Error) -> HTTPResponse {
+        let posix = normalizedPOSIXError(error)
+        let status: HTTPStatus
+        switch posix?.code {
+        case .ENOENT: status = .notFound
+        case .EACCES, .EPERM: status = .forbidden
+        case .EEXIST, .ENOTEMPTY: status = .conflict
+        case .EINVAL, .EISDIR, .ENOTDIR: status = .badRequest
+        default: status = .internalServerError
+        }
+        let payload = GuestFilesystemErrorResponse(
+            error: error.localizedDescription,
+            errno: posix?.code.rawValue
+        )
+        return HTTPResponse(
+            status: status,
+            headers: ["Content-Type": "application/json"],
+            body: .bytes((try? JSONEncoder().encode(payload)) ?? Data())
+        )
+    }
+
+    private func currentPOSIXError() -> POSIXError {
+        POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
+
+    private func normalizedPOSIXError(_ error: Error) -> POSIXError? {
+        if let error = error as? POSIXError { return error }
+        let nsError = error as NSError
+        if nsError.domain == NSPOSIXErrorDomain,
+           let code = POSIXErrorCode(rawValue: Int32(nsError.code)) {
+            return POSIXError(code)
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error,
+           let error = normalizedPOSIXError(underlying) {
+            return error
+        }
+        let code: POSIXErrorCode?
+        switch CocoaError.Code(rawValue: nsError.code) {
+        case .fileNoSuchFile: code = .ENOENT
+        case .fileReadNoPermission, .fileWriteNoPermission: code = .EACCES
+        case .fileWriteFileExists: code = .EEXIST
+        case .fileWriteOutOfSpace: code = .ENOSPC
+        default: code = nil
+        }
+        return code.map { POSIXError($0) }
+    }
+
+    private func fileMetadata(at path: String) throws -> GuestFileMetadata {
+        var info = stat()
+        guard Darwin.lstat(path, &info) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+
+        let type: GuestFileType
+        switch info.st_mode & S_IFMT {
+        case S_IFREG: type = .file
+        case S_IFDIR: type = .directory
+        case S_IFLNK: type = .symbolicLink
+        default: type = .other
+        }
+
+        return GuestFileMetadata(
+            name: URL(fileURLWithPath: path).lastPathComponent,
+            type: type,
+            size: UInt64(max(0, info.st_size)),
+            mode: UInt32(info.st_mode),
+            uid: info.st_uid,
+            gid: info.st_gid,
+            inode: info.st_ino,
+            device: UInt64(info.st_dev),
+            linkCount: UInt32(info.st_nlink),
+            modifiedSeconds: info.st_mtimespec.tv_sec,
+            modifiedNanoseconds: Int32(info.st_mtimespec.tv_nsec),
+            accessedSeconds: info.st_atimespec.tv_sec,
+            accessedNanoseconds: Int32(info.st_atimespec.tv_nsec),
+            changedSeconds: info.st_ctimespec.tv_sec,
+            changedNanoseconds: Int32(info.st_ctimespec.tv_nsec),
+            birthSeconds: info.st_birthtimespec.tv_sec,
+            birthNanoseconds: Int32(info.st_birthtimespec.tv_nsec)
+        )
     }
 
     // MARK: - Exec
@@ -795,6 +1136,46 @@ struct FSMoveRequest: Codable {
     let to: String
 }
 
+enum FSCreateType: String, Codable {
+    case file
+    case directory
+}
+
+struct FSCreateRequest: Codable {
+    let path: String
+    let type: FSCreateType
+    let mode: UInt32
+}
+
+struct FSSymbolicLinkRequest: Codable {
+    let path: String
+    let destination: String
+}
+
+struct FSFileAttributes: Codable {
+    let mode: UInt32?
+    let size: UInt64?
+    let modifiedSeconds: Int64?
+    let modifiedNanoseconds: Int32?
+    let accessedSeconds: Int64?
+    let accessedNanoseconds: Int32?
+}
+
+struct FSSetAttributesRequest: Codable {
+    let path: String
+    let attributes: FSFileAttributes
+}
+
+struct FSRenameRequest: Codable {
+    let path: String
+    let destinationPath: String
+}
+
+struct GuestFilesystemErrorResponse: Codable {
+    let error: String
+    let errno: Int32?
+}
+
 // MARK: - Internal helpers
 
 /// Tracks paths per batch ID so Finder reveal happens once when the last
@@ -824,4 +1205,36 @@ final class RouterBatchTracker: @unchecked Sendable {
 /// domains, so a captured `var` would warn).
 final class LaunchResult: @unchecked Sendable {
     var success: Bool = false
+}
+
+enum GuestFileType: String, Codable {
+    case file
+    case directory
+    case symbolicLink
+    case other
+}
+
+struct GuestFileMetadata: Codable {
+    let name: String
+    let type: GuestFileType
+    let size: UInt64
+    let mode: UInt32
+    let uid: UInt32
+    let gid: UInt32
+    let inode: UInt64
+    let device: UInt64
+    let linkCount: UInt32
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int32
+    let accessedSeconds: Int?
+    let accessedNanoseconds: Int32?
+    let changedSeconds: Int?
+    let changedNanoseconds: Int32?
+    let birthSeconds: Int?
+    let birthNanoseconds: Int32?
+}
+
+struct GuestDirectoryMetadata: Codable {
+    let path: String
+    let entries: [GuestFileMetadata]
 }

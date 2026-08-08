@@ -54,6 +54,7 @@ final class VMConfigStoreTests: XCTestCase {
         XCTAssertEqual(loaded.diskBytes, config.diskBytes)
         XCTAssertEqual(loaded.installed, config.installed)
         XCTAssertEqual(loaded.lastInstallBuild, config.lastInstallBuild)
+        XCTAssertFalse(loaded.hostContainersEnabled)
         XCTAssertNil(loaded.windowWidth)
         XCTAssertNil(loaded.windowHeight)
     }

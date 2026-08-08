@@ -1,0 +1,716 @@
+#!/usr/bin/ruby
+
+require "fileutils"
+require "json"
+require "shellwords"
+require "yaml"
+
+PROGRAM = "ghostbox-docker-compose"
+SCRIPT_PATH = File.expand_path(__FILE__)
+DEFAULT_DOCKER = File.join(File.dirname(SCRIPT_PATH), "ghostbox-docker")
+SERVICE_RUNNER = "__run-service"
+
+class ComposeError < StandardError
+end
+
+def usage
+  <<~USAGE
+    Usage: #{PROGRAM} [OPTIONS] COMMAND [ARGS...]
+
+    Options:
+      -f, --file PATH             Specify a Compose file
+      -p, --project-name NAME     Specify a project name
+          --env-file PATH         Specify an interpolation environment file
+
+    Commands:
+      config                      Parse and render the resolved configuration
+      pull [SERVICE...]           Pull service images
+      up [-d] [SERVICE...]        Create and start services
+      down                        Stop and remove services
+      ps                          List project services
+      logs [-f] [SERVICE...]      Show service logs
+
+    Supported service fields include image, command, entrypoint, environment,
+    env_file, ports, bind volumes, depends_on, working_dir, user, hostname,
+    read_only, init, cpus, mem_limit, network_mode, platform, and pull_policy.
+  USAGE
+end
+
+def state_root
+  return ENV["GHOSTBOX_DOCKER_COMPOSE_STATE"] unless ENV["GHOSTBOX_DOCKER_COMPOSE_STATE"].to_s.empty?
+  return File.join(ENV["XDG_STATE_HOME"], PROGRAM) unless ENV["XDG_STATE_HOME"].to_s.empty?
+
+  home = ENV["HOME"]
+  raise ComposeError, "HOME is required" if home.to_s.empty?
+
+  File.join(home, ".local", "state", PROGRAM)
+end
+
+def atomic_write(path, value)
+  FileUtils.mkdir_p(File.dirname(path))
+  temporary = "#{path}.#{Process.pid}.tmp"
+  File.open(temporary, "w", 0o600) { |file| file.write(value) }
+  File.rename(temporary, path)
+ensure
+  File.unlink(temporary) if defined?(temporary) && File.exist?(temporary)
+end
+
+def read_json(path)
+  JSON.parse(File.read(path))
+rescue Errno::ENOENT
+  nil
+rescue JSON::ParserError => error
+  raise ComposeError, "invalid state file #{path}: #{error.message}"
+end
+
+def write_json(path, value)
+  atomic_write(path, JSON.pretty_generate(value) + "\n")
+end
+
+def process_alive?(pid)
+  return false unless pid.is_a?(Integer) && pid.positive?
+
+  Process.kill(0, pid)
+  true
+rescue Errno::ESRCH
+  false
+rescue Errno::EPERM
+  true
+end
+
+def load_env_file(path)
+  values = {}
+  File.foreach(path).with_index(1) do |line, line_number|
+    line = line.strip
+    next if line.empty? || line.start_with?("#")
+
+    line = line.sub(/\Aexport\s+/, "")
+    key, value = line.split("=", 2)
+    unless key && key.match?(/\A[A-Za-z_][A-Za-z0-9_]*\z/)
+      raise ComposeError, "#{path}:#{line_number}: invalid environment assignment"
+    end
+
+    value = "" if value.nil?
+    if value.length >= 2 && value.start_with?("'") && value.end_with?("'")
+      value = value[1...-1]
+    elsif value.length >= 2 && value.start_with?("\"") && value.end_with?("\"")
+      value = value[1...-1].gsub(/\\([\\"nrt])/) do
+        { "\\" => "\\", "\"" => "\"", "n" => "\n", "r" => "\r", "t" => "\t" }[Regexp.last_match(1)]
+      end
+    else
+      value = value.sub(/\s+#.*\z/, "")
+    end
+    values[key] = value
+  end
+  values
+rescue Errno::ENOENT
+  raise ComposeError, "environment file not found: #{path}"
+end
+
+def interpolate_string(value, environment)
+  pattern = /\$\$|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])(.*?))?\}|\$([A-Za-z_][A-Za-z0-9_]*)/
+  value.gsub(pattern) do |match|
+    next "$" if match == "$$"
+
+    name = Regexp.last_match(1) || Regexp.last_match(4)
+    operator = Regexp.last_match(2)
+    operand = Regexp.last_match(3).to_s
+    present = environment.key?(name)
+    current = environment[name].to_s
+    nonempty = present && !current.empty?
+
+    case operator
+    when nil then current
+    when ":-" then nonempty ? current : operand
+    when "-" then present ? current : operand
+    when ":+" then nonempty ? operand : ""
+    when "+" then present ? operand : ""
+    when ":?"
+      raise ComposeError, "#{name}: #{operand.empty? ? "variable is required" : operand}" unless nonempty
+      current
+    when "?"
+      raise ComposeError, "#{name}: #{operand.empty? ? "variable is required" : operand}" unless present
+      current
+    else
+      match
+    end
+  end
+end
+
+def interpolate(value, environment)
+  case value
+  when String
+    interpolate_string(value, environment)
+  when Array
+    value.map { |item| interpolate(item, environment) }
+  when Hash
+    value.each_with_object({}) do |(key, item), result|
+      result[interpolate_string(key.to_s, environment)] = interpolate(item, environment)
+    end
+  else
+    value
+  end
+end
+
+def find_compose_file(explicit_files)
+  unless explicit_files.empty?
+    raise ComposeError, "multiple Compose files are not implemented" if explicit_files.length > 1
+    return File.expand_path(explicit_files.first)
+  end
+
+  unless ENV["COMPOSE_FILE"].to_s.empty?
+    separator = File::PATH_SEPARATOR
+    files = ENV["COMPOSE_FILE"].split(separator)
+    raise ComposeError, "multiple Compose files are not implemented" if files.length > 1
+    return File.expand_path(files.first)
+  end
+
+  directory = Dir.pwd
+  loop do
+    %w[compose.yaml compose.yml docker-compose.yaml docker-compose.yml].each do |name|
+      candidate = File.join(directory, name)
+      return candidate if File.file?(candidate)
+    end
+    parent = File.dirname(directory)
+    break if parent == directory
+    directory = parent
+  end
+  raise ComposeError, "no Compose file found"
+end
+
+def load_config(path, interpolation_env_file)
+  raise ComposeError, "Compose file not found: #{path}" unless File.file?(path)
+
+  directory = File.dirname(path)
+  environment = {}
+  default_env = File.join(directory, ".env")
+  environment.merge!(load_env_file(default_env)) if File.file?(default_env)
+  environment.merge!(ENV.to_h)
+  environment.merge!(load_env_file(File.expand_path(interpolation_env_file))) if interpolation_env_file
+
+  raw = YAML.safe_load(
+    File.read(path),
+    permitted_classes: [],
+    permitted_symbols: [],
+    aliases: true,
+    filename: path
+  )
+  config = interpolate(raw, environment)
+  raise ComposeError, "#{path}: top level must be a mapping" unless config.is_a?(Hash)
+  raise ComposeError, "#{path}: services must be a mapping" unless config["services"].is_a?(Hash)
+
+  config["services"].each do |name, service|
+    unless name.match?(/\A[A-Za-z0-9][A-Za-z0-9_.-]*\z/) && service.is_a?(Hash)
+      raise ComposeError, "#{path}: invalid service #{name.inspect}"
+    end
+    raise ComposeError, "service #{name}: image is required; build is not implemented" if service["image"].to_s.empty?
+    raise ComposeError, "service #{name}: build is not implemented" if service.key?("build")
+    supported_fields = %w[
+      image command entrypoint environment env_file ports volumes depends_on
+      working_dir user hostname read_only init cpus mem_limit network_mode
+      platform pull_policy container_name networks
+    ]
+    unsupported_fields = service.keys.reject { |field| supported_fields.include?(field) || field.start_with?("x-") }
+    unless unsupported_fields.empty?
+      raise ComposeError, "service #{name}: unsupported field#{unsupported_fields.length == 1 ? "" : "s"} #{unsupported_fields.join(", ")}"
+    end
+    if service.key?("networks")
+      raise ComposeError, "service #{name}: custom networks are not implemented"
+    end
+  end
+  config
+rescue Psych::Exception => error
+  raise ComposeError, "invalid Compose file #{path}: #{error.message}"
+end
+
+def project_name(config, config_path, explicit)
+  name = explicit || ENV["COMPOSE_PROJECT_NAME"] || config["name"] || File.basename(File.dirname(config_path))
+  name = name.to_s.downcase.gsub(/[^a-z0-9_-]+/, "-").sub(/\A[-_]+/, "").sub(/[-_]+\z/, "")
+  raise ComposeError, "project name is empty after normalization" if name.empty?
+  raise ComposeError, "project name is too long" if name.length > 63
+  name
+end
+
+def selected_services(config, requested, include_dependencies: false)
+  services = config.fetch("services")
+  names = requested.empty? ? services.keys : requested
+  unknown = names.reject { |name| services.key?(name) }
+  raise ComposeError, "unknown service#{unknown.length == 1 ? "" : "s"}: #{unknown.join(", ")}" unless unknown.empty?
+
+  return names unless include_dependencies
+
+  ordered = []
+  visiting = {}
+  visit = lambda do |name|
+    raise ComposeError, "circular depends_on includes #{name}" if visiting[name] == :active
+    return if visiting[name] == :done
+
+    visiting[name] = :active
+    dependency_value = services.fetch(name)["depends_on"]
+    dependencies = dependency_value.is_a?(Hash) ? dependency_value.keys : Array(dependency_value)
+    dependencies.each do |dependency|
+      raise ComposeError, "service #{name}: unknown dependency #{dependency}" unless services.key?(dependency)
+      visit.call(dependency)
+    end
+    visiting[name] = :done
+    ordered << name
+  end
+  names.each { |name| visit.call(name) }
+  ordered
+end
+
+def scalar_arguments(value, field, service)
+  case value
+  when nil then []
+  when String then Shellwords.shellsplit(value)
+  when Array then value.map(&:to_s)
+  else
+    raise ComposeError, "service #{service}: #{field} must be a string or list"
+  end
+rescue ArgumentError => error
+  raise ComposeError, "service #{service}: invalid #{field}: #{error.message}"
+end
+
+def environment_arguments(value, service)
+  case value
+  when nil
+    []
+  when Hash
+    value.map { |key, item| item.nil? ? key.to_s : "#{key}=#{item}" }
+  when Array
+    value.map(&:to_s)
+  else
+    raise ComposeError, "service #{service}: environment must be a mapping or list"
+  end
+end
+
+def volume_argument(value, config_directory, service)
+  if value.is_a?(Hash)
+    type = value["type"] || "volume"
+    raise ComposeError, "service #{service}: only bind volumes are implemented" unless type == "bind"
+    source = value["source"]
+    target = value["target"]
+    raise ComposeError, "service #{service}: bind volume requires source and target" if source.to_s.empty? || target.to_s.empty?
+    source = File.expand_path(source, config_directory)
+    return "#{source}:#{target}#{value["read_only"] ? ":ro" : ""}"
+  end
+
+  parts = value.to_s.split(":", 3)
+  raise ComposeError, "service #{service}: volume must include source and target" if parts.length < 2
+  source = parts[0]
+  unless source.start_with?("/", ".", "~")
+    raise ComposeError, "service #{service}: named volume #{source} is not implemented"
+  end
+  source = File.expand_path(source, config_directory)
+  ([source] + parts.drop(1)).join(":")
+end
+
+def port_argument(value, service)
+  if value.is_a?(Hash)
+    protocol = (value["protocol"] || "tcp").to_s
+    raise ComposeError, "service #{service}: only TCP ports are implemented" unless protocol == "tcp"
+    host = (value["host_ip"] || "127.0.0.1").to_s
+    published = value["published"]
+    target = value["target"]
+    if published.to_s.empty? || target.to_s.empty?
+      raise ComposeError, "service #{service}: published and target ports are required"
+    end
+    raise ComposeError, "service #{service}: ports must bind to 127.0.0.1" unless host == "127.0.0.1"
+    return "#{host}:#{published}:#{target}/tcp"
+  end
+
+  specification = value.to_s
+  protocol = specification.include?("/") ? specification.split("/", 2)[1] : "tcp"
+  raise ComposeError, "service #{service}: only TCP ports are implemented" unless protocol == "tcp"
+  specification = specification.split("/", 2)[0]
+  parts = specification.split(":")
+  parts.unshift("127.0.0.1") if parts.length == 2
+  unless parts.length == 3 && parts[0] == "127.0.0.1"
+    raise ComposeError, "service #{service}: port must be HOST:CONTAINER or 127.0.0.1:HOST:CONTAINER"
+  end
+  "#{parts.join(":")}/tcp"
+end
+
+def service_run_arguments(project, name, service, config_directory)
+  container_name = service["container_name"] || "#{project}-#{name}-1"
+  arguments = ["run", "--rm", "--name", container_name.to_s]
+
+  {
+    "working_dir" => "--workdir",
+    "user" => "--user",
+    "hostname" => "--hostname",
+    "cpus" => "--cpus",
+    "mem_limit" => "--memory",
+    "network_mode" => "--network",
+    "platform" => "--platform"
+  }.each do |field, option|
+    arguments.concat([option, service[field].to_s]) if service.key?(field)
+  end
+  arguments << "--read-only" if service["read_only"]
+  arguments << "--init" if service["init"]
+
+  pull_policy = service["pull_policy"]
+  if pull_policy
+    pull_policy = { "if_not_present" => "missing" }.fetch(pull_policy.to_s, pull_policy.to_s)
+    unless %w[always missing never].include?(pull_policy)
+      raise ComposeError, "service #{name}: unsupported pull_policy #{pull_policy}"
+    end
+    arguments.concat(["--pull", pull_policy])
+  end
+
+  environment_arguments(service["environment"], name).each { |value| arguments.concat(["--env", value]) }
+  Array(service["env_file"]).each do |path|
+    path = path["path"] if path.is_a?(Hash)
+    arguments.concat(["--env-file", File.expand_path(path.to_s, config_directory)])
+  end
+  Array(service["volumes"]).each do |volume|
+    arguments.concat(["--volume", volume_argument(volume, config_directory, name)])
+  end
+  Array(service["ports"]).each do |port|
+    arguments.concat(["--publish", port_argument(port, name)])
+  end
+
+  command = scalar_arguments(service["command"], "command", name)
+  entrypoint = scalar_arguments(service["entrypoint"], "entrypoint", name)
+  unless entrypoint.empty?
+    arguments.concat(["--entrypoint", entrypoint.shift])
+    command = entrypoint + command
+  end
+  arguments << service.fetch("image").to_s
+  arguments.concat(command)
+  arguments
+end
+
+def update_runner_state(path, attributes)
+  state = read_json(path) || {}
+  write_json(path, state.merge(attributes))
+end
+
+def run_service_runner(arguments)
+  docker = arguments.shift
+  state_path = arguments.shift
+  child = nil
+  stopping = false
+  forward_signal = proc do |signal|
+    stopping = true
+    begin
+      Process.kill(signal, child) if child
+    rescue Errno::ESRCH
+      nil
+    end
+  end
+  Signal.trap("TERM") { forward_signal.call("TERM") }
+  Signal.trap("INT") { forward_signal.call("INT") }
+  Signal.trap("HUP") { forward_signal.call("HUP") }
+
+  child = Process.spawn(
+    { "GHOSTBOX_DOCKER_WAIT_TIMEOUT" => ENV.fetch("GHOSTBOX_DOCKER_COMPOSE_WAIT_TIMEOUT", "31536000") },
+    docker,
+    *arguments
+  )
+  Process.kill("TERM", child) if stopping
+  update_runner_state(state_path, "pid" => Process.pid, "status" => "running", "started_at" => Time.now.utc.to_s)
+  _pid, status = Process.wait2(child)
+  exit_code = status.exited? ? status.exitstatus : 128 + status.termsig
+  update_runner_state(
+    state_path,
+    "pid" => nil,
+    "status" => "exited",
+    "exit_code" => exit_code,
+    "finished_at" => Time.now.utc.to_s
+  )
+  exit(exit_code)
+rescue StandardError => error
+  update_runner_state(state_path, "pid" => nil, "status" => "failed", "error" => error.message) if state_path
+  warn "#{PROGRAM}: service runner failed: #{error.message}"
+  exit(125)
+end
+
+def service_state_path(project_directory, service)
+  File.join(project_directory, "services", "#{service}.json")
+end
+
+def start_service(project_directory, project, name, service, config_directory, docker)
+  state_path = service_state_path(project_directory, name)
+  existing = read_json(state_path)
+  if existing && existing["status"] == "running" && process_alive?(existing["pid"])
+    puts "#{name} is already running"
+    return existing["pid"]
+  end
+
+  arguments = service_run_arguments(project, name, service, config_directory)
+  log_path = File.join(project_directory, "logs", "#{name}.log")
+  FileUtils.mkdir_p(File.dirname(log_path))
+  File.open(log_path, "w") {}
+  write_json(
+    state_path,
+    "service" => name,
+    "container_name" => (service["container_name"] || "#{project}-#{name}-1"),
+    "image" => service["image"].to_s,
+    "status" => "starting",
+    "pid" => nil,
+    "log" => log_path
+  )
+
+  pid = Process.spawn(
+    SCRIPT_PATH,
+    SERVICE_RUNNER,
+    docker,
+    state_path,
+    *arguments,
+    out: [log_path, "a"],
+    err: [:child, :out],
+    pgroup: true
+  )
+  Process.detach(pid)
+
+  deadline = Time.now + 5
+  loop do
+    state = read_json(state_path)
+    break if state && state["status"] == "running"
+    break if state && state["status"] == "exited" && state["exit_code"] == 0
+    if state && %w[failed exited].include?(state["status"])
+      detail = state["error"] || "exit status #{state["exit_code"]}"
+      raise ComposeError, "service #{name} failed to start: #{detail}"
+    end
+    raise ComposeError, "service #{name} did not start within 5 seconds" if Time.now >= deadline
+    sleep(0.05)
+  end
+  puts "#{name} started"
+  pid
+rescue SystemCallError => error
+  update_runner_state(state_path, "status" => "failed", "error" => error.message)
+  raise ComposeError, "service #{name}: #{error.message}"
+end
+
+def stop_project(project_directory, timeout)
+  paths = Dir.glob(File.join(project_directory, "services", "*.json"))
+  states = paths.map { |path| [path, read_json(path)] }.reject { |_path, state| state.nil? }
+  states.each do |_path, state|
+    pid = state["pid"]
+    next unless process_alive?(pid)
+
+    puts "#{state["service"]} stopping"
+    Process.kill("TERM", pid)
+  rescue Errno::ESRCH
+    nil
+  end
+
+  deadline = Time.now + timeout
+  states.each do |_path, state|
+    pid = state["pid"]
+    next unless pid
+    sleep(0.05) while process_alive?(pid) && Time.now < deadline
+    next unless process_alive?(pid)
+
+    Process.kill("KILL", pid)
+  rescue Errno::ESRCH
+    nil
+  end
+  FileUtils.rm_rf(File.join(project_directory, "services"))
+  FileUtils.rm_rf(File.join(project_directory, "logs"))
+  FileUtils.rm_f(File.join(project_directory, "project.json"))
+end
+
+def print_logs(project_directory, names, tail, follow, stop_requested = nil)
+  offsets = {}
+  names.each do |name|
+    state = read_json(service_state_path(project_directory, name))
+    raise ComposeError, "no container exists for service #{name}" unless state
+    path = state["log"]
+    lines = File.file?(path) ? File.readlines(path) : []
+    lines = lines.last(tail) if tail
+    lines.each { |line| print "#{name} | #{line}" }
+    offsets[name] = File.file?(path) ? File.size(path) : 0
+  end
+  return unless follow
+
+  loop do
+    break if stop_requested && stop_requested.call
+
+    names.each do |name|
+      state = read_json(service_state_path(project_directory, name))
+      next unless state && File.file?(state["log"])
+
+      File.open(state["log"]) do |file|
+        file.seek(offsets[name])
+        file.each_line { |line| print "#{name} | #{line}" }
+        offsets[name] = file.pos
+      end
+    end
+    break unless names.any? do |name|
+      state = read_json(service_state_path(project_directory, name))
+      state && state["status"] == "running" && process_alive?(state["pid"])
+    end
+    sleep(0.1)
+  end
+end
+
+def parse_global_options(arguments)
+  options = { files: [], project: nil, env_file: nil }
+  loop do
+    case arguments.first
+    when "-f", "--file"
+      arguments.shift
+      options[:files] << (arguments.shift || raise(ComposeError, "--file requires a value"))
+    when /\A--file=(.*)\z/
+      options[:files] << Regexp.last_match(1)
+      arguments.shift
+    when "-p", "--project-name"
+      arguments.shift
+      options[:project] = arguments.shift || raise(ComposeError, "--project-name requires a value")
+    when /\A--project-name=(.*)\z/
+      options[:project] = Regexp.last_match(1)
+      arguments.shift
+    when "--env-file"
+      arguments.shift
+      options[:env_file] = arguments.shift || raise(ComposeError, "--env-file requires a value")
+    when /\A--env-file=(.*)\z/
+      options[:env_file] = Regexp.last_match(1)
+      arguments.shift
+    when "--help", "-h"
+      puts usage
+      exit(0)
+    else
+      break
+    end
+  end
+  options
+end
+
+def main(arguments)
+  if arguments.first == SERVICE_RUNNER
+    arguments.shift
+    run_service_runner(arguments)
+  end
+
+  options = parse_global_options(arguments)
+  command = arguments.shift
+  raise ComposeError, "a command is required\n\n#{usage}" unless command
+
+  config_path = find_compose_file(options[:files])
+  config = load_config(config_path, options[:env_file])
+  project = project_name(config, config_path, options[:project])
+  project_directory = File.join(state_root, project)
+  docker = ENV.fetch("GHOSTBOX_DOCKER", DEFAULT_DOCKER)
+
+  case command
+  when "config"
+    if arguments == ["--services"]
+      puts config.fetch("services").keys
+    elsif arguments.empty?
+      puts YAML.dump(config)
+    else
+      raise ComposeError, "config: unsupported option #{arguments.first}"
+    end
+  when "pull"
+    names = selected_services(config, arguments)
+    raise ComposeError, "Docker helper not found: #{docker}" unless File.executable?(docker)
+    names.each do |name|
+      service = config.fetch("services").fetch(name)
+      pull_arguments = ["pull"]
+      pull_arguments.concat(["--platform", service["platform"].to_s]) if service["platform"]
+      pull_arguments << service.fetch("image").to_s
+      puts "Pulling #{name}"
+      success = system(docker, *pull_arguments)
+      raise ComposeError, "failed to pull service #{name}" unless success
+    end
+  when "up"
+    detached = false
+    requested = []
+    until arguments.empty?
+      case arguments.first
+      when "-d", "--detach" then detached = true
+      when "--no-build" then nil
+      when "--help"
+        puts "Usage: #{PROGRAM} up [-d] [SERVICE...]"
+        return
+      when /\A-/ then raise ComposeError, "up: unsupported option #{arguments.first}"
+      else requested << arguments.first
+      end
+      arguments.shift
+    end
+    raise ComposeError, "Docker helper not found: #{docker}" unless File.executable?(docker)
+    names = selected_services(config, requested, include_dependencies: true)
+    FileUtils.mkdir_p(project_directory)
+    write_json(File.join(project_directory, "project.json"), "project" => project, "config" => config_path, "services" => names)
+    names.each do |name|
+      start_service(project_directory, project, name, config.fetch("services").fetch(name), File.dirname(config_path), docker)
+    end
+    return if detached
+
+    interrupted = false
+    Signal.trap("INT") { interrupted = true }
+    Signal.trap("TERM") { interrupted = true }
+    print_logs(project_directory, names, nil, true, proc { interrupted })
+    stop_project(project_directory, 10) if interrupted
+  when "down"
+    timeout = 10
+    until arguments.empty?
+      case arguments.first
+      when "--timeout", "-t"
+        arguments.shift
+        timeout = Integer(arguments.shift || raise(ComposeError, "--timeout requires a value"), 10)
+      when /\A--timeout=(.*)\z/
+        timeout = Integer(Regexp.last_match(1), 10)
+      else
+        raise ComposeError, "down: unsupported option #{arguments.first}"
+      end
+      arguments.shift
+    end
+    raise ComposeError, "down: timeout must be positive" unless timeout.positive?
+    stop_project(project_directory, timeout)
+  when "ps"
+    services_only = arguments.delete("--services")
+    raise ComposeError, "ps: unsupported option #{arguments.first}" unless arguments.empty?
+    names = config.fetch("services").keys
+    if services_only
+      names.each { |name| puts name if File.file?(service_state_path(project_directory, name)) }
+      return
+    end
+    puts format("%-24s %-12s %s", "NAME", "STATUS", "IMAGE")
+    names.each do |name|
+      state = read_json(service_state_path(project_directory, name))
+      next unless state
+      status = state["status"]
+      status = "exited" if status == "running" && !process_alive?(state["pid"])
+      status = "#{status} (#{state["exit_code"]})" if state.key?("exit_code")
+      puts format("%-24s %-12s %s", name, status, state["image"])
+    end
+  when "logs"
+    follow = false
+    tail = nil
+    requested = []
+    until arguments.empty?
+      case arguments.first
+      when "-f", "--follow" then follow = true
+      when "--tail"
+        arguments.shift
+        value = arguments.shift || raise(ComposeError, "--tail requires a value")
+        tail = value == "all" ? nil : Integer(value, 10)
+      when /\A--tail=(.*)\z/
+        value = Regexp.last_match(1)
+        tail = value == "all" ? nil : Integer(value, 10)
+      when /\A-/ then raise ComposeError, "logs: unsupported option #{arguments.first}"
+      else requested << arguments.first
+      end
+      arguments.shift
+    end
+    raise ComposeError, "logs: tail must not be negative" if tail && tail.negative?
+    names = selected_services(config, requested)
+    print_logs(project_directory, names, tail, follow)
+  when "help", "--help", "-h"
+    puts usage
+  else
+    raise ComposeError, "unsupported command #{command}"
+  end
+rescue ArgumentError => error
+  raise ComposeError, error.message
+end
+
+begin
+  main(ARGV.dup)
+rescue ComposeError => error
+  warn "#{PROGRAM}: #{error.message}"
+  exit(1)
+end

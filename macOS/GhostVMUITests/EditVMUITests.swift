@@ -71,6 +71,8 @@ final class EditVMUITests: XCTestCase {
             XCTAssertEqual(memoryField.value as? String, "16", "Memory field should have mock value of 16")
             XCTAssertEqual(diskField.value as? String, "128", "Disk field should have mock value of 128")
             XCTAssertFalse(diskField.isEnabled, "Disk field should be read-only after VM creation")
+            XCTAssertTrue(app.checkBoxes["editVM.hostContainersToggle"].exists,
+                          "Host containers setting should exist")
         }
 
         XCTContext.runActivity(named: "Units and info banner") { _ in

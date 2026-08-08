@@ -353,7 +353,7 @@ export default function AppleSiliconMacVirtualMachines() {
         <h3>Requirements</h3>
         <ul>
           <li>Mac with Apple Silicon (M1, M2, M3, M4, or later)</li>
-          <li>macOS 15 Sequoia or later</li>
+          <li>macOS 26 Tahoe or later</li>
           <li>At least 8GB RAM (16GB+ recommended)</li>
           <li>20GB+ free disk space per VM</li>
         </ul>

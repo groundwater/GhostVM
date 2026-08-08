@@ -8,10 +8,16 @@ public enum NetworkMode: String, Codable {
 public struct NetworkConfig: Codable, Equatable {
     public var mode: NetworkMode
     public var bridgeInterfaceIdentifier: String?
+    public var vmnetIPv4Subnet: String?
 
-    public init(mode: NetworkMode = .nat, bridgeInterfaceIdentifier: String? = nil) {
+    public init(
+        mode: NetworkMode = .nat,
+        bridgeInterfaceIdentifier: String? = nil,
+        vmnetIPv4Subnet: String? = nil
+    ) {
         self.mode = mode
         self.bridgeInterfaceIdentifier = bridgeInterfaceIdentifier
+        self.vmnetIPv4Subnet = vmnetIPv4Subnet
     }
 
     public static var defaultConfig: NetworkConfig {

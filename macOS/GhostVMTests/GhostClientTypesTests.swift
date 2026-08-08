@@ -48,6 +48,25 @@ final class GhostClientTypesTests: XCTestCase {
         XCTAssertTrue(response.files.isEmpty)
     }
 
+    func testGuestFileMetadataRoundTrip() throws {
+        let metadata = GuestFileMetadata(
+            name: "sample.txt",
+            type: .file,
+            size: 42,
+            mode: 0o100644,
+            uid: 501,
+            gid: 20,
+            inode: 123,
+            device: 4,
+            linkCount: 1,
+            modifiedSeconds: 1000,
+            modifiedNanoseconds: 500
+        )
+
+        let encoded = try JSONEncoder().encode(metadata)
+        XCTAssertEqual(try JSONDecoder().decode(GuestFileMetadata.self, from: encoded), metadata)
+    }
+
     func testClipboardGetResponseConvenienceContent() throws {
         // UTF-8 text data should produce non-nil content
         let response = ClipboardGetResponse(data: Data("test content".utf8), type: "public.utf8-plain-text")

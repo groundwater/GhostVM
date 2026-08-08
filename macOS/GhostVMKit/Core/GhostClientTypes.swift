@@ -141,6 +141,121 @@ public struct FSListResponse: Codable {
     }
 }
 
+public enum GuestFileType: String, Codable, Equatable, Sendable {
+    case file
+    case directory
+    case symbolicLink
+    case other
+}
+
+public struct GuestFileMetadata: Codable, Equatable, Sendable {
+    public let name: String
+    public let type: GuestFileType
+    public let size: UInt64
+    public let mode: UInt32
+    public let uid: UInt32
+    public let gid: UInt32
+    public let inode: UInt64
+    public let device: UInt64
+    public let linkCount: UInt32
+    public let modifiedSeconds: Int
+    public let modifiedNanoseconds: Int32
+    public let accessedSeconds: Int?
+    public let accessedNanoseconds: Int32?
+    public let changedSeconds: Int?
+    public let changedNanoseconds: Int32?
+    public let birthSeconds: Int?
+    public let birthNanoseconds: Int32?
+
+    public init(
+        name: String,
+        type: GuestFileType,
+        size: UInt64,
+        mode: UInt32,
+        uid: UInt32,
+        gid: UInt32,
+        inode: UInt64,
+        device: UInt64,
+        linkCount: UInt32,
+        modifiedSeconds: Int,
+        modifiedNanoseconds: Int32,
+        accessedSeconds: Int? = nil,
+        accessedNanoseconds: Int32? = nil,
+        changedSeconds: Int? = nil,
+        changedNanoseconds: Int32? = nil,
+        birthSeconds: Int? = nil,
+        birthNanoseconds: Int32? = nil
+    ) {
+        self.name = name
+        self.type = type
+        self.size = size
+        self.mode = mode
+        self.uid = uid
+        self.gid = gid
+        self.inode = inode
+        self.device = device
+        self.linkCount = linkCount
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+        self.accessedSeconds = accessedSeconds
+        self.accessedNanoseconds = accessedNanoseconds
+        self.changedSeconds = changedSeconds
+        self.changedNanoseconds = changedNanoseconds
+        self.birthSeconds = birthSeconds
+        self.birthNanoseconds = birthNanoseconds
+    }
+}
+
+public enum GuestFileCreateType: String, Codable, Equatable, Sendable {
+    case file
+    case directory
+}
+
+public struct GuestFileAttributes: Codable, Equatable, Sendable {
+    public let mode: UInt32?
+    public let size: UInt64?
+    public let modifiedSeconds: Int64?
+    public let modifiedNanoseconds: Int32?
+    public let accessedSeconds: Int64?
+    public let accessedNanoseconds: Int32?
+
+    public init(
+        mode: UInt32? = nil,
+        size: UInt64? = nil,
+        modifiedSeconds: Int64? = nil,
+        modifiedNanoseconds: Int32? = nil,
+        accessedSeconds: Int64? = nil,
+        accessedNanoseconds: Int32? = nil
+    ) {
+        self.mode = mode
+        self.size = size
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+        self.accessedSeconds = accessedSeconds
+        self.accessedNanoseconds = accessedNanoseconds
+    }
+}
+
+public struct GuestFilesystemErrorPayload: Codable, Equatable, Sendable {
+    public let error: String
+    public let errno: Int32?
+
+    public init(error: String, errno: Int32? = nil) {
+        self.error = error
+        self.errno = errno
+    }
+}
+
+public struct GuestDirectoryMetadata: Codable, Equatable, Sendable {
+    public let path: String
+    public let entries: [GuestFileMetadata]
+
+    public init(path: String, entries: [GuestFileMetadata]) {
+        self.path = path
+        self.entries = entries
+    }
+}
+
 // MARK: - Accessibility Types
 
 /// Frame rectangle for accessibility elements

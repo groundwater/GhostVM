@@ -26,6 +26,8 @@ final class CreateVMUITests: XCTestCase {
         XCTAssertTrue(cpuField.waitForExistence(timeout: 3), "CPU field should exist")
         XCTAssertTrue(memoryField.exists, "Memory field should exist")
         XCTAssertTrue(diskField.exists, "Disk field should exist")
+        XCTAssertTrue(app.checkBoxes["createVM.hostContainersToggle"].exists,
+                      "Host containers setting should exist")
     }
 
     func testCancelDismissesSheet() {

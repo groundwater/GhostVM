@@ -25,8 +25,11 @@ private func formattedBuildDate(from version: String) -> String? {
 @available(macOS 13.0, *)
 struct GhostVMSwiftUIApp: App {
     @NSApplicationDelegateAdaptor(App2AppDelegate.self) private var appDelegate
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var store = App2VMStore()
     @StateObject private var restoreStore = App2RestoreImageStore()
+    @StateObject private var fileSystemExtensionManager = GhostVMFSExtensionManager()
+    @State private var showingFileSystemExtensionAssistant = false
 
     init() {
         // IMPORTANT: Ignore SIGPIPE signal
@@ -51,10 +54,35 @@ struct GhostVMSwiftUIApp: App {
             VMListDemoView()
                 .environmentObject(store)
                 .environmentObject(restoreStore)
+                .environmentObject(fileSystemExtensionManager)
                 .onOpenURL { url in
                     NSLog("[GhostVM] onOpenURL: \(url.path)")
                     store.addBundles(from: [url])
                     App2AppDelegate.handleOpenURLs([url], store: store)
+                }
+                .sheet(isPresented: $showingFileSystemExtensionAssistant) {
+                    GhostVMFSExtensionAssistantView(manager: fileSystemExtensionManager)
+                }
+                .task {
+                    guard !ProcessInfo.processInfo.arguments.contains("--ui-testing") else { return }
+                    await fileSystemExtensionManager.refresh()
+                    showingFileSystemExtensionAssistant =
+                        fileSystemExtensionManager.health.requiresAttention
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    Task { await fileSystemExtensionManager.refresh() }
+                }
+                .onReceive(
+                    NotificationCenter.default.publisher(for: .ghostVMFSExtensionNeedsAttention)
+                        .receive(on: RunLoop.main)
+                ) { _ in
+                    Task {
+                        await fileSystemExtensionManager.refresh()
+                        if fileSystemExtensionManager.health.requiresAttention {
+                            showingFileSystemExtensionAssistant = true
+                        }
+                    }
                 }
         }
         .commands {
@@ -69,6 +97,7 @@ struct GhostVMSwiftUIApp: App {
         WindowGroup("Settings", id: "settings") {
             SettingsDemoView()
                 .environment(\.sparkleUpdater, appDelegate.updaterController.updater)
+                .environmentObject(fileSystemExtensionManager)
         }
 
         WindowGroup("Restore Images", id: "restoreImages") {
@@ -739,6 +768,7 @@ struct CreateVMDemoView: View {
     @State private var diskImageFormat: DiskImageFormat = .defaultForCurrentHost
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
+    @State private var hostContainersEnabled = false
     @State private var restoreItems: [RestoreItem] = []
     @State private var selectedRestorePath: String?
     @State private var isCreating: Bool = false
@@ -834,6 +864,14 @@ struct CreateVMDemoView: View {
 
             labeledRow("Network") {
                 NetworkSettingsView(networkConfig: $networkConfig)
+            }
+
+            labeledRow("Containers") {
+                HostContainerSettingsView(
+                    isEnabled: $hostContainersEnabled,
+                    networkMode: networkConfig.mode,
+                    accessibilityIdentifier: "createVM.hostContainersToggle"
+                )
             }
 
             Spacer(minLength: 8)
@@ -1009,6 +1047,7 @@ struct CreateVMDemoView: View {
         opts.restoreImagePath = restorePath
         opts.sharedFolders = validFolders
         opts.networkConfig = networkConfig
+        opts.hostContainersEnabled = hostContainersEnabled && networkConfig.mode == .nat
 
         isCreating = true
 
@@ -1411,6 +1450,7 @@ struct EditVMView: View {
     @State private var sharedFolders: [SharedFolderConfig] = []
     @State private var portForwards: [PortForwardConfig] = []
     @State private var networkConfig: NetworkConfig = NetworkConfig.defaultConfig
+    @State private var hostContainersEnabled = false
     @State private var diskGiB: String = ""
     @State private var customIcon: NSImage?
     @State private var customIconChanged: Bool = false
@@ -1508,6 +1548,14 @@ struct EditVMView: View {
 
                         labeledRow("Network") {
                             NetworkSettingsView(networkConfig: $networkConfig)
+                        }
+
+                        labeledRow("Containers") {
+                            HostContainerSettingsView(
+                                isEnabled: $hostContainersEnabled,
+                                networkMode: networkConfig.mode,
+                                accessibilityIdentifier: "editVM.hostContainersToggle"
+                            )
                         }
 
                         if networkConfig.mode == .nat {
@@ -1804,6 +1852,8 @@ struct EditVMView: View {
 
                     // Load network config
                     self.networkConfig = config.networkConfig ?? NetworkConfig.defaultConfig
+                    self.hostContainersEnabled = config.hostContainersEnabled
+                        && self.networkConfig.mode == .nat
 
                     // Load icon mode
                     self.isDynamicIconMode = config.iconMode == "stack"
@@ -1865,6 +1915,7 @@ struct EditVMView: View {
                     storedConfig.iconMode = nil
                 }
                 storedConfig.networkConfig = networkConfig
+                storedConfig.hostContainersEnabled = hostContainersEnabled && networkConfig.mode == .nat
                 try store.save(storedConfig)
 
                 // Save or remove custom icon
@@ -2578,12 +2629,14 @@ struct VMWindowView: View {
 @available(macOS 13.0, *)
 struct SettingsDemoView: View {
     @Environment(\.sparkleUpdater) private var updater
+    @EnvironmentObject private var fileSystemExtensionManager: GhostVMFSExtensionManager
     @State private var ipswPath: String
     @State private var feedURLString: String
     @State private var verificationMessage: String? = nil
     @State private var verificationWasSuccessful: Bool? = nil
     @State private var isVerifying: Bool = false
     @State private var autoCheckForUpdates: Bool = true
+    @State private var showingFileSystemExtensionAssistant = false
 
     private let labelWidth: CGFloat = 130
 
@@ -2597,6 +2650,23 @@ struct SettingsDemoView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Choose where GhostVM stores IPSW downloads and configure the IPSW feed.")
                 .fixedSize(horizontal: false, vertical: true)
+
+            labeledRow("File System") {
+                HStack(spacing: 8) {
+                    Image(systemName: fileSystemExtensionManager.health == .ready
+                        ? "checkmark.circle.fill"
+                        : "exclamationmark.triangle.fill")
+                        .foregroundStyle(fileSystemExtensionManager.health == .ready
+                            ? Color.green
+                            : Color.orange)
+                    Text(fileSystemExtensionStatus)
+                        .foregroundStyle(.secondary)
+                    Button(fileSystemExtensionManager.health == .ready ? "Details..." : "Set Up / Repair...") {
+                        showingFileSystemExtensionAssistant = true
+                    }
+                    .accessibilityIdentifier("settings.fileSystemExtensionButton")
+                }
+            }
 
             labeledRow("IPSW Cache") {
                 HStack(spacing: 8) {
@@ -2676,6 +2746,20 @@ struct SettingsDemoView: View {
             if let updater = updater {
                 autoCheckForUpdates = updater.automaticallyChecksForUpdates
             }
+        }
+        .task {
+            await fileSystemExtensionManager.refresh()
+        }
+        .sheet(isPresented: $showingFileSystemExtensionAssistant) {
+            GhostVMFSExtensionAssistantView(manager: fileSystemExtensionManager)
+        }
+    }
+
+    private var fileSystemExtensionStatus: String {
+        switch fileSystemExtensionManager.health {
+        case .checking: return "Checking GhostVMFS..."
+        case .ready: return "GhostVMFS is ready"
+        default: return "GhostVMFS needs attention"
         }
     }
 
