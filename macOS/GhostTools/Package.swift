@@ -43,6 +43,6 @@ let package = Package(
         .testTarget(
             name: "GhostboxTests",
             dependencies: ["ghostbox"]
-        )
+        ),
     ]
 )

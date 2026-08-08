@@ -79,8 +79,7 @@ frontend and is never forwarded directly to the host.
 
 Every request includes a major/minor version, request ID, method, and
 method-specific parameters. Frontends query `system.capabilities` before using
-optional methods. The current one-shot `run` request remains as the migration
-path while primitive handlers are added.
+optional methods. There is no one-shot run request or migration fallback.
 
 ## GhostTools CLI
 

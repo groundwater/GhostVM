@@ -9,17 +9,14 @@ struct GuestVolumeMount: Sendable {
 
     enum MountError: Error, LocalizedError {
         case bridgeUnavailable
-        case extensionUnavailable
         case mountFailed(String)
 
         var errorDescription: String? {
             switch self {
             case .bridgeUnavailable:
                 return "Guest filesystem bridge is unavailable."
-            case .extensionUnavailable:
-                return "GhostVM's file system extension is not enabled. Enable it in System Settings > General > Login Items & Extensions > File System Extensions."
             case .mountFailed(let detail):
-                return "Failed to mount guest directory through FSKit: \(detail)"
+                return "Outer-host FSKit mount failed: \(detail) Nothing needs to be installed in this VM; check GhostVMFS in GhostVM on the outer Mac."
             }
         }
     }
@@ -27,20 +24,17 @@ struct GuestVolumeMount: Sendable {
     static func mount(
         registeredExport: GuestFileSystemBridgeService.RegisteredExport,
         destination: String,
-        readOnly: Bool,
-        rootURL: URL
+        readOnly: Bool
     ) throws -> Self {
-        guard extensionIsEnabled() else { throw MountError.extensionUnavailable }
-
-        let mountPoint = rootURL.appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
-        try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+        let mountPoint = try PrivateGuestMountDirectory.create()
 
         do {
+            let mountOptions = readOnly ? "rdonly,nobrowse,nodev,nosuid" : "nobrowse,nodev,nosuid"
             try run(
                 executable: "/sbin/mount",
                 arguments: [
                     "-F", "-t", "ghostvm",
-                    "-o", "rdonly,nobrowse,nodev,nosuid",
+                    "-o", mountOptions,
                     registeredExport.resourceURL.absoluteString,
                     mountPoint.path,
                 ]
@@ -64,25 +58,6 @@ struct GuestVolumeMount: Sendable {
             try? FileManager.default.removeItem(at: mountPoint)
         } catch {
             NSLog("GuestVolumeMount: failed to unmount %@: %@", mountPoint.path, error.localizedDescription)
-        }
-    }
-
-    static func extensionIsEnabled() -> Bool {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
-        process.arguments = ["-m", "-p", "com.apple.fskit.fsmodule"]
-        process.standardOutput = output
-        process.standardError = output
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0,
-                  let text = String(data: data, encoding: .utf8) else { return false }
-            return text.contains("org.ghostvm.ghostvm.fs")
-        } catch {
-            return false
         }
     }
 

@@ -37,6 +37,8 @@ docker CLI / compose / another client
 7. Large and interactive data uses bounded binary stream frames associated
    with a request. JSON metadata must never contain whole build contexts,
    filesystem archives, or unbounded process output.
+8. Guest-backed `ReaderStream`, `Writer`, and `Terminal` resources carry process
+   I/O independently from container and process lifecycle calls.
 
 ## Runtime surface
 
@@ -104,10 +106,20 @@ Filesystem I/O is not tunneled through container lifecycle requests. The host
 FSKit extension uses a separate bounded filesystem transport to GhostTools for
 lookup, attributes, directory enumeration, and range I/O.
 
+### Persistent named volumes
+
+The additive `volume.create`, `volume.list`, `volume.inspect`, `volume.mount`,
+and `volume.delete` methods manage sparse ext4 images in trusted per-VM storage.
+`volume.mount` translates a named volume internally to
+`Containerization.Mount.block`; guests exchange only `@volume/NAME` and
+`@mount/NAME` references, never outer-host paths. Volumes survive container and
+VM restarts and cannot be deleted while a mount reference reserves them.
+
 ## Docker mapping
 
-Docker Compose is client-side and uses the ordinary Docker Engine API. A
-GhostTools Docker endpoint can therefore translate its core calls as follows:
+Docker Compose is client-side orchestration. GhostTools can parse Compose files
+and translate their core operations directly without requiring a Docker Engine
+daemon or socket:
 
 | Docker operation | Runtime sequence |
 |---|---|
@@ -120,41 +132,12 @@ GhostTools Docker endpoint can therefore translate its core calls as follows:
 | Stop or remove | `container.stop`, `container.delete` |
 | Build Dockerfile | `build.create` with a streamed build context |
 
-Named volumes, Compose networks, port publication, and restart policies are
-orchestration features. They belong in the host runtime service and are exposed
-as additive capabilities rather than leaking Docker request structures into
-the base container lifecycle API.
+Compose networks and restart policies are orchestration features. They are
+exposed as additive capabilities rather than leaking Docker
+request structures into the base container lifecycle API. Guest-side frontends
+implement published-port listeners using the container address returned by the
+host.
 
-## One-shot run compatibility
-
-The one-shot `run` request remains operational while the primitive handlers are
-implemented. It is a temporary compatibility path and is not part of the stable
-runtime surface above. Its optional `volumes` array contains
-`{guestPath, destination, readOnly}` records. The host validates these,
-registers capability-scoped FSKit exports, mounts them for the run lifetime, and
-passes only the resulting host mount paths to the isolated runtime helper.
-
-Version 1 sends raw stdin bytes after the request newline and remains accepted
-for existing GhostTools installations. Version 2 adds `tty`, `columns`, and
-`rows` request fields. Guest-to-host traffic after a version 2 request is NDJSON:
-
-```json
-{"version":2,"type":"stdin","data":"YmFzZTY0"}
-{"version":2,"type":"resize","columns":120,"rows":40}
-{"version":2,"type":"stdinClose"}
-```
-
-Host responses use the request's protocol version. In TTY mode, the container
-process receives a native PTY, stderr is merged into stdout, `TERM` is set to
-`xterm-256color`, and resize frames map to `LinuxContainer.resize(to:)`.
-
-Version 4 adds optional `environment`, `workingDirectory`, `user`, `cpus`, and
-`memoryBytes` run fields. Once the container starts, the host returns its
-private address before relaying output:
-
-```json
-{"version":4,"type":"ready","ipv4Address":"192.168.64.3"}
-```
-
-`ghostbox` binds requested TCP ports in the macOS guest and forwards them to
-that address. The host never binds an outer-Mac port on behalf of a guest run.
+There is no one-shot `run` request, Docker-shaped host request, compatibility
+handshake, or fallback route. Frontends must use the resource methods above.
+Methods that have not been implemented fail with `unsupported`.

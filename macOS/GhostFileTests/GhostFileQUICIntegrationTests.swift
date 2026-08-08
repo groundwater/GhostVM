@@ -2,8 +2,215 @@ import Foundation
 import Network
 import XCTest
 @testable import GhostFile
+@testable import GhostFileKit
 
 final class GhostFileHTTP3IntegrationTests: XCTestCase {
+    func testInstalledGhostVMFSMountReadsLiveLoopbackShare() async throws {
+        let extensionURL = URL(
+            fileURLWithPath: "/Applications/GhostVM.app/Contents/Extensions/GhostVMFS.appex",
+            isDirectory: true
+        )
+        guard FileManager.default.fileExists(atPath: extensionURL.path) else {
+            throw XCTSkip("GhostVMFS is not installed")
+        }
+
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostvm-fskit-mount-tests-\(UUID().uuidString)", isDirectory: true)
+        let mountPoint = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostvm-fskit-mounted-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mountPoint, withIntermediateDirectories: true)
+        try Data("mounted through GhostVMFS".utf8)
+            .write(to: fixture.appendingPathComponent("proof.txt"))
+        defer {
+            try? FileManager.default.removeItem(at: fixture)
+            try? FileManager.default.removeItem(at: mountPoint)
+        }
+
+        let accessKey = "ghostvm-fskit-mount-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostVMFSMountTest",
+                accessKey: accessKey,
+                readOnly: true,
+                visibility: .loopbackOnly,
+                advertisesBonjour: false
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        var components = try XCTUnwrap(URLComponents(url: shareURL, resolvingAgainstBaseURL: false))
+        components.queryItems = (components.queryItems ?? []) + [
+            URLQueryItem(name: "access_key", value: accessKey),
+            URLQueryItem(name: "mount_instance", value: UUID().uuidString.lowercased()),
+        ]
+        let resourceURL = try XCTUnwrap(components.url)
+
+        let mount = Process()
+        let mountOutput = Pipe()
+        mount.executableURL = URL(fileURLWithPath: "/sbin/mount")
+        mount.arguments = [
+            "-F", "-t", "ghostvm",
+            "-o", "rdonly,nobrowse,nodev,nosuid",
+            resourceURL.absoluteString,
+            mountPoint.path,
+        ]
+        mount.standardOutput = mountOutput
+        mount.standardError = mountOutput
+        try mount.run()
+        mount.waitUntilExit()
+        let mountDetail = String(
+            data: mountOutput.fileHandleForReading.readDataToEndOfFile(),
+            encoding: .utf8
+        ) ?? ""
+        XCTAssertEqual(mount.terminationStatus, 0, mountDetail)
+        guard mount.terminationStatus == 0 else { return }
+        defer {
+            let unmount = Process()
+            unmount.executableURL = URL(fileURLWithPath: "/sbin/umount")
+            unmount.arguments = [mountPoint.path]
+            try? unmount.run()
+            unmount.waitUntilExit()
+        }
+
+        XCTAssertEqual(
+            try String(contentsOf: mountPoint.appendingPathComponent("proof.txt"), encoding: .utf8),
+            "mounted through GhostVMFS"
+        )
+    }
+
+    func testLoopbackOnlyShareProducesAuthenticatedReadOnlyResource() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-loopback-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = UUID().uuidString
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "LoopbackTest",
+                accessKey: accessKey,
+                readOnly: true,
+                visibility: .loopbackOnly,
+                advertisesBonjour: false
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        XCTAssertEqual(shareURL.host, "127.0.0.1")
+        XCTAssertNotEqual(shareURL.port, 0)
+        let resourceURL = try loopbackResourceURL(shareURL: shareURL, accessKey: accessKey)
+        let client = try GhostFileHTTP3Client(resourceURL: resourceURL)
+        let capabilities = try await client.capabilities()
+        XCTAssertTrue(capabilities.readOnly)
+    }
+
+    func testWritableShareMutatesFilesEndToEndAndSwitchesReadOnlyLive() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-write-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "write-integration-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "WritableTest",
+                accessKey: accessKey,
+                readOnly: false
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        let client = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey)
+        )
+        let writableCapabilities = try await client.capabilities()
+        XCTAssertFalse(writableCapabilities.readOnly)
+
+        _ = try await client.create(path: "folder", type: .directory, mode: 0o750)
+        let created = try await client.create(path: "folder/data.bin", type: .file, mode: 0o640)
+        let payload = Data((0..<(2 * GhostFileProtocol.maximumWriteLength + 123)).map { UInt8($0 & 0xff) })
+        _ = try await client.write(path: "folder/data.bin", offset: 0, data: payload)
+        XCTAssertEqual(try Data(contentsOf: fixture.appendingPathComponent("folder/data.bin")), payload)
+
+        _ = try await client.create(path: "folder/concurrent.bin", type: .file, mode: 0o640)
+        let concurrentChunks = (0..<3).map { index in
+            Data(repeating: UInt8(0x40 + index), count: GhostFileProtocol.maximumWriteLength)
+        }
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            for (index, chunk) in concurrentChunks.enumerated() {
+                group.addTask {
+                    _ = try await client.write(
+                        path: "folder/concurrent.bin",
+                        offset: UInt64(index * GhostFileProtocol.maximumWriteLength),
+                        data: chunk
+                    )
+                }
+            }
+            try await group.waitForAll()
+        }
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.appendingPathComponent("folder/concurrent.bin")),
+            concurrentChunks.reduce(into: Data()) { $0.append($1) }
+        )
+        try await client.remove(path: "folder/concurrent.bin")
+
+        _ = try await client.setAttributes(
+            path: "folder/data.bin",
+            attributes: GhostFileSetAttributesRequest(mode: 0o600, size: 257)
+        )
+        XCTAssertEqual(
+            try FileManager.default.attributesOfItem(
+                atPath: fixture.appendingPathComponent("folder/data.bin").path
+            )[.size] as? NSNumber,
+            NSNumber(value: 257)
+        )
+
+        let renamed = try await client.rename(
+            path: "folder/data.bin",
+            destinationPath: "folder/renamed.bin"
+        )
+        XCTAssertEqual(renamed.objectID, created.objectID)
+        _ = try await client.createSymbolicLink(path: "folder/link", destination: "renamed.bin")
+        let linkDestination = try await client.readSymbolicLink(path: "folder/link")
+        XCTAssertEqual(linkDestination, "renamed.bin")
+        let remoteContents = try await client.read(
+            path: "folder/renamed.bin",
+            offset: 0,
+            length: 257
+        )
+        XCTAssertEqual(remoteContents, payload.prefix(257))
+
+        try await client.remove(path: "folder/link")
+        try await client.remove(path: "folder/renamed.bin")
+        try await client.remove(path: "folder")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.appendingPathComponent("folder").path))
+
+        await MainActor.run { server.setReadOnly(true) }
+        let readOnlyCapabilities = try await client.capabilities()
+        XCTAssertTrue(readOnlyCapabilities.readOnly)
+        do {
+            _ = try await client.create(path: "must-not-exist", type: .file, mode: 0o600)
+            XCTFail("A live read-only share accepted a create")
+        } catch let error as NSError {
+            XCTAssertEqual(error.domain, NSPOSIXErrorDomain)
+            XCTAssertEqual(error.code, Int(EROFS))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.appendingPathComponent("must-not-exist").path))
+    }
+
     func testPublishedShareURLConnectsThroughResolvedBonjourHost() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("ghostfile-share-url-tests-\(UUID().uuidString)", isDirectory: true)
@@ -37,6 +244,109 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         XCTAssertEqual(capabilities.shareID, expectedShareID)
         XCTAssertEqual(shareURL.host?.hasSuffix(".local"), true)
         XCTAssertNotEqual(shareURL.host, "connectivity-check.warp-svc.local")
+    }
+
+    func testMismatchedPublicKeyPinRejectsPeerBeforeAccessKeyIsSent() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-pin-mismatch-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "must-not-cross-an-untrusted-connection"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "PinMismatchTest",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        var resourceComponents = try XCTUnwrap(URLComponents(
+            url: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey),
+            resolvingAgainstBaseURL: false
+        ))
+        let unrelatedIdentity = try GhostFileTLSIdentity.make()
+        resourceComponents.queryItems = resourceComponents.queryItems?.map { item in
+            item.name == GhostFileProtocol.publicKeyPinQueryName
+                ? URLQueryItem(name: item.name, value: unrelatedIdentity.publicKeyPin)
+                : item
+        }
+        let client = try GhostFileHTTP3Client(
+            resourceURL: try XCTUnwrap(resourceComponents.url),
+            connectionTimeout: .seconds(2),
+            requestTimeout: .seconds(2)
+        )
+
+        do {
+            _ = try await client.capabilities()
+            XCTFail("A client accepted a server with the wrong public key")
+        } catch {}
+        let receivedRequestCount = await MainActor.run { server.requestCount }
+        XCTAssertEqual(receivedRequestCount, 0, "The access key was sent before peer authentication")
+    }
+
+    func testSavedLinkSurvivesCertificateReissueWithPersistentPrivateKey() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-persistent-identity-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let shareID = UUID()
+        let accessKey = "persistent-identity-key"
+        let initialIdentity = try GhostFileTLSIdentity.make()
+        let storedPrivateKey = initialIdentity.privateKeyRepresentation
+        let firstServer = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "PersistentIdentityTest",
+                accessKey: accessKey,
+                shareID: shareID,
+                tlsIdentity: initialIdentity
+            )
+            try server.start()
+            return server
+        }
+        let savedShareURL = try await waitForShareURL(firstServer)
+        let firstClient = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: savedShareURL, accessKey: accessKey)
+        )
+        let firstCapabilities = try await firstClient.capabilities()
+        XCTAssertEqual(firstCapabilities.shareID, shareID)
+
+        await MainActor.run { firstServer.stop() }
+        try await waitForShareToStop(firstServer)
+
+        // Reissue a new self-signed certificate from the persisted per-share
+        // private key. The old saved link must still authenticate it.
+        let reissuedIdentity = try GhostFileTLSIdentity.make(
+            privateKeyRepresentation: storedPrivateKey
+        )
+        XCTAssertNotEqual(initialIdentity.certificatePEM, reissuedIdentity.certificatePEM)
+        XCTAssertEqual(initialIdentity.publicKeyPin, reissuedIdentity.publicKeyPin)
+        let savedPort = try XCTUnwrap(savedShareURL.port).magnitude
+        let secondServer = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "PersistentIdentityTest",
+                accessKey: accessKey,
+                shareID: shareID,
+                tlsIdentity: reissuedIdentity
+            )
+            try server.start(preferredPort: UInt16(savedPort))
+            return server
+        }
+        defer { Task { @MainActor in secondServer.stop() } }
+        _ = try await waitForShareURL(secondServer)
+
+        let reconnectedClient = try GhostFileHTTP3Client(
+            resourceURL: loopbackResourceURL(shareURL: savedShareURL, accessKey: accessKey)
+        )
+        let reconnectedCapabilities = try await reconnectedClient.capabilities()
+        XCTAssertEqual(reconnectedCapabilities.shareID, shareID)
     }
 
     func testClientReconnectsAfterHTTP3ConnectionLoss() async throws {
@@ -273,6 +583,43 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         XCTAssertEqual(refreshedContents, Data("after!".utf8))
     }
 
+    func testZeroCacheTTLReadsAtomicHostReplacementImmediately() async throws {
+        let fixture = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghostfile-live-cache-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
+        let fileURL = fixture.appendingPathComponent("live.txt")
+        try Data("before".utf8).write(to: fileURL)
+        defer { try? FileManager.default.removeItem(at: fixture) }
+
+        let accessKey = "quic-live-cache-key"
+        let server = try await MainActor.run {
+            let server = GhostFileShareServer(
+                rootURL: fixture,
+                shareName: "GhostFileLiveCacheIntegration",
+                accessKey: accessKey
+            )
+            try server.start()
+            return server
+        }
+        defer { Task { @MainActor in server.stop() } }
+
+        let shareURL = try await waitForShareURL(server)
+        var components = try XCTUnwrap(URLComponents(
+            url: loopbackResourceURL(shareURL: shareURL, accessKey: accessKey),
+            resolvingAgainstBaseURL: false
+        ))
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: GhostFileProtocol.cacheTTLQueryName, value: "0"))
+        components.queryItems = queryItems
+        let client = try GhostFileHTTP3Client(resourceURL: try XCTUnwrap(components.url))
+
+        let initialContents = try await client.read(path: "live.txt", offset: 0, length: 64)
+        XCTAssertEqual(initialContents, Data("before".utf8))
+        try Data("after!".utf8).write(to: fileURL, options: .atomic)
+        let replacedContents = try await client.read(path: "live.txt", offset: 0, length: 64)
+        XCTAssertEqual(replacedContents, Data("after!".utf8))
+    }
+
     func testDesktopSizedDirectoryListingCompletesOnOneHTTP3Connection() async throws {
         let fixture = FileManager.default.temporaryDirectory
             .appendingPathComponent("ghostfile-large-directory-tests-\(UUID().uuidString)", isDirectory: true)
@@ -483,7 +830,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             guard let portNumber = shareURL.port,
                   let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
                   let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
-                  let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+                  let pin = components.queryItems?.first(where: { $0.name == "pk" })?.value else {
                 throw TestError.missingShareURL
             }
             return (port, pin)
@@ -548,7 +895,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         guard let portNumber = shareURL.port,
               let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
               let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
-              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+              let pin = components.queryItems?.first(where: { $0.name == "pk" })?.value else {
             throw TestError.missingShareURL
         }
         let transport = try GhostFileHTTP3Transport(
@@ -649,7 +996,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         guard let portNumber = shareURL.port,
               let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
               let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
-              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+              let pin = components.queryItems?.first(where: { $0.name == "pk" })?.value else {
             throw TestError.missingShareURL
         }
         let transport = try GhostFileHTTP3Transport(
@@ -735,7 +1082,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         guard let portNumber = shareURL.port,
               let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
               let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
-              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+              let pin = components.queryItems?.first(where: { $0.name == "pk" })?.value else {
             throw TestError.missingShareURL
         }
         let transport = try GhostFileHTTP3Transport(
@@ -823,7 +1170,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
         guard let portNumber = shareURL.port,
               let port = NWEndpoint.Port(rawValue: UInt16(portNumber)),
               let components = URLComponents(url: shareURL, resolvingAgainstBaseURL: false),
-              let pin = components.queryItems?.first(where: { $0.name == "tls_pin" })?.value else {
+              let pin = components.queryItems?.first(where: { $0.name == "pk" })?.value else {
             throw TestError.missingShareURL
         }
         let transport = try GhostFileHTTP3Transport(
@@ -934,6 +1281,7 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
 
     private enum TestError: Error {
         case missingShareURL
+        case shareDidNotStop
         case responseMismatch
     }
 
@@ -1001,6 +1349,15 @@ final class GhostFileHTTP3IntegrationTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
         throw TestError.missingShareURL
+    }
+
+    private func waitForShareToStop(_ server: GhostFileShareServer) async throws {
+        for _ in 0..<500 {
+            let stopped = await MainActor.run { !server.isRunning && server.port == 0 }
+            if stopped { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw TestError.shareDidNotStop
     }
 }
 

@@ -139,6 +139,46 @@ public struct ContainerRuntimeFilesystemDeleteParameters: Codable, Equatable, Se
     }
 }
 
+/// Metadata for `build.create`. The build context is carried by the bounded
+/// binary input stream associated with the request, never embedded in JSON.
+public struct ContainerRuntimeBuildCreateParameters: Codable, Equatable, Sendable {
+    public var tags: [String]
+    public var dockerfile: Data
+    public var buildArguments: [String]
+    public var target: String?
+    public var noCache: Bool
+    public var pull: Bool
+    public var contextMediaType: String
+
+    public init(
+        tags: [String],
+        dockerfile: Data,
+        buildArguments: [String] = [],
+        target: String? = nil,
+        noCache: Bool = false,
+        pull: Bool = false,
+        contextMediaType: String = "application/vnd.oci.image.layer.v1.tar"
+    ) {
+        self.tags = tags
+        self.dockerfile = dockerfile
+        self.buildArguments = buildArguments
+        self.target = target
+        self.noCache = noCache
+        self.pull = pull
+        self.contextMediaType = contextMediaType
+    }
+}
+
+public struct ContainerRuntimeBuildResult: Codable, Equatable, Sendable {
+    public var imageID: String
+    public var tags: [String]
+
+    public init(imageID: String, tags: [String]) {
+        self.imageID = imageID
+        self.tags = tags
+    }
+}
+
 /// Framework-shaped mount metadata. `source` is a host-owned filesystem ID,
 /// never an outer-host path supplied by the guest.
 public struct ContainerRuntimeMount: Codable, Equatable, Sendable {
@@ -189,6 +229,7 @@ public struct ContainerRuntimeErrorCode: RawRepresentable, Codable, Hashable, Se
     public static let permissionDenied = Self(rawValue: "permission_denied")
     public static let timeout = Self(rawValue: "timeout")
     public static let cancelled = Self(rawValue: "cancelled")
+    public static let resourceExhausted = Self(rawValue: "resource_exhausted")
     public static let internalError = Self(rawValue: "internal")
 }
 

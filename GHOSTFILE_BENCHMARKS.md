@@ -1,5 +1,41 @@
 # GhostFile benchmarks
 
+## 2026-08-02: installed writable FSKit prototype
+
+The earlier read-only benchmark established read performance only; it was not
+evidence that filesystem mutations worked. This pass used the signed
+`/Applications/GhostFile.app` extension and a real FSKit mount backed by the
+workspace share. Every mounted mutation was checked against the source path.
+
+Functional results:
+
+- one 3 MiB `write(2)` path split into concurrent FSKit callbacks: passed;
+- three simultaneous 1 MiB writes at disjoint offsets in one file: passed;
+- create, mkdir, chmod, same- and cross-directory rename, truncate, symlink,
+  unlink, and rmdir: passed;
+- live read-only enable rejected create and chmod with `EROFS`; disabling it
+  restored writes on the existing mount;
+- writable stress: 25 checks, including 200 parallel operation batches, with
+  zero failures;
+- XCTest: 48 tests, one intentional skip, zero failures.
+
+Mounted-versus-native results use the existing 75.5 MiB and 8,192-file
+fixtures. Values are medians of three samples.
+
+| Test | Previous FSKit | Current FSKit | Change |
+| --- | ---: | ---: | ---: |
+| Random 4 KiB read (`F_NOCACHE`) | 1,302.8 us/op | 1,216.7 us/op | 6.6% lower latency |
+| Sequential read (`F_NOCACHE`) | 12.7 MiB/s | 123.4 MiB/s | 9.7x |
+| Warm sequential read | 17,215.5 MiB/s | 18,058.5 MiB/s | 1.05x |
+| Recursive enumeration | 26,284 entries/s | 173,472 entries/s | 6.6x |
+| Small-file open + read | 2,318.8 IOPS | 1,110.9 IOPS | 0.48x |
+| Directory listing | 513.3 IOPS | 3,933.0 IOPS | 7.7x |
+
+Sequential mounted writes of a 64 MiB file measured 135.3, 136.0, and
+135.2 MiB/s (about 135.3 MiB/s median). There is no valid previous write
+number because the old mounted path was read-only. Hard links remain explicitly
+unsupported (`ENOTSUP`) rather than being reported as functional.
+
 ## 2026-07-31: receive-side QUIC datagram batching
 
 The remaining throughput ceiling was a serialized per-datagram feedback loop,

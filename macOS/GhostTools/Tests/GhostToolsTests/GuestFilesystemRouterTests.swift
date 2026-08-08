@@ -86,13 +86,120 @@ final class GuestFilesystemRouterTests: XCTestCase {
         XCTAssertEqual(String(data: try responseData(response), encoding: .utf8), "sample.txt")
     }
 
-    private func route(path: String, query: [URLQueryItem]) throws -> HTTPResponse {
+    func testMutationLifecycle() throws {
+        let createdURL = directory.appendingPathComponent("created.txt")
+        var response = try route(
+            method: .POST,
+            path: "/api/v1/fs/create",
+            body: try JSONEncoder().encode(FSCreateRequest(path: createdURL.path, type: .file, mode: 0o640))
+        )
+        XCTAssertEqual(response.status, .ok)
+
+        response = try route(
+            method: .PATCH,
+            path: "/api/v1/fs/write",
+            query: [
+                URLQueryItem(name: "path", value: createdURL.path),
+                URLQueryItem(name: "offset", value: "2"),
+            ],
+            body: Data("abc".utf8)
+        )
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertEqual(try Data(contentsOf: createdURL), Data([0, 0]) + Data("abc".utf8))
+
+        response = try route(
+            method: .PATCH,
+            path: "/api/v1/fs/attributes",
+            body: try JSONEncoder().encode(FSSetAttributesRequest(
+                path: createdURL.path,
+                attributes: FSFileAttributes(
+                    mode: 0o600,
+                    size: 4,
+                    modifiedSeconds: 1_700_000_000,
+                    modifiedNanoseconds: 0,
+                    accessedSeconds: nil,
+                    accessedNanoseconds: nil
+                )
+            ))
+        )
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertEqual(try Data(contentsOf: createdURL).count, 4)
+        let attributes = try FileManager.default.attributesOfItem(atPath: createdURL.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.uint32Value, 0o600)
+
+        let renamedURL = directory.appendingPathComponent("renamed.txt")
+        response = try route(
+            method: .POST,
+            path: "/api/v1/fs/rename",
+            body: try JSONEncoder().encode(FSRenameRequest(
+                path: createdURL.path,
+                destinationPath: renamedURL.path
+            ))
+        )
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: renamedURL.path))
+
+        let linkURL = directory.appendingPathComponent("created-link")
+        response = try route(
+            method: .POST,
+            path: "/api/v1/fs/symlink",
+            body: try JSONEncoder().encode(FSSymbolicLinkRequest(
+                path: linkURL.path,
+                destination: "renamed.txt"
+            ))
+        )
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: linkURL.path), "renamed.txt")
+
+        response = try route(
+            method: .DELETE,
+            path: "/api/v1/fs/remove",
+            query: [URLQueryItem(name: "path", value: renamedURL.path)]
+        )
+        XCTAssertEqual(response.status, .noContent)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: renamedURL.path))
+    }
+
+    func testCreateDirectoryAndPreservePOSIXError() throws {
+        let newDirectory = directory.appendingPathComponent("new-directory", isDirectory: true)
+        let requestBody = try JSONEncoder().encode(FSCreateRequest(
+            path: newDirectory.path,
+            type: .directory,
+            mode: 0o750
+        ))
+        XCTAssertEqual(
+            try route(method: .POST, path: "/api/v1/fs/create", body: requestBody).status,
+            .ok
+        )
+
+        let duplicate = try route(method: .POST, path: "/api/v1/fs/create", body: requestBody)
+        XCTAssertEqual(duplicate.status, .conflict)
+        let payload = try JSONDecoder().decode(GuestFilesystemErrorResponse.self, from: responseData(duplicate))
+        XCTAssertEqual(payload.errno, EEXIST)
+    }
+
+    func testReadErrorPreservesPOSIXError() throws {
+        let response = try route(
+            path: "/api/v1/fs/metadata",
+            query: [URLQueryItem(name: "path", value: directory.appendingPathComponent("missing").path)]
+        )
+        XCTAssertEqual(response.status, .notFound)
+        let payload = try JSONDecoder().decode(GuestFilesystemErrorResponse.self, from: responseData(response))
+        XCTAssertEqual(payload.errno, ENOENT)
+    }
+
+    private func route(
+        method: HTTPMethod = .GET,
+        path: String,
+        query: [URLQueryItem] = [],
+        body: Data = Data()
+    ) throws -> HTTPResponse {
         var components = URLComponents()
         components.path = path
         components.queryItems = query
-        let request = HTTPRequest(method: .GET, path: components.string!, headers: [:])
-        let body = BodyReader(fd: -1, framing: .knownLength(0), prelude: Data())
-        return try Router().route(request: request, body: body)
+        let request = HTTPRequest(method: method, path: components.string!, headers: [:])
+        let reader = BodyReader(fd: -1, framing: .knownLength(body.count), prelude: body)
+        return try Router().route(request: request, body: reader)
     }
 
     private func responseData(_ response: HTTPResponse) throws -> Data {

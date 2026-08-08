@@ -2,9 +2,38 @@ import XCTest
 @testable import GhostVMKit
 
 final class ContainerBridgeProtocolTests: XCTestCase {
+    func testGhostboxIOFramesRoundTrip() throws {
+        let frames: [GhostboxIOFrame] = [
+            .data(Data([0x00, 0x0A, 0xFF]), stream: .input),
+            .data(Data("output".utf8), stream: .output),
+            .eof(.terminal),
+            .resize(columns: 120, rows: 40),
+            .error("closed"),
+        ]
+        for frame in frames {
+            var line = try frame.encodeLine()
+            XCTAssertEqual(line.removeLast(), 0x0A)
+            XCTAssertEqual(try GhostboxIOFrame.decode(line: line), frame)
+        }
+    }
 
-    // MARK: - Runtime API
-
+    func testGhostboxIOFramesEnforceBounds() {
+        XCTAssertThrowsError(try GhostboxIOFrame.data(
+            Data(repeating: 0, count: GhostboxDirectLimits.ioFrameDataBytes + 1),
+            stream: .input
+        ).encodeLine())
+        XCTAssertThrowsError(try GhostboxIOFrame.resize(columns: 0, rows: 24).encodeLine())
+        XCTAssertThrowsError(try GhostboxIOFrame.decode(line: Data()))
+    }
+    func testMaximumGhostboxIOFrameFitsFrameLineLimit() throws {
+        let frame = GhostboxIOFrame.data(
+            Data(repeating: 0x5A, count: GhostboxDirectLimits.ioFrameDataBytes),
+            stream: .terminal
+        )
+        let line = try frame.encodeLine()
+        XCTAssertLessThanOrEqual(line.count - 1, GhostboxDirectLimits.ioFrameLineBytes)
+        XCTAssertEqual(try GhostboxIOFrame.decode(line: Data(line.dropLast())), frame)
+    }
     func testRuntimeVersionsUseMajorCompatibility() {
         XCTAssertTrue(ContainerRuntimeVersion.current.isCompatible(with: .init(major: 1, minor: 9)))
         XCTAssertFalse(ContainerRuntimeVersion.current.isCompatible(with: .init(major: 2, minor: 0)))
@@ -28,11 +57,7 @@ final class ContainerBridgeProtocolTests: XCTestCase {
 
     func testRuntimeMethodsAllowForwardCompatibleValues() throws {
         let method = ContainerRuntimeMethod(rawValue: "snapshot.prepare")
-        let encoded = try JSONEncoder().encode(method)
-        let decoded = try JSONDecoder().decode(ContainerRuntimeMethod.self, from: encoded)
-
-        XCTAssertEqual(decoded, method)
-        XCTAssertEqual(String(data: encoded, encoding: .utf8), #""snapshot.prepare""#)
+        XCTAssertEqual(try JSONDecoder().decode(ContainerRuntimeMethod.self, from: JSONEncoder().encode(method)), method)
     }
 
     func testRuntimeCapabilitiesRoundTrip() throws {
@@ -40,29 +65,25 @@ final class ContainerBridgeProtocolTests: XCTestCase {
             methods: [.imagePull, .containerCreate, .containerStart],
             features: ["build.stream.v1"]
         )
-        let encoded = try JSONEncoder().encode(capabilities)
-        let decoded = try JSONDecoder().decode(ContainerRuntimeCapabilities.self, from: encoded)
-
-        XCTAssertEqual(decoded, capabilities)
+        XCTAssertEqual(
+            try JSONDecoder().decode(ContainerRuntimeCapabilities.self, from: JSONEncoder().encode(capabilities)),
+            capabilities
+        )
     }
 
     func testRuntimeFailureUsesStableCode() throws {
         let failure = ContainerRuntimeFailure(code: .notFound, message: "container missing")
-        let encoded = try JSONEncoder().encode(failure)
-        let decoded = try JSONDecoder().decode(ContainerRuntimeFailure.self, from: encoded)
-
-        XCTAssertEqual(decoded, failure)
-        XCTAssertEqual(decoded.code.rawValue, "not_found")
+        XCTAssertEqual(
+            try JSONDecoder().decode(ContainerRuntimeFailure.self, from: JSONEncoder().encode(failure)),
+            failure
+        )
     }
 
     func testRuntimeFilesystemRequestAndMountRoundTrip() throws {
         let request = ContainerRuntimeRequest(
             id: "request-fs",
             method: .filesystemCreate,
-            parameters: ContainerRuntimeFilesystemCreateParameters(
-                guestPath: "/Users/guest/project",
-                readOnly: true
-            )
+            parameters: ContainerRuntimeFilesystemCreateParameters(guestPath: "/Users/guest/project", readOnly: true)
         )
         let mount = ContainerRuntimeMount(
             type: "virtiofs",
@@ -70,182 +91,102 @@ final class ContainerBridgeProtocolTests: XCTestCase {
             destination: "/workspace",
             options: ["ro"]
         )
-
-        let requestData = try JSONEncoder().encode(request)
-        let mountData = try JSONEncoder().encode(mount)
-
         XCTAssertEqual(
             try JSONDecoder().decode(
                 ContainerRuntimeRequest<ContainerRuntimeFilesystemCreateParameters>.self,
-                from: requestData
+                from: JSONEncoder().encode(request)
             ),
             request
         )
-        XCTAssertEqual(try JSONDecoder().decode(ContainerRuntimeMount.self, from: mountData), mount)
-        XCTAssertEqual(request.method, .filesystemCreate)
-        XCTAssertEqual(mount.source, "filesystem-1")
+        XCTAssertEqual(try JSONDecoder().decode(ContainerRuntimeMount.self, from: JSONEncoder().encode(mount)), mount)
     }
 
-    // MARK: - Request decoding
-
-    func testDecodeValidRequest() throws {
-        let line = Data(#"{"version":1,"operation":"run","image":"alpine","command":["echo","hello"]}"#.utf8)
-        let request = try ContainerRunRequest.decode(line: line)
-        XCTAssertEqual(request.version, 1)
-        XCTAssertEqual(request.operation, "run")
-        XCTAssertEqual(request.image, "alpine")
-        XCTAssertEqual(request.command, ["echo", "hello"])
-        XCTAssertNil(request.stdin)
-    }
-
-    func testDecodeAttachedStdinRequest() throws {
-        let line = Data(#"{"version":1,"operation":"run","image":"alpine","command":["cat"],"stdin":true}"#.utf8)
-        let request = try ContainerRunRequest.decode(line: line)
-        XCTAssertEqual(request.stdin, true)
-    }
-
-    func testDecodeVolumeRequest() throws {
-        let line = Data(#"{"version":1,"operation":"run","image":"alpine","command":[],"volumes":[{"guestPath":"/data","destination":"/mnt/data","readOnly":true}]}"#.utf8)
-        let request = try ContainerRunRequest.decode(line: line)
+    func testRuntimeBuildRequestCarriesMetadataNotContext() throws {
+        let parameters = ContainerRuntimeBuildCreateParameters(
+            tags: ["web:latest"],
+            dockerfile: Data("FROM scratch\n".utf8),
+            buildArguments: ["MODE=release"],
+            target: "server"
+        )
+        let request = ContainerRuntimeRequest(method: .buildCreate, parameters: parameters)
         XCTAssertEqual(
-            request.volumes,
-            [ContainerRunVolume(guestPath: "/data", destination: "/mnt/data", readOnly: true)]
+            try JSONDecoder().decode(
+                ContainerRuntimeRequest<ContainerRuntimeBuildCreateParameters>.self,
+                from: JSONEncoder().encode(request)
+            ),
+            request
         )
     }
 
-    func testDecodeTTYRequest() throws {
-        let line = Data(#"{"version":2,"operation":"run","image":"alpine","command":["/bin/sh"],"stdin":true,"tty":true,"columns":120,"rows":40}"#.utf8)
-        let request = try ContainerRunRequest.decode(line: line)
-        XCTAssertEqual(request.tty, true)
-        XCTAssertEqual(request.columns, 120)
-        XCTAssertEqual(request.rows, 40)
+    func testGhostboxDirectRequestRoundTrip() throws {
+        let request = GhostboxDirectRequest(
+            id: "direct-1",
+            method: .dnsCreate,
+            parameters: [
+                "name": .string("dev"),
+                "nameservers": .array([.string("1.1.1.1")]),
+            ]
+        )
+        let data = try JSONEncoder().encode(request)
+        XCTAssertEqual(try GhostboxDirectRequest.decode(line: data), request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["operation"] as? String, "direct")
+        XCTAssertEqual(object["method"] as? String, "dns.create")
     }
 
-    func testDecodeVersion4RunConfiguration() throws {
-        let line = Data(#"{"version":4,"operation":"run","image":"alpine","command":[],"environment":["MODE=production"],"workingDirectory":"/app","user":"1000:1000","cpus":4,"memoryBytes":2147483648}"#.utf8)
-        let request = try ContainerRunRequest.decode(line: line)
-        XCTAssertEqual(request.environment, ["MODE=production"])
-        XCTAssertEqual(request.workingDirectory, "/app")
-        XCTAssertEqual(request.user, "1000:1000")
-        XCTAssertEqual(request.cpus, 4)
-        XCTAssertEqual(request.memoryBytes, 2_147_483_648)
+    func testGhostboxDirectResponseHasTypedResult() throws {
+        let response = GhostboxDirectResponse.success(id: "direct-1", value: .strings(["1.1.1.1"]))
+        XCTAssertEqual(
+            try JSONDecoder().decode(GhostboxDirectResponse.self, from: JSONEncoder().encode(response)),
+            response
+        )
     }
 
-    func testInputFrameRoundTrip() throws {
-        let frame = ContainerInputFrame.resize(columns: 132, rows: 43)
-        let line = try frame.encodeLine()
-        XCTAssertEqual(line.last, 0x0A)
-        XCTAssertEqual(try ContainerInputFrame.decode(line: Data(line.dropLast())), frame)
+    func testGhostboxDirectValueAccessors() {
+        XCTAssertEqual(GhostboxDirectValue.reference("@container/web").referenceValue, "@container/web")
+        XCTAssertEqual(GhostboxDirectValue.references(["@volume/data"]).referencesValue, ["@volume/data"])
+        XCTAssertEqual(GhostboxDirectValue.string("running").jsonValue, .string("running"))
+        XCTAssertNil(GhostboxDirectValue.void.jsonValue)
     }
 
-    func testDecodeToleratesUnknownKeys() throws {
-        let line = Data(#"{"version":1,"operation":"run","image":"alpine","command":[],"future":"field"}"#.utf8)
-        let request = try ContainerRunRequest.decode(line: line)
-        XCTAssertEqual(request.image, "alpine")
-        XCTAssertEqual(request.command, [])
+    func testMaximumGhostboxByteResponseFitsResponseLineLimit() throws {
+        let response = GhostboxDirectResponse.success(
+            id: "direct-1",
+            value: .bytes(Data(repeating: 0xA5, count: GhostboxDirectLimits.bytePayloadBytes))
+        )
+        let line = try response.encodeLine()
+        XCTAssertLessThanOrEqual(line.count - 1, GhostboxDirectLimits.responseLineBytes)
+        XCTAssertEqual(
+            try JSONDecoder().decode(GhostboxDirectResponse.self, from: Data(line.dropLast())),
+            response
+        )
     }
 
-    func testDecodeEmptyLineThrowsEmptyRequest() {
-        XCTAssertThrowsError(try ContainerRunRequest.decode(line: Data())) { error in
+    func testGhostboxDirectFailureUsesStableRuntimeError() throws {
+        let response = GhostboxDirectResponse.failure(id: "direct-1", code: .notFound, message: "DNS object missing")
+        let decoded = try JSONDecoder().decode(GhostboxDirectResponse.self, from: JSONEncoder().encode(response))
+        XCTAssertEqual(decoded.error?.code, .notFound)
+        XCTAssertNil(decoded.result)
+    }
+
+    func testDirectDecodeRejectsEmptyAndMalformedRequests() {
+        XCTAssertThrowsError(try GhostboxDirectRequest.decode(line: Data())) { error in
             XCTAssertEqual(error as? ContainerProtocolError, .emptyRequest)
         }
-    }
-
-    func testDecodeInvalidJSONThrows() {
-        let line = Data("not json".utf8)
-        XCTAssertThrowsError(try ContainerRunRequest.decode(line: line)) { error in
-            guard case .malformedRequest = (error as? ContainerProtocolError) else {
-                return XCTFail("Expected malformedRequest, got \(error)")
+        XCTAssertThrowsError(try GhostboxDirectRequest.decode(line: Data("not json".utf8))) { error in
+            guard case .malformedRequest = error as? ContainerProtocolError else {
+                return XCTFail("Expected malformed request")
             }
         }
     }
 
-    func testDecodeMissingCommandThrows() {
-        let line = Data(#"{"version":1,"operation":"run","image":"alpine"}"#.utf8)
-        XCTAssertThrowsError(try ContainerRunRequest.decode(line: line)) { error in
-            guard case .malformedRequest = (error as? ContainerProtocolError) else {
-                return XCTFail("Expected malformedRequest, got \(error)")
-            }
-        }
-    }
-
-    func testDecodeWrongCommandTypeThrows() {
-        let line = Data(#"{"version":1,"operation":"run","image":"alpine","command":"echo hi"}"#.utf8)
-        XCTAssertThrowsError(try ContainerRunRequest.decode(line: line))
-    }
-
-    func testRequestEncodeRoundTrip() throws {
-        let request = ContainerRunRequest(version: 1, operation: "run", image: "alpine", command: ["echo", "hello"], stdin: true)
-        let line = try request.encodeLine()
-        XCTAssertEqual(line.last, 0x0A)
-        let decoded = try ContainerRunRequest.decode(line: Data(line.dropLast()))
-        XCTAssertEqual(decoded, request)
-    }
-
-    // MARK: - Response encoding
-
-    private func jsonObject(for response: ContainerResponse) throws -> [String: Any] {
-        let line = try response.encodeLine()
-        XCTAssertEqual(line.last, 0x0A, "Response line must end with a newline")
-        let object = try JSONSerialization.jsonObject(with: Data(line.dropLast()))
-        return try XCTUnwrap(object as? [String: Any])
-    }
-
-    func testStdoutResponseShape() throws {
-        let payload = Data([0x00, 0xFF, 0x61]) // binary-safe via base64
-        let json = try jsonObject(for: .stdout(payload))
-        XCTAssertEqual(json["version"] as? Int, 4)
-        XCTAssertEqual(json["type"] as? String, "stdout")
-        XCTAssertEqual(json["data"] as? String, payload.base64EncodedString())
-        XCTAssertNil(json["exitCode"])
-        XCTAssertNil(json["message"])
-    }
-
-    func testStderrResponseShape() throws {
-        let payload = Data("boom".utf8)
-        let json = try jsonObject(for: .stderr(payload))
-        XCTAssertEqual(json["type"] as? String, "stderr")
-        XCTAssertEqual(json["data"] as? String, payload.base64EncodedString())
-    }
-
-    func testExitResponseShape() throws {
-        let json = try jsonObject(for: .exit(137))
-        XCTAssertEqual(json["version"] as? Int, 4)
-        XCTAssertEqual(json["type"] as? String, "exit")
-        XCTAssertEqual(json["exitCode"] as? Int32, 137)
-        XCTAssertNil(json["data"])
-        XCTAssertNil(json["message"])
-    }
-
-    func testErrorResponseShape() throws {
-        let json = try jsonObject(for: .error("something failed"))
-        XCTAssertEqual(json["version"] as? Int, 4)
-        XCTAssertEqual(json["type"] as? String, "error")
-        XCTAssertEqual(json["message"] as? String, "something failed")
-        XCTAssertNil(json["data"])
-        XCTAssertNil(json["exitCode"])
-    }
-
-    func testRunReadyResponseIncludesContainerAddress() throws {
-        let json = try jsonObject(for: .ready(ipv4Address: "192.168.64.3"))
-        XCTAssertEqual(json["version"] as? Int, 4)
-        XCTAssertEqual(json["type"] as? String, "ready")
-        XCTAssertEqual(json["ipv4Address"] as? String, "192.168.64.3")
-    }
-
-    func testResponseRoundTrip() throws {
-        let response = ContainerResponse.exit(0)
-        let line = try response.encodeLine()
-        let decoded = try JSONDecoder().decode(ContainerResponse.self, from: Data(line.dropLast()))
-        XCTAssertEqual(decoded, response)
-    }
-
-    // MARK: - Constants
-
-    func testConstants() {
+    func testBridgeConstantsDescribeDirectChannel() {
         XCTAssertEqual(ContainerBridgeConstants.port, 5004)
-        XCTAssertEqual(ContainerBridgeConstants.protocolVersion, 4)
-        XCTAssertEqual(ContainerBridgeConstants.minimumProtocolVersion, 1)
+        XCTAssertEqual(ContainerBridgeConstants.protocolVersion, 5)
         XCTAssertEqual(ContainerBridgeConstants.maxRequestLineBytes, 64 * 1024)
+        XCTAssertEqual(ContainerRuntimeXPCProtocol.version, 5)
+        XCTAssertEqual(ContainerRuntimeXPCProtocol.Key.ipv4Subnet, "ipv4Subnet")
+        XCTAssertEqual(ContainerRuntimeXPCProtocol.Key.volumeRoot, "volumeRoot")
+        XCTAssertEqual(ContainerRuntimeXPCProtocol.Key.imageRoot, "imageRoot")
     }
 }

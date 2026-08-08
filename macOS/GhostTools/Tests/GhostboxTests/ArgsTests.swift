@@ -2,314 +2,393 @@
 import XCTest
 
 final class ArgsTests: XCTestCase {
-
     func testNoArgumentsReturnsHelp() {
-        let result = parseArguments([])
-        guard case .success(let opts) = result, case .help = opts.action else {
-            return XCTFail("Expected .help, got \(result)")
+        guard case .success(let options) = parseArguments([]), case .help(let topic) = options.action else {
+            return XCTFail("Expected help")
         }
+        XCTAssertEqual(topic, [])
     }
 
-    func testHelpFlag() {
+    func testHelpAndVersionFlags() {
         for flag in ["--help", "-h", "help"] {
-            let result = parseArguments([flag])
-            guard case .success(let opts) = result, case .help = opts.action else {
-                return XCTFail("Expected .help for '\(flag)', got \(result)")
+            guard case .success(let options) = parseArguments([flag]), case .help(let topic) = options.action else {
+                return XCTFail("Expected help for \(flag)")
             }
+            XCTAssertEqual(topic, [])
         }
-    }
-
-    func testVersionFlag() {
         for flag in ["--version", "-v"] {
-            let result = parseArguments([flag])
-            guard case .success(let opts) = result, case .version = opts.action else {
-                return XCTFail("Expected .version for '\(flag)', got \(result)")
+            guard case .success(let options) = parseArguments([flag]), case .version = options.action else {
+                return XCTFail("Expected version for \(flag)")
             }
         }
     }
 
-    func testRunWithImageOnly() {
-        let result = parseArguments(["run", "alpine"])
-        guard case .success(let opts) = result,
-              case .run(let run) = opts.action else {
-            return XCTFail("Expected .run, got \(result)")
-        }
-        XCTAssertEqual(run.image, "alpine")
-        XCTAssertEqual(run.command, [])
-        XCTAssertEqual(run.volumes, [])
-        XCTAssertFalse(run.interactive)
-        XCTAssertFalse(run.tty)
-    }
-
-    func testRunWithCommand() {
-        let result = parseArguments(["run", "alpine", "echo", "hello"])
-        guard case .success(let opts) = result,
-              case .run(let run) = opts.action else {
-            return XCTFail("Expected .run, got \(result)")
-        }
-        XCTAssertEqual(run.image, "alpine")
-        XCTAssertEqual(run.command, ["echo", "hello"])
-    }
-
-    func testCommandMayBeginWithDash() {
-        let result = parseArguments(["run", "alpine", "-c", "--flag", "-n"])
-        guard case .success(let opts) = result,
-              case .run(let run) = opts.action else {
-            return XCTFail("Expected .run, got \(result)")
-        }
-        XCTAssertEqual(run.image, "alpine")
-        XCTAssertEqual(run.command, ["-c", "--flag", "-n"])
-    }
-
-    func testRejectsFlagBeforeImage() {
-        let result = parseArguments(["run", "--some-flag", "alpine"])
-        guard case .failure(let err) = result else {
-            return XCTFail("Expected failure for flag-before-image, got \(result)")
-        }
-        XCTAssertEqual(err.errorDescription, "unknown run option '--some-flag'")
-    }
-
-    func testRejectsUnknownSubcommand() {
-        let result = parseArguments(["bogus"])
-        guard case .failure(let err) = result else {
-            return XCTFail("Expected failure, got \(result)")
-        }
-        if case .unknownSubcommand(let sub) = err {
-            XCTAssertEqual(sub, "bogus")
-        } else {
-            XCTFail("Expected .unknownSubcommand, got \(err)")
-        }
-    }
-
-    func testRejectsMissingImage() {
-        let result = parseArguments(["run"])
-        guard case .failure(let err) = result else {
-            return XCTFail("Expected failure, got \(result)")
-        }
-        if case .missingImage = err {} else {
-            XCTFail("Expected .missingImage, got \(err)")
-        }
-    }
-
-    func testRejectsEmptyImage() {
-        XCTAssertNotNil(validateImage(""))
-    }
-
-    func testRejectsNullInImage() {
-        XCTAssertNotNil(validateImage("alpine\0evil"))
-    }
-
-    func testRejectsLeadingDashInImage() {
-        XCTAssertNotNil(validateImage("-evil"))
-    }
-
-    func testRejectsTooLongImage() {
-        // Length is measured in UTF-8 bytes.
-        XCTAssertNotNil(validateImage(String(repeating: "a", count: 257)))
-    }
-
-    func testRejectsTooLongImageByUtf8Bytes() {
-        // 256 'a' is exactly at the limit → accepted.
-        XCTAssertNil(validateImage(String(repeating: "a", count: 256)))
-        // A single 2-byte UTF-8 char pushes past 256 bytes even though char count
-        // is 1 + a few ascii — verify byte-based measurement.
-        // 255 'a' (255 bytes) + one 2-byte char (é) = 257 bytes → rejected.
-        let s = String(repeating: "a", count: 255) + "é"
-        XCTAssertGreaterThan(s.utf8.count, 256)
-        XCTAssertNotNil(validateImage(s))
-    }
-
-    func testRejectsWhitespaceInImage() {
-        XCTAssertNotNil(validateImage("alpine latest"))
-        XCTAssertNotNil(validateImage("alpine\tlatest"))
-        XCTAssertNotNil(validateImage("alpine\nlatest"))
-    }
-
-    func testValidImageAccepted() {
-        XCTAssertNil(validateImage("alpine"))
-        XCTAssertNil(validateImage("ubuntu:24.04"))
-        XCTAssertNil(validateImage("registry.example.com/my/img:v1"))
-    }
-
-    // MARK: - Command argument validation
-
-    func testRejectsTooManyCommandArgs() {
-        var argv = ["run", "alpine"]
-        argv.append(contentsOf: (0..<65).map { "c\($0)" })
-        let result = parseArguments(argv)
-        guard case .failure(let err) = result else {
-            return XCTFail("Expected failure for too many command args, got \(result)")
-        }
-        if case .tooManyCommands(let max) = err {
-            XCTAssertEqual(max, 64)
-        } else {
-            XCTFail("Expected .tooManyCommands, got \(err)")
-        }
-    }
-
-    func testAcceptsMaxCommandArgs() {
-        var argv = ["run", "alpine"]
-        argv.append(contentsOf: (0..<64).map { "c\($0)" })
-        let result = parseArguments(argv)
-        guard case .success(let opts) = result,
-              case .run(let run) = opts.action else {
-            return XCTFail("Expected .run with 64 command args, got \(result)")
-        }
-        XCTAssertEqual(run.command.count, 64)
-    }
-
-    func testRejectsNullInCommandArg() {
-        let result = parseArguments(["run", "alpine", "echo\0evil"])
-        guard case .failure(let err) = result else {
-            return XCTFail("Expected failure for NUL in command arg, got \(result)")
-        }
-        if case .invalidCommand(let index, _) = err {
-            XCTAssertEqual(index, 0)
-        } else {
-            XCTFail("Expected .invalidCommand, got \(err)")
-        }
-    }
-
-    func testRejectsTooLongCommandArgByUtf8Bytes() {
-        // 4096 bytes accepted, 4097 rejected.
-        let ok = String(repeating: "a", count: 4096)
-        let result = parseArguments(["run", "alpine", ok])
-        guard case .success = result else {
-            return XCTFail("Expected success for 4096-byte arg, got \(result)")
-        }
-
-        let tooLong = String(repeating: "a", count: 4097)
-        let result2 = parseArguments(["run", "alpine", tooLong])
-        guard case .failure(let err) = result2 else {
-            return XCTFail("Expected failure for 4097-byte arg, got \(result2)")
-        }
-        if case .invalidCommand(let index, _) = err {
-            XCTAssertEqual(index, 0)
-        } else {
-            XCTFail("Expected .invalidCommand, got \(err)")
-        }
-    }
-
-    func testCommandArgUtf8ByteLengthNotCharCount() {
-        // 'é' is 1 char but 2 UTF-8 bytes. 4095 'é' = 8190 bytes → rejected.
-        let arg = String(repeating: "é", count: 4095)
-        XCTAssertGreaterThan(arg.utf8.count, 4096)
-        let result = parseArguments(["run", "alpine", arg])
-        guard case .failure = result else {
-            return XCTFail("Expected failure for oversized-by-utf8 arg, got \(result)")
-        }
-    }
-
-    // MARK: - Volumes
-
-    func testParsesReadOnlyVolumeBeforeImage() {
-        let result = parseArguments(["run", "-v", "/home/user/src:/src:ro", "alpine", "ls", "/src"])
-        guard case .success(let options) = result,
-              case .run(let run) = options.action else {
-            return XCTFail("Expected volume run, got \(result)")
-        }
-        XCTAssertEqual(run.image, "alpine")
-        XCTAssertEqual(run.command, ["ls", "/src"])
-        XCTAssertEqual(run.volumes, [HostContainerVolume(guestPath: "/home/user/src", destination: "/src", readOnly: true)])
-    }
-
-    func testParsesLongVolumeFlag() {
-        let result = parseArguments(["run", "--volume=/data:/mnt/data:ro", "alpine"])
-        guard case .success(let options) = result,
-              case .run(let run) = options.action else {
-            return XCTFail("Expected volume run, got \(result)")
-        }
-        XCTAssertEqual(run.volumes.first?.destination, "/mnt/data")
-    }
-
-    func testParsesImplicitReadWriteVolume() {
-        let result = parseArguments(["run", "-v", "/data:/data", "alpine"])
-        guard case .success(let options) = result,
-              case .run(let run) = options.action else {
-            return XCTFail("Expected read-write volume run")
-        }
-        XCTAssertEqual(run.volumes, [HostContainerVolume(guestPath: "/data", destination: "/data", readOnly: false)])
-    }
-
-    func testParsesExplicitReadWriteVolume() {
-        let result = parseArguments(["run", "-v", "/data:/data:rw", "alpine"])
-        guard case .success(let options) = result,
-              case .run(let run) = options.action else {
-            return XCTFail("Expected read-write volume run")
-        }
-        XCTAssertEqual(run.volumes.first?.readOnly, false)
-    }
-
-    func testRejectsDuplicateVolumeDestination() {
-        let result = parseArguments(["run", "-v", "/one:/data:ro", "-v", "/two:/data:ro", "alpine"])
-        guard case .failure(let error) = result else {
-            return XCTFail("Expected duplicate destination rejection")
-        }
-        XCTAssertEqual(error.errorDescription, "duplicate container volume destination '/data'")
-    }
-
-    func testRejectsVolumeDestinationTraversal() {
-        let result = parseArguments(["run", "-v", "/data:/mnt/../:ro", "alpine"])
-        guard case .failure = result else {
-            return XCTFail("Expected traversal destination rejection")
-        }
-    }
-
-    func testParsesInteractiveTTYFlags() {
-        for flag in ["-it", "-ti"] {
-            let result = parseArguments(["run", flag, "alpine", "/bin/sh"])
-            guard case .success(let options) = result,
-                  case .run(let run) = options.action else {
-                return XCTFail("Expected interactive TTY run for \(flag), got \(result)")
+    func testParsesQualifiedHelpTopics() {
+        let cases: [([String], [String])] = [
+            (["cn:help"], ["cn"]),
+            (["containerization:help"], ["cn"]),
+            (["cr:help"], ["cr"]),
+            (["container:help"], ["cr"]),
+            (["cn:image-store:help"], ["cn", "image-store"]),
+            (["containerization:image-store:help"], ["cn", "image-store"]),
+            (["cn:image-store:pull", "--help"], ["cn:image-store:pull"]),
+            (["cn:image-store:pull", "@image-store/default", "--help"], ["cn:image-store:pull"]),
+        ]
+        for (arguments, expectedTopic) in cases {
+            guard case .success(let options) = parseArguments(arguments),
+                  case .help(let topic) = options.action else {
+                return XCTFail("Expected help for \(arguments)")
             }
-            XCTAssertEqual(run.command, ["/bin/sh"])
-            XCTAssertTrue(run.interactive)
-            XCTAssertTrue(run.tty)
+            XCTAssertEqual(topic, expectedTopic)
         }
     }
 
-    func testParsesSeparateInteractiveTTYFlagsMixedWithVolume() {
-        let result = parseArguments(["run", "-i", "-v", "/data:/data:ro", "-t", "alpine"])
-        guard case .success(let options) = result,
-              case .run(let run) = options.action else {
-            return XCTFail("Expected interactive TTY volume run, got \(result)")
+    func testHelpFlagMustBeFinal() {
+        guard case .failure(.invalidDirect(let message)) = parseArguments([
+            "cn:image-store:pull", "--help", "alpine",
+        ]) else {
+            return XCTFail("Expected invalid help placement")
         }
-        XCTAssertEqual(run.volumes.count, 1)
-        XCTAssertTrue(run.interactive)
-        XCTAssertTrue(run.tty)
+        XCTAssertTrue(message.contains("final argument"))
     }
 
-    func testParsesCompleteRunConfiguration() {
-        let result = parseArguments([
-            "run", "-p", "127.0.0.1:8080:80", "-e", "MODE=production",
-            "-w", "/app", "-u", "1000:1000", "--cpus", "4", "--memory", "2g", "alpine",
+    func testParsesDNSCreateWithFrameworkDefaults() throws {
+        let invocation = try directInvocation(["cn:dns:create", "default"])
+        XCTAssertEqual(invocation.method, .dnsCreate)
+        XCTAssertEqual(invocation.parameters["name"], .string("default"))
+        XCTAssertNil(invocation.parameters["nameservers"])
+        XCTAssertNil(invocation.parameters["domain"])
+        XCTAssertEqual(invocation.parameters["searchDomains"], .array([]))
+        XCTAssertEqual(invocation.parameters["options"], .array([]))
+    }
+
+    func testParsesConfiguredDNSCreate() throws {
+        let invocation = try directInvocation([
+            "cn:dns:create", "dev",
+            "--nameserver", "1.1.1.1",
+            "--nameserver", "2606:4700:4700::1111",
+            "--domain", "example.test",
+            "--search-domain", "svc.example.test",
+            "--option", "ndots:2",
         ])
-        guard case .success(let options) = result, case .run(let run) = options.action else {
-            return XCTFail("Expected configured run, got \(result)")
+        XCTAssertEqual(invocation.parameters["nameservers"], .array([.string("1.1.1.1"), .string("2606:4700:4700::1111")]))
+        XCTAssertEqual(invocation.parameters["domain"], .string("example.test"))
+        XCTAssertEqual(invocation.parameters["searchDomains"], .array([.string("svc.example.test")]))
+        XCTAssertEqual(invocation.parameters["options"], .array([.string("ndots:2")]))
+    }
+
+    func testDNSCreatePreservesEmptyInitializerValues() throws {
+        let invocation = try directInvocation([
+            "cn:dns:create", "empty", "--nameserver", "", "--domain", "",
+            "--search-domain", "", "--option", "",
+        ])
+        XCTAssertEqual(invocation.parameters["nameservers"], .array([.string("")]))
+        XCTAssertEqual(invocation.parameters["domain"], .string(""))
+        XCTAssertEqual(invocation.parameters["searchDomains"], .array([.string("")]))
+        XCTAssertEqual(invocation.parameters["options"], .array([.string("")]))
+    }
+
+    func testPreservesAllThirteenEstablishedCommandMappings() throws {
+        let commands: [([String], GhostboxDirectMethod, [String: GhostboxJSONValue])] = [
+            (["cn:dns:create", "dev"], .dnsCreate, ["name": .string("dev"), "searchDomains": .array([]), "options": .array([])]),
+            (["cn:dns:default-nameservers"], .dnsDefaultNameservers, [:]),
+            (["cn:dns:validate", "@dns/dev"], .dnsValidate, ["reference": .string("@dns/dev")]),
+            (["cn:dns:resolv-conf", "@dns/dev"], .dnsResolvConf, ["reference": .string("@dns/dev")]),
+            (["cn:dns:nameservers", "@dns/dev"], .dnsNameservers, ["reference": .string("@dns/dev")]),
+            (["cn:dns:domain", "@dns/dev"], .dnsDomain, ["reference": .string("@dns/dev")]),
+            (["cn:dns:search-domains", "@dns/dev"], .dnsSearchDomains, ["reference": .string("@dns/dev")]),
+            (["cn:dns:options", "@dns/dev"], .dnsOptions, ["reference": .string("@dns/dev")]),
+            (["cn:process-config:default-path"], .processConfigDefaultPath, [:]),
+            (["cn:container:default-masked-paths"], .containerDefaultMaskedPaths, [:]),
+            (["cn:container:default-readonly-paths"], .containerDefaultReadonlyPaths, [:]),
+            (["cn:container:default-copy-chunk-size"], .containerDefaultCopyChunkSize, [:]),
+            (["cn:container:max-id-length"], .containerMaxIDLength, [:]),
+        ]
+
+        XCTAssertEqual(commands.count, 13)
+        for (arguments, method, parameters) in commands {
+            let invocation = try directInvocation(arguments)
+            XCTAssertEqual(invocation.method, method, "Unexpected method for \(arguments)")
+            XCTAssertEqual(invocation.parameters, parameters, "Unexpected parameters for \(arguments)")
         }
-        XCTAssertEqual(run.publishedPorts, [PublishedPort(hostAddress: "127.0.0.1", hostPort: 8080, containerPort: 80)])
-        XCTAssertEqual(run.environment, ["MODE=production"])
-        XCTAssertEqual(run.workingDirectory, "/app")
-        XCTAssertEqual(run.user, "1000:1000")
-        XCTAssertEqual(run.cpus, 4)
-        XCTAssertEqual(run.memoryBytes, 2 * 1024 * 1024 * 1024)
     }
 
-    func testPublishDefaultsToGuestLoopbackAndTCP() {
-        XCTAssertEqual(
-            try? parsePublishedPort("8080:80/tcp").get(),
-            PublishedPort(hostAddress: "127.0.0.1", hostPort: 8080, containerPort: 80)
-        )
+    func testAcceptsCatalogCommand() throws {
+        let invocation = try directInvocation(["cn:image-store:list", "@image-store/default"])
+        XCTAssertEqual(invocation.method.rawValue, "imageStore.list")
+        XCTAssertEqual(invocation.parameters, ["imageStore": .string("@image-store/default")])
     }
 
-    func testRejectsUDPPublish() {
-        guard case .failure(.invalidPublish("only TCP is supported")) = parsePublishedPort("8080:80/udp") else {
-            return XCTFail("Expected UDP rejection")
+    func testParsesDefaultHostKernelExtension() throws {
+        let invocation = try directInvocation(["cn:kernel:default"])
+        XCTAssertEqual(invocation.method, .kernelDefault)
+        XCTAssertEqual(invocation.parameters, [:])
+    }
+
+    func testParsesInstallRecommendedHostKernelExtension() throws {
+        let invocation = try directInvocation(["cn:kernel:install-recommended"])
+        XCTAssertEqual(invocation.method, .kernelInstallRecommended)
+        XCTAssertEqual(invocation.parameters, [:])
+    }
+
+    func testCatalogMapsReferencesOptionsAndPositionalsToParameters() throws {
+        let invocation = try directInvocation([
+            "cn:image-store:pull", "@image-store/default", "alpine",
+            "--insecure=false", "--authentication", "@authentication/default",
+        ])
+        XCTAssertEqual(invocation.method.rawValue, "imageStore.pull")
+        XCTAssertEqual(invocation.parameters, [
+            "imageStore": .string("@image-store/default"),
+            "reference": .string("alpine"),
+            "insecure": .boolean(false),
+            "authentication": .string("@authentication/default"),
+            "maxConcurrentDownloads": .integer(3),
+        ])
+    }
+
+    func testRejectsInvalidDNSReference() {
+        guard case .failure(.invalidDirect) = parseArguments(["cn:dns:validate", "@hosts/dev"]) else {
+            return XCTFail("Expected wrong-kind reference rejection")
         }
     }
 
-    func testParsesMemoryUnits() {
-        XCTAssertEqual(try? parseMemory("512m").get(), 512 * 1024 * 1024)
-        XCTAssertEqual(try? parseMemory("2GiB").get(), 2 * 1024 * 1024 * 1024)
+    func testParsesIOProxyCreationAndCloseCommands() throws {
+        let commands: [([String], GhostboxDirectMethod, [String: GhostboxJSONValue])] = [
+            (["cn:reader-stream:create", "input"], .readerStreamCreateProxy, ["readerStream": .string("input")]),
+            (["cn:reader-stream:close", "@reader-stream/input"], .readerStreamCloseProxy, ["readerStream": .string("@reader-stream/input")]),
+            (["cn:writer:create", "output"], .writerCreateProxy, ["writer": .string("output")]),
+            (["cn:writer:close", "@writer/output"], .writerCloseProxy, ["writer": .string("@writer/output")]),
+            (["cn:terminal:create", "shell"], .terminalCreateProxy, [
+                "terminal": .string("shell"), "width": .unsignedInteger(80), "height": .unsignedInteger(24),
+            ]),
+            (["cn:terminal:create", "wide", "--width=132", "--height=43"], .terminalCreateProxy, [
+                "terminal": .string("wide"), "width": .unsignedInteger(132), "height": .unsignedInteger(43),
+            ]),
+            (["cn:terminal:wait-attached", "@terminal/shell"], .terminalWaitAttachedProxy, [
+                "terminal": .string("@terminal/shell"),
+            ]),
+            (["cn:terminal:close", "@terminal/shell"], .terminalCloseProxy, ["terminal": .string("@terminal/shell")]),
+        ]
+        for (arguments, method, parameters) in commands {
+            let invocation = try directInvocation(arguments)
+            XCTAssertEqual(invocation.method, method)
+            XCTAssertEqual(invocation.parameters, parameters)
+        }
+    }
+
+    func testParsesResourceCleanupExtensions() throws {
+        let commands: [([String], GhostboxDirectMethod, [String: GhostboxJSONValue])] = [
+            (["cn:dns:delete", "@dns/dev"], .dnsDelete, ["dns": .string("@dns/dev")]),
+            (["cn:process-config:delete", "@process-config/dev"], .processConfigDelete, [
+                "processConfig": .string("@process-config/dev"),
+            ]),
+            (["cn:network:delete", "@network/dev"], .networkDelete, ["network": .string("@network/dev")]),
+            (["cn:manager:close", "@manager/dev"], .managerClose, ["manager": .string("@manager/dev")]),
+        ]
+        for (arguments, method, parameters) in commands {
+            let invocation = try directInvocation(arguments)
+            XCTAssertEqual(invocation.method, method)
+            XCTAssertEqual(invocation.parameters, parameters)
+        }
+    }
+
+    func testParsesIOProxyAttachments() {
+        let commands: [([String], GhostboxDirectMethod, GhostboxIOStream)] = [
+            (["cn:reader-stream:attach", "@reader-stream/input"], .readerStreamAttachProxy, .input),
+            (["cn:writer:attach", "@writer/output"], .writerAttachProxy, .output),
+            (["cn:terminal:attach", "@terminal/shell"], .terminalAttachProxy, .terminal),
+        ]
+        for (arguments, method, stream) in commands {
+            guard case .success(let options) = parseArguments(arguments),
+                  case .attach(let invocation, let parsedStream) = options.action else {
+                return XCTFail("Expected attachment for \(arguments)")
+            }
+            XCTAssertEqual(invocation.method, method)
+            XCTAssertEqual(parsedStream, stream)
+        }
+
+        guard case .success(let options) = parseArguments([
+            "cn:terminal:attach", "@terminal/shell", "--resize-target", "@container/job",
+        ]), case .attach(let invocation, .terminal) = options.action else {
+            return XCTFail("Expected terminal attachment with resize target")
+        }
+        XCTAssertEqual(invocation.parameters, [
+            "terminal": .string("@terminal/shell"),
+            "resizeTarget": .string("@container/job"),
+        ])
+    }
+
+    func testRejectsMalformedIOProxyCommands() {
+        let commands = [
+            ["cn:reader-stream:create", "bad/name"],
+            ["cn:writer:attach", "@reader-stream/wrong"],
+            ["cn:terminal:create", "shell", "--width=0"],
+            ["cn:terminal:unknown", "@terminal/shell"],
+            ["cn:terminal:wait-attached", "@terminal/shell", "extra"],
+            ["cn:writer:attach", "@writer/output", "extra"],
+            ["cn:terminal:attach", "@terminal/shell", "--resize-target", "@writer/wrong"],
+        ]
+        for arguments in commands {
+            guard case .failure(.invalidDirect) = parseArguments(arguments) else {
+                return XCTFail("Expected rejection for \(arguments)")
+            }
+        }
+    }
+
+    func testIOProxyHelp() throws {
+        for resource in ["reader-stream", "writer", "terminal"] {
+            guard case .success(let help) = renderGhostboxHelp(["cn:\(resource):help"]) else {
+                return XCTFail("Expected help for \(resource)")
+            }
+            XCTAssertTrue(help.contains("ghostbox cn:\(resource):attach"))
+            XCTAssertTrue(help.contains("ghostbox cn:\(resource):close"))
+            if resource == "terminal" {
+                XCTAssertTrue(help.contains("ghostbox cn:terminal:wait-attached"))
+            }
+        }
+    }
+
+    func testParsesGuestShareMountAndCleanup() throws {
+        let create = try directInvocation([
+            "cn:mount:guest-share", "source",
+            "--source", "/Users/guest/project",
+            "--destination", "/workspace",
+            "--read-only=true",
+            "--cache-ttl=0",
+            "--option", "nodev",
+        ])
+        XCTAssertEqual(create.method, .mountGuestShare)
+        XCTAssertEqual(create.parameters, [
+            "mount": .string("source"),
+            "source": .string("/Users/guest/project"),
+            "destination": .string("/workspace"),
+            "readOnly": .boolean(true),
+            "cacheTTL": .unsignedInteger(0),
+            "option": .array([.string("nodev")]),
+            "runtimeOption": .array([]),
+        ])
+
+        let delete = try directInvocation(["cn:mount:delete", "@mount/source"])
+        XCTAssertEqual(delete.method, .mountDelete)
+        XCTAssertEqual(delete.parameters, ["mount": .string("@mount/source")])
+    }
+
+    func testParsesPersistentVolumeLifecycle() throws {
+        let create = try directInvocation(["cr:volume:create", "data", "--size", "67108864"])
+        XCTAssertEqual(create.method, .volumeCreate)
+        XCTAssertEqual(create.parameters, [
+            "volume": .string("data"),
+            "size": .unsignedInteger(67_108_864),
+        ])
+
+        XCTAssertEqual(try directInvocation(["cr:volume:list"]).method, .volumeList)
+        XCTAssertEqual(try directInvocation(["cr:volume:inspect", "@volume/data"]).method, .volumeInspect)
+
+        let mount = try directInvocation([
+            "cr:volume:mount", "@volume/data", "data-mount",
+            "--destination=/var/lib/data", "--read-only",
+        ])
+        XCTAssertEqual(mount.method, .volumeMount)
+        XCTAssertEqual(mount.parameters, [
+            "volume": .string("@volume/data"),
+            "mount": .string("data-mount"),
+            "destination": .string("/var/lib/data"),
+            "readOnly": .boolean(true),
+        ])
+
+        XCTAssertEqual(try directInvocation(["cr:volume:delete", "@volume/data"]).method, .volumeDelete)
+    }
+
+    func testRejectsMalformedPersistentVolumes() {
+        let commands = [
+            ["cr:volume:create", "../data"],
+            ["cr:volume:create", "data", "--size", "many"],
+            ["cr:volume:mount", "@volume/data", "data", "--destination", "/"],
+            ["cr:volume:inspect", "@volume/data", "extra"],
+        ]
+        for command in commands {
+            guard case .failure(.invalidDirect) = parseArguments(command) else {
+                return XCTFail("Expected rejection for \(command)")
+            }
+        }
+    }
+
+    func testCleanupParsingDoesNotClaimResourceNames() throws {
+        let create = try directInvocation([
+            "cn:mount:guest-share", "delete",
+            "--source", "/tmp",
+            "--destination", "/workspace",
+        ])
+        XCTAssertEqual(create.method, .mountGuestShare)
+        XCTAssertEqual(create.parameters["mount"], .string("delete"))
+    }
+
+    func testContainerForwardHelpDoesNotRequireReference() {
+        guard case .success(let help) = renderGhostboxHelp(["cn:container:forward"]) else {
+            return XCTFail("Expected container forward help")
+        }
+        XCTAssertTrue(help.contains("ghostbox cn:container:forward @container/NAME"))
+        XCTAssertTrue(help.contains("GhostVM guest extension"))
+    }
+
+    func testParsesContainerPortForwarding() {
+        guard case .success(let options) = parseArguments([
+            "cn:container:forward", "@container/web",
+            "-P", "8080:80/tcp",
+            "--publish=127.0.0.1:8443:443",
+        ]), case .forward(let container, let ports) = options.action else {
+            return XCTFail("Expected port forwarding")
+        }
+        XCTAssertEqual(container, "@container/web")
+        XCTAssertEqual(ports, [
+            PublishedPort(hostAddress: "127.0.0.1", hostPort: 8080, containerPort: 80),
+            PublishedPort(hostAddress: "127.0.0.1", hostPort: 8443, containerPort: 443),
+        ])
+    }
+
+    func testRejectsMalformedGuestShareAndPortForwarding() {
+        let commands = [
+            ["cn:mount:guest-share", "source", "--source", "relative", "--destination", "/workspace"],
+            ["cn:mount:guest-share", "source", "--source", "/tmp", "--destination", "/"],
+            ["cn:mount:guest-share", "source", "--source", "/tmp", "--destination", "/workspace", "--cache-ttl", "301"],
+            ["cn:container:forward", "@container/web", "-p", "8080:80/udp"],
+            ["cn:container:forward", "@container/web"],
+        ]
+        for command in commands {
+            guard case .failure(.invalidDirect) = parseArguments(command) else {
+                return XCTFail("Expected rejection for \(command)")
+            }
+        }
+    }
+
+    func testRejectsOldUnqualifiedCommandGrammar() {
+        let commands = [
+            ["dns", "create", "dev"],
+            ["dns", "@dns/dev", "validate"],
+            ["image-store", "@image-store/default", "pull", "alpine"],
+            ["container", "@container/web", "forward", "-p", "8080:80"],
+            ["volume", "@volume/data", "inspect"],
+        ]
+        for command in commands {
+            guard case .failure(.invalidDirect) = parseArguments(command) else {
+                return XCTFail("Expected old unqualified grammar rejection for \(command)")
+            }
+        }
+    }
+
+    private func directInvocation(_ arguments: [String]) throws -> GhostboxDirectInvocation {
+        switch parseArguments(arguments) {
+        case .success(let options):
+            guard case .direct(let invocation) = options.action else {
+                throw TestError.notDirect
+            }
+            return invocation
+        case .failure(let error):
+            throw error
+        }
+    }
+
+    private enum TestError: Error {
+        case notDirect
     }
 }

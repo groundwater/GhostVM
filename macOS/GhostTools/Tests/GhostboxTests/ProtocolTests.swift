@@ -2,351 +2,173 @@
 import XCTest
 
 final class ProtocolTests: XCTestCase {
-
-    // MARK: - Request encoding
-
-    func testRequestWireFormatMatchesExactly() throws {
-        let req = makeRunRequest(image: "alpine", command: ["echo", "hello"])
-        let line = try encodeRequestLine(req)
-        let s = String(data: line, encoding: .utf8)!
-
-        XCTAssertEqual(s, #"{"version":4,"operation":"run","image":"alpine","command":["echo","hello"],"stdin":false,"tty":false}"# + "\n")
+    func testIOFramesRoundTrip() throws {
+        let frames: [GhostboxIOFrame] = [
+            .data(Data([0x00, 0x0A, 0xFF]), stream: .input),
+            .data(Data("output".utf8), stream: .output),
+            .data(Data("tty".utf8), stream: .terminal),
+            .eof(.input),
+            .eof(.output),
+            .eof(.terminal),
+            .resize(columns: 132, rows: 43),
+            .error("broken stream"),
+        ]
+        for frame in frames {
+            var line = try frame.encodeLine()
+            XCTAssertEqual(line.removeLast(), 0x0A)
+            XCTAssertEqual(try GhostboxIOFrame.decode(line: line), frame)
+        }
     }
 
-    func testRequestWithEmptyCommand() throws {
-        let req = makeRunRequest(image: "ubuntu:24.04", command: [])
-        let line = try encodeRequestLine(req)
-        let s = String(data: line, encoding: .utf8)!
-
-        XCTAssertEqual(s, #"{"version":4,"operation":"run","image":"ubuntu:24.04","command":[],"stdin":false,"tty":false}"# + "\n")
+    func testIOFramesRejectMalformedAndOversizedValues() {
+        let invalid = [
+            GhostboxIOFrame(type: .data, stream: .input, data: Data()),
+            GhostboxIOFrame(type: .eof),
+            GhostboxIOFrame(type: .resize, stream: .terminal, columns: 0, rows: 24),
+            GhostboxIOFrame(type: .error, message: ""),
+            GhostboxIOFrame(type: .data, stream: .input, data: Data(repeating: 0, count: kMaxIOFrameDataBytes + 1)),
+        ]
+        for frame in invalid {
+            XCTAssertThrowsError(try frame.encodeLine())
+        }
+        XCTAssertThrowsError(try GhostboxIOFrame.decode(line: Data("not-json".utf8)))
+    }
+    func testDirectRequestUsesMethodParametersAndCurrentEnvelope() throws {
+        let request = GhostboxDirectRequest(
+            id: "request-1",
+            invocation: .init(
+                method: .dnsCreate,
+                parameters: ["name": .string("dev"), "nameservers": .array([.string("1.1.1.1")])]
+            )
+        )
+        let line = try encodeDirectRequestLine(request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.dropLast())) as? [String: Any])
+        XCTAssertEqual(Set(object.keys), Set(["version", "operation", "id", "method", "parameters"]))
+        XCTAssertEqual(object["version"] as? Int, kProtocolVersion)
+        XCTAssertEqual(object["operation"] as? String, "direct")
+        XCTAssertEqual(object["id"] as? String, "request-1")
+        XCTAssertEqual(object["method"] as? String, "dns.create")
+        XCTAssertEqual((object["parameters"] as? [String: Any])?["name"] as? String, "dev")
     }
 
-    func testRequestWithVolume() throws {
-        let volume = HostContainerVolume(guestPath: "/home/user/src", destination: "/src", readOnly: true)
-        let request = makeRunRequest(image: "alpine", command: [], volumes: [volume])
-        let line = try encodeRequestLine(request)
+    func testDirectMethodAllowsUnknownRawValues() throws {
+        let method = GhostboxDirectMethod(rawValue: "snapshot.prepare")
+        XCTAssertEqual(try JSONDecoder().decode(GhostboxDirectMethod.self, from: JSONEncoder().encode(method)), method)
+    }
+
+    func testJSONValueRoundTripsEverySupportedShape() throws {
+        let value = GhostboxJSONValue.object([
+            "null": .null,
+            "bool": .boolean(true),
+            "string": .string("value"),
+            "integer": .integer(-42),
+            "unsigned": .unsignedInteger(UInt64.max),
+            "array": .array([.integer(1), .object(["nested": .string("yes")])]),
+        ])
+        let data = try JSONEncoder().encode(value)
+        XCTAssertEqual(try JSONDecoder().decode(GhostboxJSONValue.self, from: data), value)
+        XCTAssertTrue(String(decoding: data, as: UTF8.self).contains(String(UInt64.max)))
+    }
+
+    func testJSONValueRejectsMalformedUnsignedIntegerTags() {
+        let malformed = [
+            #"{"$uint64":18446744073709551615}"#,
+            #"{"$uint64":"18446744073709551616"}"#,
+            #"{"$uint64":"01"}"#,
+            #"{"$uint64":"1","extra":true}"#,
+        ]
+        for json in malformed {
+            XCTAssertThrowsError(try JSONDecoder().decode(GhostboxJSONValue.self, from: Data(json.utf8)), json)
+        }
+    }
+
+    func testDirectResultRoundTripsUInt64MaxWithoutPrecisionLoss() throws {
+        let value = GhostboxDirectValue.unsignedInteger(UInt64.max)
+        XCTAssertEqual(try JSONDecoder().decode(GhostboxDirectValue.self, from: JSONEncoder().encode(value)), value)
+    }
+
+    func testMaximumByteResponseFitsResponseLineLimit() throws {
+        let value = GhostboxDirectValue.bytes(Data(repeating: 0xA5, count: kMaxDirectBytePayloadBytes))
+        let response = GhostboxDirectResponse(
+            version: kProtocolVersion,
+            id: "request-1",
+            result: value,
+            error: nil
+        )
+        let encoded = try JSONEncoder().encode(response)
+        XCTAssertLessThanOrEqual(encoded.count, kMaxDirectResponseLineBytes)
+        XCTAssertEqual(try JSONDecoder().decode(GhostboxDirectResponse.self, from: encoded), response)
+
+        XCTAssertThrowsError(try JSONEncoder().encode(
+            GhostboxDirectValue.bytes(Data(repeating: 0, count: kMaxDirectBytePayloadBytes + 1))
+        ))
+    }
+
+    func testMaximumIOFrameFitsFrameLineLimit() throws {
+        let frame = GhostboxIOFrame.data(Data(repeating: 0x5A, count: kMaxIOFrameDataBytes), stream: .terminal)
+        let line = try frame.encodeLine()
+        XCTAssertLessThanOrEqual(line.count - 1, kMaxIOFrameLineBytes)
+        XCTAssertEqual(try GhostboxIOFrame.decode(line: Data(line.dropLast())), frame)
+    }
+
+    func testDirectResultRejectsMalformedTaggedValues() {
+        let malformed = [
+            #"{"type":"void","value":null}"#,
+            #"{"type":"string"}"#,
+            #"{"type":"unsigned_integer","value":18446744073709551615}"#,
+            #"{"type":"unsigned_integer","value":"01"}"#,
+            #"{"type":"null","extra":true}"#,
+        ]
+        for json in malformed {
+            XCTAssertThrowsError(try JSONDecoder().decode(GhostboxDirectValue.self, from: Data(json.utf8)), json)
+        }
+    }
+
+    func testDirectResponseRequiresMatchingRequestID() throws {
+        let response = GhostboxDirectResponse(
+            version: kProtocolVersion,
+            id: "other-request",
+            result: .reference("@dns/dev"),
+            error: nil
+        )
+        guard case .protocolError = decodeDirectResponse(try JSONEncoder().encode(response), requestID: "request-1") else {
+            return XCTFail("Expected response ID mismatch to fail")
+        }
+    }
+
+    func testDirectResponseDecodesStableError() throws {
+        let response = GhostboxDirectResponse(
+            version: kProtocolVersion,
+            id: "request-1",
+            result: nil,
+            error: .init(code: "not_found", message: "DNS object missing")
+        )
         XCTAssertEqual(
-            String(data: line, encoding: .utf8),
-            #"{"version":4,"operation":"run","image":"alpine","command":[],"stdin":false,"tty":false,"volumes":[{"guestPath":"/home/user/src","destination":"/src","readOnly":true}]}"# + "\n"
+            decodeDirectResponse(try JSONEncoder().encode(response), requestID: "request-1"),
+            .error(code: "not_found", message: "DNS object missing")
         )
     }
 
-    func testInteractiveTTYRequestIncludesTerminalSize() throws {
-        let request = makeRunRequest(
-            image: "alpine",
-            command: ["/bin/sh"],
-            interactive: true,
-            tty: true,
-            columns: 120,
-            rows: 40
+    func testDirectValueRenderingIsJSONCompatibleAndReferencesAreClear() throws {
+        XCTAssertEqual(String(decoding: try renderDirectValue(.reference("@dns/dev")), as: UTF8.self), "@dns/dev\n")
+        XCTAssertEqual(String(decoding: try renderDirectValue(.string("example.test")), as: UTF8.self), "\"example.test\"\n")
+        XCTAssertEqual(String(decoding: try renderDirectValue(.strings(["a", "b"])), as: UTF8.self), "[\"a\",\"b\"]\n")
+        XCTAssertEqual(String(decoding: try renderDirectValue(.object(["items": .array([.integer(1), .boolean(true)])])), as: UTF8.self), "{\"items\":[1,true]}\n")
+        XCTAssertEqual(String(decoding: try renderDirectValue(.unsignedInteger(UInt64.max)), as: UTF8.self), "\(UInt64.max)\n")
+        XCTAssertEqual(try renderDirectValue(.void), Data())
+        XCTAssertEqual(String(decoding: try renderDirectValue(.null), as: UTF8.self), "null\n")
+    }
+
+    func testDirectRequestRejectsPayloadAboveBridgeLimit() {
+        let request = GhostboxDirectRequest(
+            id: "request-large",
+            invocation: .init(
+                method: .dnsCreate,
+                parameters: ["name": .string("large"), "domain": .string(String(repeating: "x", count: 64 * 1024))]
+            )
         )
-        XCTAssertEqual(
-            String(data: try encodeRequestLine(request), encoding: .utf8),
-            #"{"version":4,"operation":"run","image":"alpine","command":["/bin/sh"],"stdin":true,"tty":true,"columns":120,"rows":40}"# + "\n"
-        )
-    }
-
-    func testConfiguredRunRequestIncludesVersion4Fields() throws {
-        let request = makeRunRequest(
-            image: "alpine",
-            command: [],
-            environment: ["MODE=production"],
-            workingDirectory: "/app",
-            user: "1000:1000",
-            cpus: 4,
-            memoryBytes: 2_147_483_648
-        )
-        XCTAssertEqual(
-            String(data: try encodeRequestLine(request), encoding: .utf8),
-            #"{"version":4,"operation":"run","image":"alpine","command":[],"stdin":false,"tty":false,"environment":["MODE=production"],"workingDirectory":"/app","user":"1000:1000","cpus":4,"memoryBytes":2147483648}"# + "\n"
-        )
-    }
-
-    func testInputFramesAreNDJSON() throws {
-        let input = try encodeInputFrame(.stdin(Data([0x00, 0xFF])))
-        let resize = try encodeInputFrame(.resize(columns: 132, rows: 43))
-        XCTAssertEqual(input.last, 0x0A)
-        XCTAssertEqual(resize.last, 0x0A)
-        let inputObject = try JSONSerialization.jsonObject(with: Data(input.dropLast())) as? [String: Any]
-        let resizeObject = try JSONSerialization.jsonObject(with: Data(resize.dropLast())) as? [String: Any]
-        XCTAssertEqual(inputObject?["type"] as? String, "stdin")
-        XCTAssertEqual(inputObject?["data"] as? String, Data([0x00, 0xFF]).base64EncodedString())
-        XCTAssertEqual(resizeObject?["columns"] as? Int, 132)
-        XCTAssertEqual(resizeObject?["rows"] as? Int, 43)
-    }
-
-    // MARK: - Response decoding: success cases
-
-    func testDecodeReadyAddress() throws {
-        let json = #"{"version":4,"type":"ready","ipv4Address":"192.168.64.3"}"#.data(using: .utf8)!
-        guard case .ready(let address) = decodeResponse(json) else {
-            return XCTFail("Expected ready response")
+        XCTAssertThrowsError(try encodeDirectRequestLine(request)) { error in
+            XCTAssertEqual(error as? GhostboxDirectProtocolError, .requestTooLarge)
         }
-        XCTAssertEqual(address, "192.168.64.3")
-    }
-
-    func testDecodeStdout() throws {
-        let payload = "hello world".data(using: .utf8)!
-        let b64 = payload.base64EncodedString()
-        let json = #"{"version":4,"type":"stdout","data":"\#(b64)"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .stdout(let data):
-            XCTAssertEqual(data, payload)
-        default:
-            XCTFail("Expected .stdout")
-        }
-    }
-
-    func testDecodeStderr() throws {
-        let payload = "error line".data(using: .utf8)!
-        let b64 = payload.base64EncodedString()
-        let json = #"{"version":4,"type":"stderr","data":"\#(b64)"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .stderr(let data):
-            XCTAssertEqual(data, payload)
-        default:
-            XCTFail("Expected .stderr")
-        }
-    }
-
-    func testDecodeExit() throws {
-        let json = #"{"version":4,"type":"exit","exitCode":42}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .exit(let code):
-            XCTAssertEqual(code, 42)
-        default:
-            XCTFail("Expected .exit")
-        }
-    }
-
-    func testDecodeExitZero() throws {
-        let json = #"{"version":4,"type":"exit","exitCode":0}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .exit(let code):
-            XCTAssertEqual(code, 0)
-        default:
-            XCTFail("Expected .exit")
-        }
-    }
-
-    func testDecodeExit255() throws {
-        let json = #"{"version":4,"type":"exit","exitCode":255}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .exit(let code):
-            XCTAssertEqual(code, 255)
-        default:
-            XCTFail("Expected .exit")
-        }
-    }
-
-    func testDecodeError() throws {
-        let json = #"{"version":4,"type":"error","message":"image not found"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .error(let message):
-            XCTAssertEqual(message, "image not found")
-        default:
-            XCTFail("Expected .error")
-        }
-    }
-
-    // MARK: - Response decoding: empty base64 is valid empty output
-
-    func testDecodeStdoutEmptyBase64StringYieldsEmpty() throws {
-        let json = #"{"version":4,"type":"stdout","data":""}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .stdout(let data):
-            XCTAssertTrue(data.isEmpty)
-        default:
-            XCTFail("Expected .stdout with empty data")
-        }
-    }
-
-    func testDecodeStderrEmptyBase64StringYieldsEmpty() throws {
-        let json = #"{"version":4,"type":"stderr","data":""}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .stderr(let data):
-            XCTAssertTrue(data.isEmpty)
-        default:
-            XCTFail("Expected .stderr with empty data")
-        }
-    }
-
-    func testDecodeStdoutMissingDataIsProtocolError() throws {
-        let json = #"{"version":4,"type":"stdout"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for missing data")
-        }
-    }
-
-    // MARK: - Response decoding: strict protocol errors (never success)
-
-    func testDecodeStdoutInvalidBase64IsProtocolError() throws {
-        let json = #"{"version":4,"type":"stdout","data":"!!! not base64"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for invalid base64, not silent empty output")
-        }
-    }
-
-    func testDecodeExitMissingCodeIsProtocolError() throws {
-        let json = #"{"version":4,"type":"exit"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for missing exitCode")
-        }
-    }
-
-    func testDecodeExitOutOfRangeHighIsProtocolError() throws {
-        let json = #"{"version":4,"type":"exit","exitCode":256}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for out-of-range exitCode")
-        }
-    }
-
-    func testDecodeExitNegativeIsProtocolError() throws {
-        let json = #"{"version":4,"type":"exit","exitCode":-1}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for negative exitCode")
-        }
-    }
-
-    func testDecodeErrorMissingMessageIsProtocolError() throws {
-        let json = #"{"version":4,"type":"error"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for missing error message")
-        }
-    }
-
-    func testDecodeErrorEmptyMessageIsProtocolError() throws {
-        let json = #"{"version":4,"type":"error","message":""}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for empty error message")
-        }
-    }
-
-    func testDecodeUnsupportedVersionIsProtocolError() throws {
-        let json = #"{"version":99,"type":"exit","exitCode":0}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for wrong version")
-        }
-    }
-
-    func testDecodeMissingVersionIsProtocolError() throws {
-        // version is now required.
-        let json = #"{"type":"exit","exitCode":7}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for missing version")
-        }
-    }
-
-    func testDecodeUnknownTypeIsProtocolError() throws {
-        let json = #"{"version":4,"type":"bogus"}"#.data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for unknown type")
-        }
-    }
-
-    func testDecodeMalformedJSONIsProtocolError() throws {
-        let json = "not json".data(using: .utf8)!
-
-        switch decodeResponse(json) {
-        case .protocolError:
-            break
-        default:
-            XCTFail("Expected .protocolError for malformed JSON")
-        }
-    }
-
-    // MARK: - Exit code clamping (predictable, no bit masking)
-
-    func testClampExitCodeZero() {
-        XCTAssertEqual(clampExitCode(0), 0)
-    }
-
-    func testClampExitCodeNormal() {
-        XCTAssertEqual(clampExitCode(42), 42)
-    }
-
-    func testClampExitCodeNormalUnchangedInRange() {
-        for c in Int32(0)...Int32(255) {
-            XCTAssertEqual(clampExitCode(c), c, "exit \(c) should map to itself")
-        }
-    }
-
-    func testClampExitCode256MapsTo125() {
-        // Out-of-range host status maps to 125, not bit masking.
-        XCTAssertEqual(clampExitCode(256), 125)
-    }
-
-    func testClampExitCodeNegativeMapsTo125() {
-        XCTAssertEqual(clampExitCode(-1), 125)
-        XCTAssertEqual(clampExitCode(-2), 125)
-    }
-
-    func testClampExitCode255() {
-        XCTAssertEqual(clampExitCode(255), 255)
-    }
-
-    func testClampExitCodeLargeMapsTo125() {
-        XCTAssertEqual(clampExitCode(1000), 125)
-    }
-
-    func testTerminalNewlineNormalizerConvertsBareLineFeeds() {
-        var normalizer = TerminalNewlineNormalizer()
-        let output = normalizer.normalize(Data("one\ntwo\n".utf8))
-        XCTAssertEqual(output, Data("one\r\ntwo\r\n".utf8))
-    }
-
-    func testTerminalNewlineNormalizerPreservesCarriageReturnsAcrossChunks() {
-        var normalizer = TerminalNewlineNormalizer()
-        let first = normalizer.normalize(Data("one\r".utf8))
-        let second = normalizer.normalize(Data("\ntwo\r\n".utf8))
-        XCTAssertEqual(first + second, Data("one\r\ntwo\r\n".utf8))
     }
 }

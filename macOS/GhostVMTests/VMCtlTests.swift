@@ -318,6 +318,11 @@ final class VMFileLayoutTests: XCTestCase {
         XCTAssertEqual(layout.auxiliaryStorageURL.path, "/Users/test/VMs/MyVM.GhostVM/AuxiliaryStorage.bin")
         XCTAssertEqual(layout.pidFileURL.path, "/Users/test/VMs/MyVM.GhostVM/vmctl.pid")
         XCTAssertEqual(layout.snapshotsDirectoryURL.path, "/Users/test/VMs/MyVM.GhostVM/Snapshots")
+        XCTAssertEqual(layout.containerRuntimeDirectoryURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers")
+        XCTAssertEqual(layout.containerRuntimeMetadataURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/containers.json")
+        XCTAssertEqual(layout.containerRuntimeImagesURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/images")
+        XCTAssertEqual(layout.containerRuntimeLogsURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/logs")
+        XCTAssertEqual(layout.containerRuntimeVolumesURL.path, "/Users/test/VMs/MyVM.GhostVM/Containers/volumes")
     }
 
     func testSuspendStateURL() {

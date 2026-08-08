@@ -12,62 +12,98 @@ enabling enhanced host-guest integration:
 - Pointer and keyboard input injection
 - Screenshot capture with element overlays
 - Log streaming to host
-- Experimental host-backed Apple container execution
+- Direct Apple Containerization diagnostics
 
 Installation
 ------------
 
-GhostTools is automatically installed to /Applications in the guest VM
-when the GhostTools DMG is attached. It auto-updates when a newer version
-is available from the host.
+GhostTools is automatically installed to /Applications in the guest VM when
+the GhostTools DMG is attached. It auto-updates when a newer version is
+available from the host.
 
 To install manually:
 
    sudo cp /Volumes/GhostTools/GhostTools.app /Applications/
 
-The native container CLI can be run directly from the mounted DMG:
+The direct Containerization CLI can be run from the mounted DMG:
 
-   /Volumes/GhostTools/bin/ghostbox run registry-1.docker.io/library/alpine:latest echo hello
+   /Volumes/GhostTools/bin/ghostbox --help
 
-Host-backed Containers
-----------------------
+The Docker-like helper is packaged beside it:
 
-Ghostbox runs ephemeral Linux containers on the outer Mac through Apple's
-Containerization framework. It supports:
+   /Volumes/GhostTools/bin/ghostbox-docker --help
 
-   ghostbox run IMAGE [COMMAND...]
-   ghostbox run -it IMAGE [COMMAND...]
-   ghostbox run -v /guest/path:/container/path[:ro|rw] IMAGE [COMMAND...]
-   ghostbox run -p 8080:80 -e MODE=production -w /app IMAGE
-   ghostbox run -u 1000:1000 --cpus 2 --memory 1g IMAGE
+The Compose-compatible helper manages multi-container projects through that
+Docker-like helper:
 
-Use -i to attach stdin and -t to allocate a terminal. Combined -it sessions
-support terminal resize events and Ctrl-C through the container PTY. Alpine
-images provide /bin/sh by default:
+   /Volumes/GhostTools/bin/ghostbox-docker-compose config
+   /Volumes/GhostTools/bin/ghostbox-docker-compose up -d
+   /Volumes/GhostTools/bin/ghostbox-docker-compose ps
+   /Volumes/GhostTools/bin/ghostbox-docker-compose logs -f
+   /Volumes/GhostTools/bin/ghostbox-docker-compose down
 
-   ghostbox run -it registry-1.docker.io/library/alpine:latest /bin/sh
+It discovers compose.yaml, compose.yml, docker-compose.yaml, or
+docker-compose.yml and supports image-based services, commands, entrypoints,
+environment files and values, bind mounts, loopback TCP ports, dependencies,
+and common process settings. Builds, named volumes, custom networks,
+service-name DNS, health checks, and scaling are not implemented. The helper
+uses the system /usr/bin/ruby YAML parser.
 
-Published ports currently support TCP and bind to the guest's 127.0.0.1 by
-default. Provide an explicit guest IPv4 address before the host port to change
-the bind address.
+Ghostbox Direct API
+-------------------
+
+`ghostbox` exposes direct, source-shaped Apple Containerization operations. It
+does not provide compatibility fallback commands. `ghostbox-docker` separately
+composes these operations into Docker-like `build`, `pull`, and foreground
+`run --rm` workflows. Currently implemented direct operations are listed by:
+
+   ghostbox --help
+
+Examples:
+
+   ghostbox cn:kernel:default
+   ghostbox cn:dns:default-nameservers
+   ghostbox cn:dns:create dev --nameserver 1.1.1.1
+   ghostbox cn:dns:resolv-conf @dns/dev
+   ghostbox cn:process-config:default-path
+   ghostbox cn:container:default-masked-paths
+
+Guest-backed process I/O uses explicit resources and remains independent from
+container lifecycle operations:
+
+   ghostbox cn:reader-stream:create job-input
+   ghostbox cn:writer:create job-output
+   ghostbox cn:process-config:create job /bin/sh \
+       --stdin @reader-stream/job-input --stdout @writer/job-output
+   producer | ghostbox cn:reader-stream:attach @reader-stream/job-input &
+   ghostbox cn:writer:attach @writer/job-output | consumer &
+
+Start attachments before the process to avoid filling their bounded transport
+buffers. Close a writer after the corresponding process wait completes so its
+attachment emits EOF. For an interactive PTY, create a terminal, pass it to
+`cn:process-config:set-terminal-io`, and keep the following attachment in the
+foreground while the lifecycle controller waits and then closes the terminal:
+
+   ghostbox cn:terminal:attach @terminal/NAME --resize-target @container/NAME
+
+Terminal attach requires a real TTY and forwards raw input, output, and
+window-size changes. A lifecycle controller in another process can block on
+`ghostbox cn:terminal:wait-attached @terminal/NAME` before starting the process.
 
 The outer Mac must be Apple silicon. In GhostVM, open Edit Settings for this VM,
 select NAT (Shared), and enable Host-backed Containers before starting the VM.
-Guest directory mounts additionally require macOS 26 or later and the GhostVM
-file system extension enabled under System Settings > General > Login Items &
-Extensions > File System Extensions. Restart the VM after changing the setting.
 
-Enabling the bridge grants any process in the guest permission to request the
-limited host-side container run operation. Images are pulled using the host
-user's registry access and remain in the host image store after the ephemeral
-container exits, so private registry access and disk usage are part of this
-trust grant. Volumes expose the requested guest directory to the container and
-default to read-write; append `:ro` for a read-only mount. Outer-host paths,
-builds, and persistent containers are not supported.
+Enabling the bridge grants any process in the guest permission to request
+host-side Containerization operations. Unsupported direct operations fail
+explicitly; they are never translated to a legacy one-shot request.
 
-GhostTools requires Accessibility permission in the guest to enable
-pointer, keyboard, and UI automation features. Grant this in
-System Settings > Privacy & Security > Accessibility.
+`cn:kernel:default` is a GhostVM host extension backed by Apple container's
+configured default Linux ARM kernel. See `examples/ghostbox` for scripts that
+compose it with the direct manager, container, process, and I/O APIs.
+
+GhostTools requires Accessibility permission in the guest to enable pointer,
+keyboard, and UI automation features. Grant this in System Settings > Privacy &
+Security > Accessibility.
 
 Requirements
 ------------

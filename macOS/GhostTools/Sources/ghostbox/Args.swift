@@ -1,92 +1,20 @@
 import Foundation
 
 enum ParsedAction {
-    case run(GhostboxRunOptions)
-    case help
+    case direct(GhostboxDirectInvocation)
+    case attach(GhostboxDirectInvocation, GhostboxIOStream)
+    case forward(container: String, ports: [PublishedPort])
+    case help([String])
     case version
 }
 
-struct GhostboxRunOptions: Equatable {
-    let image: String
-    let command: [String]
-    let volumes: [HostContainerVolume]
-    let publishedPorts: [PublishedPort]
-    let environment: [String]
-    let workingDirectory: String?
-    let user: String?
-    let cpus: Int?
-    let memoryBytes: UInt64?
-    let interactive: Bool
-    let tty: Bool
-}
-
-struct PublishedPort: Equatable {
-    let hostAddress: String
-    let hostPort: UInt16
-    let containerPort: UInt16
-}
-
 enum ParseError: LocalizedError, Equatable {
-    case unknownSubcommand(String)
-    case unknownOption(String)
-    case missingOptionValue(String)
-    case missingImage
-    case invalidImage(String)
-    case tooManyCommands(max: Int)
-    case invalidCommand(index: Int, reason: String)
-    case invalidVolume(String)
-    case tooManyVolumes(max: Int)
-    case duplicateVolumeDestination(String)
-    case invalidPublish(String)
-    case duplicatePublishedPort(address: String, port: UInt16)
-    case invalidEnvironment(String)
-    case environmentNotSet(String)
-    case tooManyEnvironmentVariables(max: Int)
-    case invalidWorkingDirectory(String)
-    case invalidUser(String)
-    case invalidCPUs(String)
-    case invalidMemory(String)
+    case invalidDirect(String)
 
     var errorDescription: String? {
         switch self {
-        case .unknownSubcommand(let sub):
-            return "unknown subcommand '\(sub)'. Expected 'run'."
-        case .unknownOption(let option):
-            return "unknown run option '\(option)'"
-        case .missingOptionValue(let option):
-            return "option \(option) requires a value"
-        case .missingImage:
-            return "missing IMAGE argument. Usage: ghostbox run [OPTIONS] IMAGE [COMMAND...]"
-        case .invalidImage(let reason):
-            return "invalid IMAGE: \(reason)"
-        case .tooManyCommands(let max):
-            return "too many command arguments: maximum is \(max)"
-        case .invalidCommand(let index, let reason):
-            return "invalid command argument at index \(index): \(reason)"
-        case .invalidVolume(let reason):
-            return "invalid volume: \(reason)"
-        case .tooManyVolumes(let max):
-            return "too many volumes: maximum is \(max)"
-        case .duplicateVolumeDestination(let path):
-            return "duplicate container volume destination '\(path)'"
-        case .invalidPublish(let reason):
-            return "invalid published port: \(reason)"
-        case .duplicatePublishedPort(let address, let port):
-            return "duplicate published port \(address):\(port)"
-        case .invalidEnvironment(let reason):
-            return "invalid environment variable: \(reason)"
-        case .environmentNotSet(let name):
-            return "environment variable '\(name)' is not set in the guest"
-        case .tooManyEnvironmentVariables(let max):
-            return "too many environment variables: maximum is \(max)"
-        case .invalidWorkingDirectory(let reason):
-            return "invalid working directory: \(reason)"
-        case .invalidUser(let reason):
-            return "invalid user: \(reason)"
-        case .invalidCPUs(let reason):
-            return "invalid CPU limit: \(reason)"
-        case .invalidMemory(let reason):
-            return "invalid memory limit: \(reason)"
+        case .invalidDirect(let reason):
+            return reason
         }
     }
 }
@@ -95,329 +23,523 @@ struct CLIOptions {
     let action: ParsedAction
 }
 
-func parseArguments(_ argv: [String]) -> Result<CLIOptions, ParseError> {
-    guard let first = argv.first else {
-        return .success(CLIOptions(action: .help))
+struct GhostboxQualifiedCommand: Equatable, Sendable {
+    let namespace: String
+    let resource: String
+    let operation: String
+
+    var canonical: String { "\(namespace):\(resource):\(operation)" }
+
+    init?(_ token: String) {
+        let components = token.split(separator: ":", omittingEmptySubsequences: false)
+        guard components.count == 3 else { return nil }
+        switch components[0] {
+        case "cn", "containerization": namespace = "cn"
+        case "cr", "container": namespace = "cr"
+        default: return nil
+        }
+        let resource = String(components[1])
+        let operation = String(components[2])
+        guard isValidCommandSegment(resource), isValidCommandSegment(operation) else { return nil }
+        self.resource = resource
+        self.operation = operation
     }
-    switch first {
-    case "--help", "-h", "help":
-        return .success(CLIOptions(action: .help))
+}
+
+private func isValidCommandSegment(_ value: String) -> Bool {
+    guard let first = value.utf8.first, (97...122).contains(first) else { return false }
+    return value.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }
+}
+
+func parseArguments(_ arguments: [String]) -> Result<CLIOptions, ParseError> {
+    guard let command = arguments.first else {
+        return .success(CLIOptions(action: .help([])))
+    }
+    switch command {
+    case "--help", "-h":
+        guard arguments.count == 1 else {
+            return .failure(.invalidDirect("\(command) accepts no arguments"))
+        }
+        return .success(CLIOptions(action: .help([])))
+    case "help":
+        return .success(CLIOptions(action: .help(Array(arguments.dropFirst()))))
     case "--version", "-v":
         return .success(CLIOptions(action: .version))
-    case "run":
-        break
     default:
-        return .failure(.unknownSubcommand(first))
+        if ["cn:help", "containerization:help"].contains(command) {
+            guard arguments.count == 1 else {
+                return .failure(.invalidDirect("\(command) accepts no arguments"))
+            }
+            return .success(CLIOptions(action: .help(["cn"])))
+        }
+        if ["cr:help", "container:help"].contains(command) {
+            guard arguments.count == 1 else {
+                return .failure(.invalidDirect("\(command) accepts no arguments"))
+            }
+            return .success(CLIOptions(action: .help(["cr"])))
+        }
+        guard let qualified = GhostboxQualifiedCommand(command) else {
+            return .failure(.invalidDirect(
+                "unknown qualified command '\(command)'; expected NAMESPACE:RESOURCE:OPERATION"
+            ))
+        }
+        if qualified.operation == "help" {
+            guard arguments.count == 1 else {
+                return .failure(.invalidDirect("\(command) accepts no arguments"))
+            }
+            return .success(CLIOptions(action: .help([qualified.namespace, qualified.resource])))
+        }
+        if let helpIndex = arguments.firstIndex(where: { $0 == "--help" || $0 == "-h" }),
+           !arguments[..<helpIndex].contains("--") {
+            guard helpIndex == arguments.index(before: arguments.endIndex) else {
+                return .failure(.invalidDirect("--help must be the final argument"))
+            }
+            return .success(CLIOptions(action: .help([qualified.canonical])))
+        }
+        let legacyArguments = legacyExtensionArguments(qualified, arguments: Array(arguments.dropFirst()))
+        if legacyArguments == ["kernel", "default"] {
+            return .success(CLIOptions(action: .direct(.init(method: .kernelDefault, parameters: [:]))))
+        }
+        if legacyArguments == ["kernel", "install-recommended"] {
+            return .success(CLIOptions(action: .direct(.init(method: .kernelInstallRecommended, parameters: [:]))))
+        }
+        if let result = legacyArguments.flatMap(parseResourceCleanupArguments) {
+            return result
+        }
+        if qualified.namespace == "cn", qualified.resource == "mount",
+           let legacyArguments, let result = parseGuestMountArguments(legacyArguments) {
+            return result
+        }
+        if qualified.namespace == "cn", qualified.resource == "container", qualified.operation == "forward",
+           let legacyArguments {
+            return parseContainerForwardArguments(legacyArguments)
+        }
+        if qualified.namespace == "cn", ["reader-stream", "writer", "terminal"].contains(qualified.resource),
+           let legacyArguments {
+            return parseIOProxyArguments(legacyArguments)
+        }
+        return parseDirectArguments(arguments).map { CLIOptions(action: .direct($0)) }
     }
+}
 
-    var index = 1
-    var volumes: [HostContainerVolume] = []
-    var publishedPorts: [PublishedPort] = []
-    var environment: [String] = []
-    var workingDirectory: String?
-    var user: String?
-    var cpus: Int?
-    var memoryBytes: UInt64?
-    var interactive = false
-    var tty = false
+private func legacyExtensionArguments(
+    _ command: GhostboxQualifiedCommand,
+    arguments: [String]
+) -> [String]? {
+    guard command.namespace == "cn" else { return nil }
+    if ["reader-stream", "writer", "terminal"].contains(command.resource) {
+        if arguments.first?.hasPrefix("@") == true {
+            return [command.resource, arguments[0], command.operation] + arguments.dropFirst()
+        }
+        return [command.resource, command.operation] + arguments
+    }
+    if command.operation == "delete" || command.operation == "close" || command.operation == "forward" {
+        guard let receiver = arguments.first else { return [command.resource, command.operation] }
+        return [command.resource, receiver, command.operation] + arguments.dropFirst()
+    }
+    return [command.resource, command.operation] + arguments
+}
 
-    optionLoop: while index < argv.count {
-        let token = argv[index]
-        switch token {
-        case "-i", "--interactive":
-            interactive = true
-            index += 1
-        case "-t", "--tty":
-            tty = true
-            index += 1
-        case "-it", "-ti":
-            interactive = true
-            tty = true
-            index += 1
-        case "-v", "--volume":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            if let error = appendVolume(argv[index + 1], to: &volumes) { return .failure(error) }
-            index += 2
-        case "-p", "--publish":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            if let error = appendPublishedPort(argv[index + 1], to: &publishedPorts) { return .failure(error) }
-            index += 2
-        case "-e", "--env":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            if let error = appendEnvironment(argv[index + 1], to: &environment) { return .failure(error) }
-            index += 2
-        case "-w", "--workdir":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            let value = argv[index + 1]
-            if let error = validateWorkingDirectory(value) { return .failure(error) }
-            workingDirectory = value
-            index += 2
-        case "-u", "--user":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            let value = argv[index + 1]
-            if let error = validateUser(value) { return .failure(error) }
-            user = value
-            index += 2
-        case "-c", "--cpus":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            guard let value = Int(argv[index + 1]), value > 0 else {
-                return .failure(.invalidCPUs("expected a positive integer"))
+private func parseVolumeArguments(_ arguments: [String]) -> Result<CLIOptions, ParseError> {
+    guard arguments.count >= 2 else {
+        return .failure(.invalidDirect("volume requires an operation"))
+    }
+    if arguments[1] == "list" {
+        guard arguments.count == 2 else {
+            return .failure(.invalidDirect("volume list accepts no arguments"))
+        }
+        return directVolumeAction(.volumeList, parameters: [:])
+    }
+    if arguments[1] == "create" {
+        guard arguments.count >= 3, isValidReferenceComponent(arguments[2]) else {
+            return .failure(.invalidDirect("volume create requires a valid name"))
+        }
+        var parameters: [String: GhostboxJSONValue] = ["volume": .string(arguments[2])]
+        var index = 3
+        while index < arguments.count {
+            let (name, attached) = splitLongOption(arguments[index])
+            guard name == "--size" else {
+                return .failure(.invalidDirect("unknown option '\(name)' for volume create"))
             }
-            cpus = value
-            index += 2
-        case "-m", "--memory":
-            guard index + 1 < argv.count else { return .failure(.missingOptionValue(token)) }
-            switch parseMemory(argv[index + 1]) {
-            case .success(let value): memoryBytes = value
-            case .failure(let error): return .failure(error)
+            guard parameters["size"] == nil else {
+                return .failure(.invalidDirect("option --size may be specified once"))
             }
-            index += 2
-        default:
-            if token.hasPrefix("--volume=") {
-                if let error = appendVolume(String(token.dropFirst("--volume=".count)), to: &volumes) { return .failure(error) }
-                index += 1
-            } else if token.hasPrefix("--publish=") {
-                if let error = appendPublishedPort(String(token.dropFirst("--publish=".count)), to: &publishedPorts) { return .failure(error) }
-                index += 1
-            } else if token.hasPrefix("--env=") {
-                if let error = appendEnvironment(String(token.dropFirst("--env=".count)), to: &environment) { return .failure(error) }
-                index += 1
-            } else if token.hasPrefix("--workdir=") {
-                let value = String(token.dropFirst("--workdir=".count))
-                if let error = validateWorkingDirectory(value) { return .failure(error) }
-                workingDirectory = value
-                index += 1
-            } else if token.hasPrefix("--user=") {
-                let value = String(token.dropFirst("--user=".count))
-                if let error = validateUser(value) { return .failure(error) }
-                user = value
-                index += 1
-            } else if token.hasPrefix("--cpus=") {
-                guard let value = Int(token.dropFirst("--cpus=".count)), value > 0 else {
-                    return .failure(.invalidCPUs("expected a positive integer"))
-                }
-                cpus = value
-                index += 1
-            } else if token.hasPrefix("--memory=") {
-                switch parseMemory(String(token.dropFirst("--memory=".count))) {
-                case .success(let value): memoryBytes = value
-                case .failure(let error): return .failure(error)
-                }
-                index += 1
-            } else if token.hasPrefix("-") {
-                return .failure(.unknownOption(token))
+            let value: String
+            if let attached {
+                value = attached
             } else {
-                break optionLoop
+                guard index + 1 < arguments.count else {
+                    return .failure(.invalidDirect("option --size requires a value"))
+                }
+                index += 1
+                value = arguments[index]
             }
+            guard let size = UInt64(value) else {
+                return .failure(.invalidDirect("--size requires an unsigned integer byte count"))
+            }
+            parameters["size"] = .unsignedInteger(size)
+            index += 1
         }
+        return directVolumeAction(.volumeCreate, parameters: parameters)
     }
 
-    guard index < argv.count else { return .failure(.missingImage) }
-    let image = argv[index]
-    if let error = validateImage(image) { return .failure(error) }
-
-    let command = Array(argv.dropFirst(index + 1))
-    guard command.count <= kMaxCommandArgs else {
-        return .failure(.tooManyCommands(max: kMaxCommandArgs))
+    guard isValidReference(arguments[1], expectedKind: "volume"), arguments.count >= 3 else {
+        return .failure(.invalidDirect("expected volume create, volume list, or an @volume/NAME reference"))
     }
-    for (commandIndex, argument) in command.enumerated() {
-        if let reason = validateCommandArg(argument) {
-            return .failure(.invalidCommand(index: commandIndex, reason: reason))
+    let reference = arguments[1]
+    switch arguments[2] {
+    case "inspect":
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("volume inspect accepts no options"))
         }
+        return directVolumeAction(.volumeInspect, parameters: ["volume": .string(reference)])
+    case "delete":
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("volume delete accepts no options"))
+        }
+        return directVolumeAction(.volumeDelete, parameters: ["volume": .string(reference)])
+    case "mount":
+        guard arguments.count >= 4, isValidReferenceComponent(arguments[3]) else {
+            return .failure(.invalidDirect("volume mount requires a valid mount name"))
+        }
+        var parameters: [String: GhostboxJSONValue] = [
+            "volume": .string(reference),
+            "mount": .string(arguments[3]),
+            "readOnly": .boolean(false),
+        ]
+        var suppliedOptions = Set<String>()
+        var index = 4
+        while index < arguments.count {
+            let (name, attached) = splitLongOption(arguments[index])
+            guard name == "--destination" || name == "--read-only" else {
+                return .failure(.invalidDirect("unknown option '\(name)' for volume mount"))
+            }
+            guard suppliedOptions.insert(name).inserted else {
+                return .failure(.invalidDirect("option \(name) may be specified once"))
+            }
+            let parameter = name == "--destination" ? "destination" : "readOnly"
+            let value: String
+            if let attached {
+                value = attached
+            } else if name == "--read-only", index + 1 == arguments.count || arguments[index + 1].hasPrefix("--") {
+                value = "true"
+            } else {
+                guard index + 1 < arguments.count else {
+                    return .failure(.invalidDirect("option \(name) requires a value"))
+                }
+                index += 1
+                value = arguments[index]
+            }
+            if name == "--read-only" {
+                guard value == "true" || value == "false" else {
+                    return .failure(.invalidDirect("--read-only must be true or false"))
+                }
+                parameters[parameter] = .boolean(value == "true")
+            } else {
+                parameters[parameter] = .string(value)
+            }
+            index += 1
+        }
+        guard case .string(let destination) = parameters["destination"], isValidContainerMountPath(destination) else {
+            return .failure(.invalidDirect("--destination must be an absolute non-root container path without dot components"))
+        }
+        return directVolumeAction(.volumeMount, parameters: parameters)
+    default:
+        return .failure(.invalidDirect("unknown volume operation '\(arguments[2])'"))
     }
+}
 
-    return .success(CLIOptions(action: .run(GhostboxRunOptions(
-        image: image,
-        command: command,
-        volumes: volumes,
-        publishedPorts: publishedPorts,
-        environment: environment,
-        workingDirectory: workingDirectory,
-        user: user,
-        cpus: cpus,
-        memoryBytes: memoryBytes,
-        interactive: interactive,
-        tty: tty
+private func directVolumeAction(
+    _ method: GhostboxDirectMethod,
+    parameters: [String: GhostboxJSONValue]
+) -> Result<CLIOptions, ParseError> {
+    .success(CLIOptions(action: .direct(.init(method: method, parameters: parameters))))
+}
+
+private func splitLongOption(_ option: String) -> (String, String?) {
+    guard let separator = option.firstIndex(of: "=") else { return (option, nil) }
+    return (String(option[..<separator]), String(option[option.index(after: separator)...]))
+}
+
+private func parseResourceCleanupArguments(_ arguments: [String]) -> Result<CLIOptions, ParseError>? {
+    guard arguments.count >= 3, arguments[1].hasPrefix("@") else { return nil }
+    let resource = arguments[0]
+    let operation = arguments[2]
+    let method: GhostboxDirectMethod
+    let referenceKind: String
+    let parameter: String
+    switch (resource, operation) {
+    case ("mount", "delete"):
+        method = .mountDelete
+        referenceKind = "mount"
+        parameter = "mount"
+    case ("dns", "delete"):
+        method = .dnsDelete
+        referenceKind = "dns"
+        parameter = "dns"
+    case ("process-config", "delete"):
+        method = .processConfigDelete
+        referenceKind = "process-config"
+        parameter = "processConfig"
+    case ("network", "delete"):
+        method = .networkDelete
+        referenceKind = "network"
+        parameter = "network"
+    case ("manager", "close"):
+        method = .managerClose
+        referenceKind = "manager"
+        parameter = "manager"
+    default:
+        return nil
+    }
+    guard arguments.count == 3 else {
+        return .failure(.invalidDirect("too many arguments for \(resource) \(operation)"))
+    }
+    guard isValidReference(arguments[1], expectedKind: referenceKind) else {
+        return .failure(.invalidDirect("expected @\(referenceKind)/NAME reference"))
+    }
+    return .success(CLIOptions(action: .direct(.init(
+        method: method,
+        parameters: [parameter: .string(arguments[1])]
     ))))
 }
 
-let kMaxCommandArgs = 64
-let kMaxImageBytes = 256
-let kMaxCommandArgBytes = 4096
-let kMaxVolumes = 32
-let kMaxVolumePathBytes = 4096
-let kMaxEnvironmentVariables = 256
-
-private func appendVolume(_ specification: String, to volumes: inout [HostContainerVolume]) -> ParseError? {
-    guard volumes.count < kMaxVolumes else { return .tooManyVolumes(max: kMaxVolumes) }
-    switch parseVolume(specification) {
-    case .failure(let error):
-        return error
-    case .success(let volume):
-        guard !volumes.contains(where: { $0.destination == volume.destination }) else {
-            return .duplicateVolumeDestination(volume.destination)
+private func parseGuestMountArguments(_ arguments: [String]) -> Result<CLIOptions, ParseError>? {
+    guard arguments.count >= 2, arguments[1] == "guest-share" else { return nil }
+    guard arguments.count >= 3, isValidReferenceComponent(arguments[2]) else {
+        return .failure(.invalidDirect("mount guest-share requires a valid mount name"))
+    }
+    var parameters: [String: GhostboxJSONValue] = [
+        "mount": .string(arguments[2]),
+        "readOnly": .boolean(false),
+        "option": .array([]),
+        "runtimeOption": .array([]),
+    ]
+    var singularOptions = Set<String>()
+    var index = 3
+    while index < arguments.count {
+        let option = arguments[index]
+        let name: String
+        let attached: String?
+        if let separator = option.firstIndex(of: "=") {
+            name = String(option[..<separator])
+            attached = String(option[option.index(after: separator)...])
+        } else {
+            name = option
+            attached = nil
         }
-        volumes.append(volume)
-        return nil
-    }
-}
-
-private func parseVolume(_ specification: String) -> Result<HostContainerVolume, ParseError> {
-    let fields = specification.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-    guard fields.count == 2 || fields.count == 3 else {
-        return .failure(.invalidVolume("expected GUEST_PATH:CONTAINER_PATH[:ro|rw]"))
-    }
-    let guestPath = fields[0]
-    let destination = fields[1]
-    guard guestPath.hasPrefix("/"), !guestPath.contains("\0") else {
-        return .failure(.invalidVolume("guest path must be absolute and contain no NUL bytes"))
-    }
-    let destinationParts = destination.split(separator: "/", omittingEmptySubsequences: true)
-    guard destination.hasPrefix("/"), destination != "/", !destination.contains("\0"),
-          !destinationParts.contains(where: { $0 == "." || $0 == ".." }) else {
-        return .failure(.invalidVolume("container path must be absolute, must not be '/', and must contain no dot components or NUL bytes"))
-    }
-    guard guestPath.utf8.count <= kMaxVolumePathBytes, destination.utf8.count <= kMaxVolumePathBytes else {
-        return .failure(.invalidVolume("paths must not exceed \(kMaxVolumePathBytes) bytes"))
-    }
-    let mode = fields.count == 3 ? fields[2] : "rw"
-    guard mode == "ro" || mode == "rw" else {
-        return .failure(.invalidVolume("volume mode must be 'ro' or 'rw'"))
-    }
-    return .success(HostContainerVolume(guestPath: guestPath, destination: destination, readOnly: mode == "ro"))
-}
-
-private func appendPublishedPort(_ specification: String, to ports: inout [PublishedPort]) -> ParseError? {
-    switch parsePublishedPort(specification) {
-    case .failure(let error):
-        return error
-    case .success(let port):
-        guard !ports.contains(where: { $0.hostAddress == port.hostAddress && $0.hostPort == port.hostPort }) else {
-            return .duplicatePublishedPort(address: port.hostAddress, port: port.hostPort)
+        let value: String
+        if let attached {
+            value = attached
+        } else {
+            guard index + 1 < arguments.count else {
+                return .failure(.invalidDirect("option \(name) requires a value"))
+            }
+            index += 1
+            value = arguments[index]
         }
-        ports.append(port)
-        return nil
-    }
-}
-
-func parsePublishedPort(_ specification: String) -> Result<PublishedPort, ParseError> {
-    let protocolParts = specification.split(separator: "/", omittingEmptySubsequences: false)
-    guard protocolParts.count <= 2 else { return .failure(.invalidPublish("invalid protocol suffix")) }
-    if protocolParts.count == 2, protocolParts[1].lowercased() != "tcp" {
-        return .failure(.invalidPublish("only TCP is supported"))
-    }
-    let fields = protocolParts[0].split(separator: ":", omittingEmptySubsequences: false).map(String.init)
-    guard fields.count == 2 || fields.count == 3 else {
-        return .failure(.invalidPublish("expected [HOST_IP:]HOST_PORT:CONTAINER_PORT[/tcp]"))
-    }
-    let hostAddress = fields.count == 3 ? fields[0] : "127.0.0.1"
-    let hostPortText = fields.count == 3 ? fields[1] : fields[0]
-    let containerPortText = fields.count == 3 ? fields[2] : fields[1]
-    guard isIPv4Address(hostAddress) else { return .failure(.invalidPublish("host address must be an IPv4 address")) }
-    guard let hostPort = UInt16(hostPortText), hostPort > 0 else {
-        return .failure(.invalidPublish("host port must be between 1 and 65535"))
-    }
-    guard let containerPort = UInt16(containerPortText), containerPort > 0 else {
-        return .failure(.invalidPublish("container port must be between 1 and 65535"))
-    }
-    return .success(PublishedPort(hostAddress: hostAddress, hostPort: hostPort, containerPort: containerPort))
-}
-
-private func appendEnvironment(_ specification: String, to environment: inout [String]) -> ParseError? {
-    guard environment.count < kMaxEnvironmentVariables else {
-        return .tooManyEnvironmentVariables(max: kMaxEnvironmentVariables)
-    }
-    let name: String
-    let value: String
-    if let separator = specification.firstIndex(of: "=") {
-        name = String(specification[..<separator])
-        value = String(specification[specification.index(after: separator)...])
-    } else {
-        name = specification
-        guard let inherited = ProcessInfo.processInfo.environment[name] else {
-            return .environmentNotSet(name)
+        switch name {
+        case "--source":
+            guard singularOptions.insert(name).inserted else {
+                return .failure(.invalidDirect("option \(name) may be specified once"))
+            }
+            parameters["source"] = .string(value)
+        case "--destination":
+            guard singularOptions.insert(name).inserted else {
+                return .failure(.invalidDirect("option \(name) may be specified once"))
+            }
+            parameters["destination"] = .string(value)
+        case "--read-only":
+            guard singularOptions.insert(name).inserted else {
+                return .failure(.invalidDirect("option \(name) may be specified once"))
+            }
+            guard value == "true" || value == "false" else {
+                return .failure(.invalidDirect("--read-only must be true or false"))
+            }
+            parameters["readOnly"] = .boolean(value == "true")
+        case "--cache-ttl":
+            guard singularOptions.insert(name).inserted else {
+                return .failure(.invalidDirect("option \(name) may be specified once"))
+            }
+            guard let seconds = UInt64(value), seconds <= 300 else {
+                return .failure(.invalidDirect("--cache-ttl must be an integer from 0 through 300"))
+            }
+            parameters["cacheTTL"] = .unsignedInteger(seconds)
+        case "--option", "--runtime-option":
+            let parameter = name == "--option" ? "option" : "runtimeOption"
+            if case .array(var values) = parameters[parameter] {
+                values.append(.string(value))
+                parameters[parameter] = .array(values)
+            }
+        default:
+            return .failure(.invalidDirect("unknown option '\(name)' for mount guest-share"))
         }
-        value = inherited
+        index += 1
     }
-    guard isEnvironmentName(name) else {
-        return .invalidEnvironment("name must match [A-Za-z_][A-Za-z0-9_]*")
+    guard case .string(let source) = parameters["source"], source.hasPrefix("/"), !source.contains("\0") else {
+        return .failure(.invalidDirect("--source must be an absolute guest path"))
     }
-    guard !value.contains("\0") else { return .invalidEnvironment("value contains a NUL byte") }
-    guard name.utf8.count + value.utf8.count + 1 <= 32 * 1024 else {
-        return .invalidEnvironment("assignment exceeds 32768 bytes")
+    guard case .string(let destination) = parameters["destination"],
+          isValidContainerMountPath(destination) else {
+        return .failure(.invalidDirect("--destination must be an absolute non-root container path without dot components"))
     }
-    environment.append("\(name)=\(value)")
-    return nil
+    return .success(CLIOptions(action: .direct(.init(method: .mountGuestShare, parameters: parameters))))
 }
 
-private func validateWorkingDirectory(_ path: String) -> ParseError? {
-    guard path.hasPrefix("/") else { return .invalidWorkingDirectory("path must be absolute") }
-    guard !path.contains("\0") else { return .invalidWorkingDirectory("path contains a NUL byte") }
-    guard path.utf8.count <= 4096 else { return .invalidWorkingDirectory("path exceeds 4096 bytes") }
-    return nil
+private func parseContainerForwardArguments(_ arguments: [String]) -> Result<CLIOptions, ParseError> {
+    guard isValidReference(arguments[1], expectedKind: "container") else {
+        return .failure(.invalidDirect("container forward requires an @container/NAME reference"))
+    }
+    var ports: [PublishedPort] = []
+    var index = 3
+    while index < arguments.count {
+        let option = arguments[index]
+        let specification: String
+        if option == "-p" || option == "-P" || option == "--publish" {
+            guard index + 1 < arguments.count else {
+                return .failure(.invalidDirect("option \(option) requires a value"))
+            }
+            index += 1
+            specification = arguments[index]
+        } else if option.hasPrefix("--publish=") {
+            specification = String(option.dropFirst("--publish=".count))
+        } else {
+            return .failure(.invalidDirect("container forward accepts repeated -p, -P, or --publish options"))
+        }
+        do {
+            let port = try parsePublishedPort(specification).get()
+            guard !ports.contains(where: { $0.hostAddress == port.hostAddress && $0.hostPort == port.hostPort }) else {
+                return .failure(.invalidDirect("duplicate published port \(port.hostAddress):\(port.hostPort)"))
+            }
+            ports.append(port)
+        } catch let error {
+            return .failure(error)
+        }
+        index += 1
+    }
+    guard !ports.isEmpty else {
+        return .failure(.invalidDirect("container forward requires at least one -p mapping"))
+    }
+    return .success(CLIOptions(action: .forward(container: arguments[1], ports: ports)))
 }
 
-private func validateUser(_ user: String) -> ParseError? {
-    guard !user.isEmpty else { return .invalidUser("value must not be empty") }
-    guard !user.contains("\0"), user.utf8.count <= 256 else {
-        return .invalidUser("value must contain no NUL bytes and be at most 256 bytes")
-    }
-    guard !user.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }) else {
-        return .invalidUser("value must not contain whitespace or control characters")
-    }
-    let fields = user.split(separator: ":", omittingEmptySubsequences: false)
-    guard fields.count <= 2, fields.allSatisfy({ !$0.isEmpty }) else {
-        return .invalidUser("expected NAME, UID, NAME:GID, or UID:GID")
-    }
-    return nil
+func isValidContainerMountPath(_ path: String) -> Bool {
+    let components = path.split(separator: "/", omittingEmptySubsequences: true)
+    return path.hasPrefix("/") && path != "/" && !path.contains("\0")
+        && !components.contains(where: { $0 == "." || $0 == ".." })
 }
 
-func parseMemory(_ text: String) -> Result<UInt64, ParseError> {
-    let lower = text.lowercased()
-    let digits = lower.prefix(while: { $0.isNumber })
-    guard !digits.isEmpty, let value = UInt64(digits), value > 0 else {
-        return .failure(.invalidMemory("expected a positive size such as 512m or 2g"))
+private func parseIOProxyArguments(_ arguments: [String]) -> Result<CLIOptions, ParseError> {
+    guard arguments.count >= 2 else {
+        return .failure(.invalidDirect("resource '\(arguments[0])' requires an operation"))
     }
-    let suffix = lower.dropFirst(digits.count)
-    let multiplier: UInt64
-    switch suffix {
-    case "", "b": multiplier = 1
-    case "k", "kb", "kib": multiplier = 1024
-    case "m", "mb", "mib": multiplier = 1024 * 1024
-    case "g", "gb", "gib": multiplier = 1024 * 1024 * 1024
-    case "t", "tb", "tib": multiplier = 1024 * 1024 * 1024 * 1024
-    default: return .failure(.invalidMemory("unsupported size suffix"))
+    let resource = arguments[0]
+    let referenceKind = resource
+    let isReference = arguments[1].hasPrefix("@")
+    let operationIndex = isReference ? 2 : 1
+    guard arguments.indices.contains(operationIndex) else {
+        return .failure(.invalidDirect("reference command for '\(resource)' requires an operation"))
     }
-    let result = value.multipliedReportingOverflow(by: multiplier)
-    guard !result.overflow else { return .failure(.invalidMemory("size is too large")) }
-    return .success(result.partialValue)
-}
+    let operation = arguments[operationIndex]
 
-func validateImage(_ image: String) -> ParseError? {
-    if image.isEmpty { return .invalidImage("image name is empty") }
-    if image.contains("\0") { return .invalidImage("image name contains NUL byte") }
-    if image.hasPrefix("-") { return .invalidImage("image name must not start with '-'") }
-    if image.utf8.count > kMaxImageBytes { return .invalidImage("image name exceeds \(kMaxImageBytes) bytes") }
-    if image.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || CharacterSet.controlCharacters.contains($0) }) {
-        return .invalidImage("image name must not contain whitespace or control characters")
+    func invocation(_ method: GhostboxDirectMethod, _ parameters: [String: GhostboxJSONValue]) -> CLIOptions {
+        CLIOptions(action: .direct(.init(method: method, parameters: parameters)))
     }
-    return nil
-}
 
-func validateCommandArg(_ argument: String) -> String? {
-    if argument.contains("\0") { return "contains NUL byte" }
-    if argument.utf8.count > kMaxCommandArgBytes { return "exceeds \(kMaxCommandArgBytes) bytes" }
-    return nil
-}
+    if !isReference, operation == "create" {
+        guard arguments.count >= 3 else {
+            return .failure(.invalidDirect("missing required positional name"))
+        }
+        let name = arguments[2]
+        guard isValidReferenceComponent(name) else {
+            return .failure(.invalidDirect("name must contain only letters, digits, '.', '_', or '-' and be at most 128 bytes"))
+        }
+        if resource == "terminal" {
+            var width: UInt16 = 80
+            var height: UInt16 = 24
+            for argument in arguments.dropFirst(3) {
+                if argument.hasPrefix("--width="), let value = UInt16(argument.dropFirst("--width=".count)), value > 0 {
+                    width = value
+                } else if argument.hasPrefix("--height="), let value = UInt16(argument.dropFirst("--height=".count)), value > 0 {
+                    height = value
+                } else {
+                    return .failure(.invalidDirect("terminal create accepts --width=N and --height=N"))
+                }
+            }
+            return .success(invocation(.terminalCreateProxy, [
+                "terminal": .string(name), "width": .unsignedInteger(UInt64(width)),
+                "height": .unsignedInteger(UInt64(height)),
+            ]))
+        }
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for \(resource) create"))
+        }
+        let method: GhostboxDirectMethod = resource == "reader-stream" ? .readerStreamCreateProxy : .writerCreateProxy
+        let parameter = resource == "reader-stream" ? "readerStream" : "writer"
+        return .success(invocation(method, [parameter: .string(name)]))
+    }
 
-private func isEnvironmentName(_ name: String) -> Bool {
-    guard let first = name.utf8.first, first == 95 || (65...90).contains(first) || (97...122).contains(first) else { return false }
-    return name.utf8.dropFirst().allSatisfy { $0 == 95 || (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) }
-}
-
-private func isIPv4Address(_ address: String) -> Bool {
-    let octets = address.split(separator: ".", omittingEmptySubsequences: false)
-    return octets.count == 4 && octets.allSatisfy { octet in
-        !octet.isEmpty && octet.allSatisfy(\.isNumber) && UInt8(octet) != nil
+    guard isReference, isValidReference(arguments[1], expectedKind: referenceKind) else {
+        return .failure(.invalidDirect("expected @\(referenceKind)/NAME reference and one operation"))
+    }
+    let reference = GhostboxJSONValue.string(arguments[1])
+    let parameter = resource == "reader-stream" ? "readerStream" : resource
+    switch (resource, operation) {
+    case ("reader-stream", "attach"):
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for reader-stream attach"))
+        }
+        return .success(CLIOptions(action: .attach(.init(
+            method: .readerStreamAttachProxy, parameters: [parameter: reference]
+        ), .input)))
+    case ("reader-stream", "close"):
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for reader-stream close"))
+        }
+        return .success(invocation(.readerStreamCloseProxy, [parameter: reference]))
+    case ("writer", "attach"):
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for writer attach"))
+        }
+        return .success(CLIOptions(action: .attach(.init(
+            method: .writerAttachProxy, parameters: [parameter: reference]
+        ), .output)))
+    case ("writer", "close"):
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for writer close"))
+        }
+        return .success(invocation(.writerCloseProxy, [parameter: reference]))
+    case ("terminal", "attach"):
+        var parameters = [parameter: reference]
+        if arguments.count > 3 {
+            let target: String
+            if arguments.count == 4, arguments[3].hasPrefix("--resize-target=") {
+                target = String(arguments[3].dropFirst("--resize-target=".count))
+            } else if arguments.count == 5, arguments[3] == "--resize-target" {
+                target = arguments[4]
+            } else {
+                return .failure(.invalidDirect("terminal attach accepts --resize-target @container/NAME or @process/NAME"))
+            }
+            guard isValidReference(target, expectedKind: "container")
+                    || isValidReference(target, expectedKind: "process") else {
+                return .failure(.invalidDirect("--resize-target must be an @container/NAME or @process/NAME reference"))
+            }
+            parameters["resizeTarget"] = .string(target)
+        }
+        return .success(CLIOptions(action: .attach(.init(
+            method: .terminalAttachProxy, parameters: parameters
+        ), .terminal)))
+    case ("terminal", "wait-attached"):
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for terminal wait-attached"))
+        }
+        return .success(invocation(.terminalWaitAttachedProxy, [parameter: reference]))
+    case ("terminal", "close"):
+        guard arguments.count == 3 else {
+            return .failure(.invalidDirect("too many arguments for terminal close"))
+        }
+        return .success(invocation(.terminalCloseProxy, [parameter: reference]))
+    default:
+        return .failure(.invalidDirect("unsupported reference operation '\(operation)' for resource '\(resource)'"))
     }
 }

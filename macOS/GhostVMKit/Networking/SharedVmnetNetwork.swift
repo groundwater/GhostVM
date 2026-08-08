@@ -121,17 +121,18 @@ public final class SharedVmnetNetwork: @unchecked Sendable {
                 throw SharedVmnetError.networkCreationFailed(status)
             }
 
-            let subnetString = "192.168.\(octet).0"
             let gatewayString = "192.168.\(octet).1"
             let vmAddressString = "192.168.\(octet).2"
-            var subnetAddress = in_addr()
+            var gatewayAddress = in_addr()
             var mask = in_addr()
             var vmAddress = in_addr()
-            _ = subnetString.withCString { inet_pton(AF_INET, $0, &subnetAddress) }
+            _ = gatewayString.withCString { inet_pton(AF_INET, $0, &gatewayAddress) }
             _ = "255.255.255.0".withCString { inet_pton(AF_INET, $0, &mask) }
             _ = vmAddressString.withCString { inet_pton(AF_INET, $0, &vmAddress) }
 
-            let subnetStatus = vmnet_network_configuration_set_ipv4_subnet(configuration, &subnetAddress, &mask)
+            // Despite its parameter name, vmnet expects the first host address,
+            // which becomes the shared-mode gateway, rather than the network address.
+            let subnetStatus = vmnet_network_configuration_set_ipv4_subnet(configuration, &gatewayAddress, &mask)
             var mac = ether_addr(octet: (
                 vmMACAddress[0], vmMACAddress[1], vmMACAddress[2],
                 vmMACAddress[3], vmMACAddress[4], vmMACAddress[5]
@@ -151,8 +152,8 @@ public final class SharedVmnetNetwork: @unchecked Sendable {
                     subnet: subnet,
                     mask: maskValue,
                     prefixLength: UInt64(maskValue.nonzeroBitCount),
-                    subnetString: subnetString,
-                    gateway: gatewayString
+                    subnetString: SharedVmnetIPv4Pool.string(for: subnet),
+                    gateway: SharedVmnetIPv4Pool.string(for: subnet + 1)
                 )
             }
 

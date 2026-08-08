@@ -1,232 +1,500 @@
 import Darwin
 import Foundation
+import Network
+
+private let forwardingDiagnosticsEnabled =
+    ProcessInfo.processInfo.environment["GHOSTBOX_FORWARD_DIAGNOSTICS"] == "1"
+
+private func forwardingDiagnostic(_ message: @autoclosure () -> String) {
+    guard forwardingDiagnosticsEnabled else { return }
+    let formatter = ISO8601DateFormatter()
+    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    writeStderr("ghostbox: forward-diagnostic timestamp=\(formatter.string(from: Date())) \(message())\n")
+}
+
+struct PublishedPort: Equatable, Sendable {
+    let hostAddress: String
+    let hostPort: UInt16
+    let containerPort: UInt16
+}
 
 enum PortForwardError: Error, LocalizedError {
     case invalidAddress(String)
+    case network(operation: String, description: String)
     case socket(operation: String, code: Int32)
 
     var errorDescription: String? {
         switch self {
         case .invalidAddress(let address):
             return "invalid IPv4 address \(address)"
+        case .network(let operation, let description):
+            return "\(operation) failed: \(description)"
         case .socket(let operation, let code):
             return "\(operation) failed: errno \(code) (\(String(cString: strerror(code))))"
         }
     }
 }
 
+func parsePublishedPort(_ specification: String) -> Result<PublishedPort, ParseError> {
+    let protocolParts = specification.split(separator: "/", omittingEmptySubsequences: false)
+    guard protocolParts.count <= 2 else {
+        return .failure(.invalidDirect("invalid published port: invalid protocol suffix"))
+    }
+    if protocolParts.count == 2, protocolParts[1].lowercased() != "tcp" {
+        return .failure(.invalidDirect("invalid published port: only TCP is supported"))
+    }
+    let fields = protocolParts[0].split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+    guard fields.count == 2 || fields.count == 3 else {
+        return .failure(.invalidDirect("invalid published port: expected [HOST_IP:]HOST_PORT:CONTAINER_PORT[/tcp]"))
+    }
+    let hostAddress = fields.count == 3 ? fields[0] : "127.0.0.1"
+    let hostPortText = fields.count == 3 ? fields[1] : fields[0]
+    let containerPortText = fields.count == 3 ? fields[2] : fields[1]
+    var address = in_addr()
+    guard hostAddress.withCString({ inet_pton(AF_INET, $0, &address) }) == 1 else {
+        return .failure(.invalidDirect("invalid published port: host address must be an IPv4 address"))
+    }
+    guard let hostPort = UInt16(hostPortText), hostPort > 0 else {
+        return .failure(.invalidDirect("invalid published port: host port must be between 1 and 65535"))
+    }
+    guard let containerPort = UInt16(containerPortText), containerPort > 0 else {
+        return .failure(.invalidDirect("invalid published port: container port must be between 1 and 65535"))
+    }
+    return .success(PublishedPort(hostAddress: hostAddress, hostPort: hostPort, containerPort: containerPort))
+}
+
 final class PublishedPortForwarder: @unchecked Sendable {
     private let publication: PublishedPort
     private let queue: DispatchQueue
+    private let listener: NWListener
+    private let listenerTermination = ListenerTermination()
     private let lock = NSLock()
-    private var listenerFD: Int32
     private var started = false
-    private var relays: [UUID: TCPRelay] = [:]
+    private var stopped = false
+    private var targetAddress: String?
+    private var pendingConnections: [(id: UUID, connection: NWConnection)] = []
+    private var relays: [UUID: NetworkRelay] = [:]
+    private var onFailure: (@Sendable (Error) -> Void)?
+    private var listenerFailure: Error?
 
-    init(_ publication: PublishedPort) throws {
+    init(_ publication: PublishedPort) async throws {
         self.publication = publication
-        self.queue = DispatchQueue(label: "org.ghostvm.ghostbox.publish.\(publication.hostPort)", qos: .userInitiated)
-        self.listenerFD = try Self.openListener(address: publication.hostAddress, port: publication.hostPort)
-    }
-
-    func start(targetAddress: String) {
-        lock.lock()
-        guard !started, listenerFD >= 0 else {
-            lock.unlock()
-            return
+        queue = DispatchQueue(label: "org.ghostvm.ghostbox.publish.\(publication.hostPort)", qos: .userInitiated)
+        guard let address = IPv4Address(publication.hostAddress),
+              let port = NWEndpoint.Port(rawValue: publication.hostPort) else {
+            throw PortForwardError.invalidAddress(publication.hostAddress)
         }
-        started = true
-        lock.unlock()
 
-        queue.async { [self] in
-            acceptConnections(targetAddress: targetAddress)
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
+        parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(address), port: port)
+        do {
+            listener = try NWListener(using: parameters)
+        } catch let error as NWError {
+            throw Self.forwardError(operation: "listen", error: error)
         }
-    }
 
-    func stop() {
-        lock.lock()
-        let fd = listenerFD
-        listenerFD = -1
-        let active = Array(relays.values)
-        relays.removeAll()
-        lock.unlock()
-
-        if fd >= 0 {
-            _ = Darwin.shutdown(fd, SHUT_RDWR)
-            Darwin.close(fd)
+        let startup = ListenerStartup()
+        let listenerTermination = self.listenerTermination
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .ready:
+                startup.complete(.success(()))
+            case .failed(let error):
+                startup.complete(.failure(Self.forwardError(operation: "listen", error: error)))
+                listenerTermination.complete()
+                self?.listenerFailed(error)
+            case .cancelled:
+                startup.complete(.failure(PortForwardError.network(operation: "listen", description: "cancelled")))
+                listenerTermination.complete()
+            default:
+                break
+            }
         }
-        active.forEach { $0.stop() }
-    }
-
-    deinit {
-        stop()
-    }
-
-    private func acceptConnections(targetAddress: String) {
-        while true {
-            lock.lock()
-            let fd = listenerFD
-            lock.unlock()
-            guard fd >= 0 else { return }
-
-            let clientFD = Darwin.accept(fd, nil, nil)
-            if clientFD < 0 {
-                if errno == EINTR { continue }
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else {
+                connection.cancel()
                 return
             }
-            do {
-                let targetFD = try Self.connect(address: targetAddress, port: publication.containerPort)
-                let id = UUID()
-                let relay = TCPRelay(clientFD: clientFD, targetFD: targetFD)
-                lock.lock()
-                relays[id] = relay
-                lock.unlock()
-                relay.start { [weak self] in
-                    self?.removeRelay(id)
-                }
-            } catch {
-                Darwin.close(clientFD)
-                writeStderr("ghostbox: port \(publication.hostPort) forwarding failed: \(error.localizedDescription)\n")
-            }
+            self.accept(connection)
         }
+        listener.start(queue: queue)
+        queue.asyncAfter(deadline: .now() + 5) {
+            startup.complete(.failure(PortForwardError.network(operation: "listen", description: "timed out")))
+        }
+
+        switch await startup.wait() {
+        case .success:
+            break
+        case .failure(let error):
+            listener.cancel()
+            await listenerTermination.wait()
+            throw error
+        }
+    }
+
+    func start(
+        targetAddress: String,
+        onFailure: @escaping @Sendable (Error) -> Void = { _ in }
+    ) {
+        let (pending, failure): ([(id: UUID, connection: NWConnection)], Error?) = lock.withLock {
+            guard !started else { return ([], nil) }
+            started = true
+            guard !stopped else { return ([], listenerFailure) }
+            self.targetAddress = targetAddress
+            self.onFailure = onFailure
+            defer { pendingConnections.removeAll() }
+            return (pendingConnections, nil)
+        }
+        forwardingDiagnostic(
+            "event=start connectionID=- targetAddress=\(targetAddress) pendingConnections.count=\(pending.count)"
+        )
+        if let failure {
+            onFailure(failure)
+            return
+        }
+        pending.forEach { forward($0.connection, connectionID: $0.id, targetAddress: targetAddress) }
+    }
+
+    func stop() async {
+        let active = cancel()
+        await listenerTermination.wait()
+        for relay in active { await relay.waitUntilStopped() }
+    }
+
+    deinit { _ = cancel() }
+
+    private func cancel() -> [NetworkRelay] {
+        let (active, shouldCancel): ([NetworkRelay], Bool) = lock.withLock {
+            let active = Array(relays.values)
+            guard !stopped else { return (active, false) }
+            stopped = true
+            pendingConnections.forEach { $0.connection.cancel() }
+            pendingConnections.removeAll()
+            return (active, true)
+        }
+        if shouldCancel { listener.cancel() }
+        active.forEach { $0.cancel() }
+        return active
+    }
+
+    private func accept(_ connection: NWConnection) {
+        let connectionID = UUID()
+        let state = lock.withLock { () -> (target: String?, pendingCount: Int, stopped: Bool) in
+            guard !stopped else { return (nil, pendingConnections.count, true) }
+            guard let targetAddress else {
+                pendingConnections.append((connectionID, connection))
+                return (nil, pendingConnections.count, false)
+            }
+            return (targetAddress, pendingConnections.count, false)
+        }
+        forwardingDiagnostic(
+            "event=accept connectionID=\(connectionID) targetAddress=\(state.target ?? "nil") "
+                + "pendingConnections.count=\(state.pendingCount) stopped=\(state.stopped)"
+        )
+        if let target = state.target {
+            forward(connection, connectionID: connectionID, targetAddress: target)
+        } else if state.stopped {
+            connection.cancel()
+        }
+    }
+
+    private func forward(_ connection: NWConnection, connectionID: UUID, targetAddress: String) {
+        forwardingDiagnostic(
+            "event=forward connectionID=\(connectionID) targetAddress=\(targetAddress) "
+                + "pendingConnections.count=\(lock.withLock { pendingConnections.count })"
+        )
+        guard let address = IPv4Address(targetAddress),
+              let port = NWEndpoint.Port(rawValue: publication.containerPort) else {
+            connection.cancel()
+            writeStderr("ghostbox: port \(publication.hostPort) forwarding failed: invalid IPv4 address \(targetAddress)\n")
+            return
+        }
+        let relay = NetworkRelay(
+            connectionID: connectionID,
+            targetAddress: targetAddress,
+            client: connection,
+            target: NWConnection(host: .ipv4(address), port: port, using: .tcp),
+            queue: DispatchQueue(label: "org.ghostvm.ghostbox.relay.\(connectionID)", qos: .userInitiated),
+            onTargetFailure: { [publication] error in
+                writeStderr("ghostbox: port \(publication.hostPort) forwarding failed: \(error.localizedDescription)\n")
+            },
+            completion: { [weak self] in self?.removeRelay(connectionID) }
+        )
+        let shouldStart = lock.withLock {
+            guard !stopped else { return false }
+            relays[connectionID] = relay
+            return true
+        }
+        guard shouldStart else {
+            relay.cancelBeforeStart()
+            return
+        }
+        relay.start()
     }
 
     private func removeRelay(_ id: UUID) {
-        lock.lock()
-        relays.removeValue(forKey: id)
-        lock.unlock()
+        lock.withLock { _ = relays.removeValue(forKey: id) }
     }
 
-    private static func openListener(address: String, port: UInt16) throws -> Int32 {
-        let fd = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-        guard fd >= 0 else { throw PortForwardError.socket(operation: "socket", code: errno) }
-        do {
-            var enabled: Int32 = 1
-            guard setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, socklen_t(MemoryLayout.size(ofValue: enabled))) == 0 else {
-                throw PortForwardError.socket(operation: "setsockopt", code: errno)
-            }
-            var socketAddress = try ipv4SocketAddress(address: address, port: port)
-            let bindResult = withUnsafePointer(to: &socketAddress) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            guard bindResult == 0 else { throw PortForwardError.socket(operation: "bind", code: errno) }
-            guard Darwin.listen(fd, 128) == 0 else { throw PortForwardError.socket(operation: "listen", code: errno) }
-            return fd
-        } catch {
-            Darwin.close(fd)
-            throw error
+    private func listenerFailed(_ error: NWError) {
+        let failure = Self.forwardError(operation: "accept", error: error)
+        let (active, callback): ([NetworkRelay], (@Sendable (Error) -> Void)?) = lock.withLock {
+            guard !stopped else { return ([], nil) }
+            stopped = true
+            listenerFailure = failure
+            let active = Array(relays.values)
+            pendingConnections.forEach { $0.connection.cancel() }
+            pendingConnections.removeAll()
+            return (active, started ? onFailure : nil)
         }
+        listener.cancel()
+        active.forEach { $0.cancel() }
+        callback?(failure)
     }
 
-    private static func connect(address: String, port: UInt16) throws -> Int32 {
-        let fd = Darwin.socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-        guard fd >= 0 else { throw PortForwardError.socket(operation: "socket", code: errno) }
-        do {
-            var socketAddress = try ipv4SocketAddress(address: address, port: port)
-            let result = withUnsafePointer(to: &socketAddress) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                    Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-                }
-            }
-            guard result == 0 else { throw PortForwardError.socket(operation: "connect", code: errno) }
-            return fd
-        } catch {
-            Darwin.close(fd)
-            throw error
+    fileprivate static func forwardError(operation: String, error: NWError) -> PortForwardError {
+        if case .posix(let code) = error {
+            return .socket(operation: operation, code: code.rawValue)
         }
-    }
-
-    private static func ipv4SocketAddress(address: String, port: UInt16) throws -> sockaddr_in {
-        var socketAddress = sockaddr_in()
-        socketAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        socketAddress.sin_family = sa_family_t(AF_INET)
-        socketAddress.sin_port = port.bigEndian
-        guard address.withCString({ inet_pton(AF_INET, $0, &socketAddress.sin_addr) }) == 1 else {
-            throw PortForwardError.invalidAddress(address)
-        }
-        return socketAddress
+        return .network(operation: operation, description: String(describing: error))
     }
 }
 
-private final class TCPRelay: @unchecked Sendable {
-    private let clientFD: Int32
-    private let targetFD: Int32
+private final class ListenerStartup: @unchecked Sendable {
     private let lock = NSLock()
-    private var remainingPumps = 2
-    private var closed = false
-    private var completion: (@Sendable () -> Void)?
+    private var result: Result<Void, Error>?
+    private var continuation: CheckedContinuation<Result<Void, Error>, Never>?
 
-    init(clientFD: Int32, targetFD: Int32) {
-        self.clientFD = clientFD
-        self.targetFD = targetFD
-    }
-
-    func start(completion: @escaping @Sendable () -> Void) {
-        lock.lock()
-        self.completion = completion
-        lock.unlock()
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            pump(from: clientFD, to: targetFD)
+    func complete(_ result: Result<Void, Error>) {
+        let continuation: CheckedContinuation<Result<Void, Error>, Never>? = lock.withLock {
+            guard self.result == nil else { return nil }
+            self.result = result
+            defer { self.continuation = nil }
+            return self.continuation
         }
-        DispatchQueue.global(qos: .userInitiated).async { [self] in
-            pump(from: targetFD, to: clientFD)
-        }
+        continuation?.resume(returning: result)
     }
 
-    func stop() {
-        _ = Darwin.shutdown(clientFD, SHUT_RDWR)
-        _ = Darwin.shutdown(targetFD, SHUT_RDWR)
-    }
-
-    private func pump(from input: Int32, to output: Int32) {
-        var buffer = [UInt8](repeating: 0, count: 32 * 1024)
-        while true {
-            let count = Darwin.read(input, &buffer, buffer.count)
-            if count > 0 {
-                guard writeAll(fd: output, bytes: buffer, count: count) else { break }
-                continue
+    func wait() async -> Result<Void, Error> {
+        await withCheckedContinuation { continuation in
+            let result = lock.withLock { () -> Result<Void, Error>? in
+                if let result = self.result { return result }
+                self.continuation = continuation
+                return nil
             }
-            if count < 0, errno == EINTR { continue }
+            if let result { continuation.resume(returning: result) }
+        }
+    }
+}
+
+private final class ListenerTermination: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completed = false
+    private var continuations: [CheckedContinuation<Void, Never>] = []
+
+    func complete() {
+        let continuations: [CheckedContinuation<Void, Never>] = lock.withLock {
+            guard !completed else { return [] }
+            completed = true
+            defer { self.continuations.removeAll() }
+            return self.continuations
+        }
+        continuations.forEach { $0.resume() }
+    }
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let completed = lock.withLock {
+                guard !self.completed else { return true }
+                continuations.append(continuation)
+                return false
+            }
+            if completed { continuation.resume() }
+        }
+    }
+}
+
+private final class NetworkRelay: @unchecked Sendable {
+    private let connectionID: UUID
+    private let targetAddress: String
+    private let client: NWConnection
+    private let target: NWConnection
+    private let queue: DispatchQueue
+    private let onTargetFailure: @Sendable (Error) -> Void
+    private let completion: @Sendable () -> Void
+    private let termination = ListenerTermination()
+    private var clientReady = false
+    private var targetReady = false
+    private var pumpsStarted = false
+    private var clientPumpFinished = false
+    private var targetPumpFinished = false
+    private var clientTerminalState = false
+    private var targetTerminalState = false
+    private var started = false
+    private var closed = false
+    private var reportedTargetFailure = false
+
+    init(
+        connectionID: UUID,
+        targetAddress: String,
+        client: NWConnection,
+        target: NWConnection,
+        queue: DispatchQueue,
+        onTargetFailure: @escaping @Sendable (Error) -> Void,
+        completion: @escaping @Sendable () -> Void
+    ) {
+        self.connectionID = connectionID
+        self.targetAddress = targetAddress
+        self.client = client
+        self.target = target
+        self.queue = queue
+        self.onTargetFailure = onTargetFailure
+        self.completion = completion
+    }
+
+    func start() {
+        queue.async { [self] in
+            guard !started, !closed else { return }
+            started = true
+            client.stateUpdateHandler = { [weak self] state in self?.connectionStateChanged(state, isTarget: false) }
+            target.stateUpdateHandler = { [weak self] state in self?.connectionStateChanged(state, isTarget: true) }
+            client.start(queue: queue)
+            target.start(queue: queue)
+        }
+    }
+
+    func cancel() {
+        queue.async { [self] in
+            close()
+        }
+    }
+
+    func cancelBeforeStart() {
+        close()
+    }
+
+    func waitUntilStopped() async {
+        await termination.wait()
+    }
+
+    private func connectionStateChanged(_ state: NWConnection.State, isTarget: Bool) {
+        guard !closed else { return }
+        let (stateName, errorDescription): (String, String) = switch state {
+        case .setup: ("setup", "nil")
+        case .preparing: ("preparing", "nil")
+        case .ready: ("ready", "nil")
+        case .waiting(let error): ("waiting", String(describing: error))
+        case .failed(let error): ("failed", String(describing: error))
+        case .cancelled: ("cancelled", "nil")
+        @unknown default: (String(describing: state), "nil")
+        }
+        forwardingDiagnostic(
+            "event=state connectionID=\(connectionID) targetAddress=\(targetAddress) isTarget=\(isTarget) "
+                + "state=\(stateName) error=\(errorDescription)"
+        )
+        switch state {
+        case .ready:
+            if isTarget { targetReady = true } else { clientReady = true }
+            startPumpsIfReady()
+        case .waiting(let error), .failed(let error):
+            if !pumpsStarted {
+                if isTarget, !targetReady, !reportedTargetFailure {
+                    reportedTargetFailure = true
+                    onTargetFailure(PublishedPortForwarder.forwardError(operation: "connect", error: error))
+                }
+                close()
+            } else if case .failed = state {
+                terminalStateChanged(isTarget: isTarget)
+            }
+        case .cancelled:
+            if !pumpsStarted {
+                close()
+            } else {
+                terminalStateChanged(isTarget: isTarget)
+            }
+        default:
             break
         }
-        _ = Darwin.shutdown(output, SHUT_WR)
-        finishPump()
     }
 
-    private func finishPump() {
-        lock.lock()
-        remainingPumps -= 1
-        guard remainingPumps == 0, !closed else {
-            lock.unlock()
-            return
-        }
-        closed = true
-        let completion = self.completion
-        self.completion = nil
-        lock.unlock()
-
-        Darwin.close(clientFD)
-        Darwin.close(targetFD)
-        completion?()
+    private func startPumpsIfReady() {
+        forwardingDiagnostic(
+            "event=pump-check connectionID=\(connectionID) targetAddress=\(targetAddress) isTarget=- "
+                + "clientReady=\(clientReady) targetReady=\(targetReady) pumpsStarted=\(pumpsStarted)"
+        )
+        guard clientReady, targetReady, !pumpsStarted else { return }
+        pumpsStarted = true
+        forwardingDiagnostic(
+            "event=pump-started connectionID=\(connectionID) targetAddress=\(targetAddress) isTarget=-"
+        )
+        receive(from: client, sendTo: target, inputIsTarget: false)
+        receive(from: target, sendTo: client, inputIsTarget: true)
     }
 
-    private func writeAll(fd: Int32, bytes: [UInt8], count: Int) -> Bool {
-        bytes.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress else { return true }
-            var offset = 0
-            while offset < count {
-                let written = Darwin.write(fd, base.advanced(by: offset), count - offset)
-                if written > 0 {
-                    offset += written
-                } else if written < 0, errno == EINTR {
-                    continue
-                } else {
-                    return false
+    private func receive(from input: NWConnection, sendTo output: NWConnection, inputIsTarget: Bool) {
+        input.receive(minimumIncompleteLength: 1, maximumLength: 32 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self, !closed else { return }
+            if isComplete {
+                output.send(
+                    content: data,
+                    contentContext: .finalMessage,
+                    isComplete: true,
+                    completion: .contentProcessed { [weak self] error in
+                        guard let self, !closed else { return }
+                        if error == nil { finishPump(isTarget: inputIsTarget) } else { close() }
+                    }
+                )
+            } else if error != nil {
+                guard let data, !data.isEmpty else {
+                    close()
+                    return
                 }
+                output.send(content: data, completion: .contentProcessed { [weak self] _ in self?.close() })
+            } else if let data, !data.isEmpty {
+                output.send(content: data, completion: .contentProcessed { [weak self] error in
+                    guard let self, !closed else { return }
+                    if error == nil {
+                        receive(from: input, sendTo: output, inputIsTarget: inputIsTarget)
+                    } else {
+                        close()
+                    }
+                })
+            } else {
+                receive(from: input, sendTo: output, inputIsTarget: inputIsTarget)
             }
-            return true
         }
+    }
+
+    private func terminalStateChanged(isTarget: Bool) {
+        if isTarget {
+            targetTerminalState = true
+            if targetPumpFinished { close() }
+        } else {
+            clientTerminalState = true
+            if clientPumpFinished { close() }
+        }
+    }
+
+    private func finishPump(isTarget: Bool) {
+        if isTarget {
+            targetPumpFinished = true
+            if targetTerminalState { close() }
+        } else {
+            clientPumpFinished = true
+            if clientTerminalState { close() }
+        }
+        if clientPumpFinished, targetPumpFinished { close() }
+    }
+
+    private func close() {
+        guard !closed else { return }
+        closed = true
+        client.stateUpdateHandler = nil
+        target.stateUpdateHandler = nil
+        client.cancel()
+        target.cancel()
+        completion()
+        termination.complete()
     }
 }

@@ -6,7 +6,7 @@ import ContainerizationOCI
 import CryptoKit
 import Foundation
 
-private let initfsReference = "ghcr.io/apple/containerization/vminit:0.40.1"
+private let initfsReference = "ghcr.io/apple/containerization/vminit@sha256:a69ff331d77997042afc3c7389969be176dfb657ec9ed46366c0e057ec40a297"
 
 private func writeStatus(_ message: String) {
     try? FileHandle.standardError.write(contentsOf: Data("ghostvm-image-fetch: \(message)\n".utf8))

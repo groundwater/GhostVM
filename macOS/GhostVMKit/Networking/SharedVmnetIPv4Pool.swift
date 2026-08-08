@@ -21,10 +21,14 @@ public struct SharedVmnetIPv4Pool {
     public mutating func allocate(endpointIdentifier: String) throws -> UInt32 {
         if let existing = allocations[endpointIdentifier] { return existing }
         let broadcast = subnet | ~mask
-        guard broadcast > subnet + 3 else { throw SharedVmnetIPv4PoolError.exhausted }
+        let span = broadcast - subnet
+        guard span > 3 else { throw SharedVmnetIPv4PoolError.exhausted }
 
         let used = Set(allocations.values)
-        for address in (subnet + 3)..<broadcast where !used.contains(address) {
+        // The upper half is reserved for direct Ghostbox container sessions,
+        // whose allocator lives in the runtime XPC process.
+        let upperBound = subnet + (span / 2) + (span % 2)
+        for address in (subnet + 3)..<upperBound where !used.contains(address) {
             allocations[endpointIdentifier] = address
             return address
         }
@@ -37,5 +41,15 @@ public struct SharedVmnetIPv4Pool {
 
     public static func string(for address: UInt32) -> String {
         "\((address >> 24) & 0xff).\((address >> 16) & 0xff).\((address >> 8) & 0xff).\(address & 0xff)"
+    }
+
+    public static func macAddress(for address: UInt32) -> String {
+        String(
+            format: "02:00:%02x:%02x:%02x:%02x",
+            (address >> 24) & 0xff,
+            (address >> 16) & 0xff,
+            (address >> 8) & 0xff,
+            address & 0xff
+        )
     }
 }

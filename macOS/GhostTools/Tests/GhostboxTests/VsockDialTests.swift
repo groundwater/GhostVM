@@ -66,36 +66,4 @@ final class VsockDialTests: XCTestCase {
         XCTAssertTrue(writeBytes(fd: fdA, [0x68, 0x69]))
     }
 
-    func testForwardStdinHalfClosesOnlyWriteSide() throws {
-        let (fdA, fdB) = try makeSocketPair()
-        defer {
-            Darwin.close(fdA)
-            Darwin.close(fdB)
-        }
-        let input = Pipe()
-        try input.fileHandleForWriting.write(contentsOf: Data("hello".utf8))
-        try input.fileHandleForWriting.close()
-
-        let writer = ContainerInputWriter(fd: fdA)
-        forwardStdin(
-            inputFD: input.fileHandleForReading.fileDescriptor,
-            writer: writer,
-            keepWriteSideOpen: false
-        )
-
-        let reader = LineReader(fd: fdB, maxLineBytes: 64 * 1024)
-        let stdinLine = try XCTUnwrap(reader.readLine())
-        let closeLine = try XCTUnwrap(reader.readLine())
-        let stdinFrame = try JSONDecoder().decode(HostContainerInputFrame.self, from: stdinLine)
-        let closeFrame = try JSONDecoder().decode(HostContainerInputFrame.self, from: closeLine)
-        XCTAssertEqual(stdinFrame.type, .stdin)
-        XCTAssertEqual(Data(base64Encoded: try XCTUnwrap(stdinFrame.data)), Data("hello".utf8))
-        XCTAssertEqual(closeFrame.type, .stdinClose)
-        XCTAssertNil(try reader.readLine())
-
-        XCTAssertTrue(writeAll(fd: fdB, Data("response".utf8)))
-        var responseBuffer = [UInt8](repeating: 0, count: 8)
-        XCTAssertEqual(Darwin.read(fdA, &responseBuffer, responseBuffer.count), 8)
-        XCTAssertEqual(Data(responseBuffer), Data("response".utf8))
-    }
 }

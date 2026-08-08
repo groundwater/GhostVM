@@ -1,6 +1,7 @@
 import Foundation
+import GhostFileKit
 
-struct DiscoveredGhostFileShare: Identifiable, Equatable {
+struct DiscoveredGhostFileShare: Identifiable, Hashable, Codable {
     let id: UUID
     let name: String
     let host: String
@@ -9,43 +10,32 @@ struct DiscoveredGhostFileShare: Identifiable, Equatable {
     let transport: String
     let publicKeyPin: String
 
+    var serviceType: String {
+        GhostFileProtocol.bonjourType.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    }
+
     var url: URL? {
         var components = URLComponents()
         components.scheme = GhostFileProtocol.urlScheme
         components.host = host
         components.port = port
         components.path = GhostFileProtocol.shareBasePath(id: id)
-        components.queryItems = [URLQueryItem(name: "tls_pin", value: publicKeyPin)]
+        components.queryItems = [URLQueryItem(
+            name: GhostFileProtocol.publicKeyPinQueryName,
+            value: publicKeyPin
+        )]
         return components.url
     }
 }
 
-struct GhostFileShareRemoval: Equatable {
-    let eventID = UUID()
-    let shareID: UUID
-}
-
-struct GhostFileBonjourLease {
-    // NetService does not expose the TTL of the PTR/SRV records. GhostFile
-    // therefore publishes a short application-level lease in its TXT record
-    // and changes the heartbeat value often enough to refresh that lease.
-    static let advertisedTTL: TimeInterval = 6
-    static let legacyTTL: TimeInterval = 15
-    static let heartbeatInterval = Duration.seconds(2)
-    static let sweepInterval = Duration.seconds(1)
-
-    static func ttl(from txt: [String: Data]) -> TimeInterval {
-        guard let data = txt["ttl"],
-              let string = String(data: data, encoding: .utf8),
-              let seconds = TimeInterval(string),
-              seconds.isFinite else {
-            return legacyTTL
-        }
-        return min(max(seconds, 4), 60)
-    }
-
-    static func isExpired(lastSeen: Date, ttl: TimeInterval, now: Date = Date()) -> Bool {
-        now.timeIntervalSince(lastSeen) >= ttl
+enum GhostFileDiscoveryVisibility {
+    static func visibleShares(
+        from discoveredShares: [DiscoveredGhostFileShare],
+        localShareIDs: Set<UUID>,
+        discoverSelfShares: Bool
+    ) -> [DiscoveredGhostFileShare] {
+        guard !discoverSelfShares else { return discoveredShares }
+        return discoveredShares.filter { !localShareIDs.contains($0.id) }
     }
 }
 
@@ -53,8 +43,6 @@ struct GhostFileBonjourLease {
 final class GhostFileDiscovery: NSObject, ObservableObject {
     @Published private(set) var shares: [DiscoveredGhostFileShare] = []
     @Published private(set) var isSearching = false
-    @Published private(set) var removalEvent: GhostFileShareRemoval?
-
     private let browser = NetServiceBrowser()
     private var services: [ObjectIdentifier: NetService] = [:]
     private var shareIDsByService: [ObjectIdentifier: UUID] = [:]
@@ -104,7 +92,8 @@ final class GhostFileDiscovery: NSObject, ObservableObject {
     }
 
     private func resolved(_ service: NetService, txtData suppliedTXTData: Data? = nil) {
-        guard let hostName = service.hostName,
+        guard isSearching,
+              let hostName = service.hostName,
               let txtData = suppliedTXTData ?? service.txtRecordData() else { return }
         let txt = NetService.dictionary(fromTXTRecord: txtData)
         guard let idData = txt["id"],
@@ -127,9 +116,9 @@ final class GhostFileDiscovery: NSObject, ObservableObject {
         let transport = txt["transport"].flatMap { String(data: $0, encoding: .utf8) } ?? GhostFileProtocol.transport
         let alpn = txt["alpn"].flatMap { String(data: $0, encoding: .utf8) } ?? GhostFileProtocol.alpn
         guard transport == GhostFileProtocol.transport, alpn == GhostFileProtocol.alpn else { return }
-        guard let pinData = txt["tls-pin"],
+        guard let pinData = txt["pk"],
               let publicKeyPin = String(data: pinData, encoding: .utf8),
-              !publicKeyPin.isEmpty else { return }
+              GhostFileProtocol.validPublicKeyPin(publicKeyPin) else { return }
         lastSeenByService[key] = Date()
         ttlByService[key] = GhostFileBonjourLease.ttl(from: txt)
         let host = hostName.hasSuffix(".") ? String(hostName.dropLast()) : hostName
@@ -153,7 +142,6 @@ final class GhostFileDiscovery: NSObject, ObservableObject {
         ttlByService.removeValue(forKey: key)
         guard !shareIDsByService.values.contains(shareID) else { return }
         shares.removeAll { $0.id == shareID }
-        removalEvent = GhostFileShareRemoval(shareID: shareID)
     }
 
     private func expireStaleServices(now: Date = Date()) {
@@ -174,6 +162,7 @@ extension GhostFileDiscovery: NetServiceBrowserDelegate, NetServiceDelegate {
         moreComing: Bool
     ) {
         Task { @MainActor in
+            guard isSearching else { return }
             let key = ObjectIdentifier(service)
             services[key] = service
             service.delegate = self
@@ -188,6 +177,7 @@ extension GhostFileDiscovery: NetServiceBrowserDelegate, NetServiceDelegate {
         moreComing: Bool
     ) {
         Task { @MainActor in
+            guard isSearching else { return }
             let key = ObjectIdentifier(service)
             service.stopMonitoring()
             services.removeValue(forKey: key)
@@ -200,13 +190,17 @@ extension GhostFileDiscovery: NetServiceBrowserDelegate, NetServiceDelegate {
 
     nonisolated func netServiceDidResolveAddress(_ sender: NetService) {
         Task { @MainActor in
+            guard isSearching else { return }
             resolved(sender)
             sender.startMonitoring()
         }
     }
 
     nonisolated func netService(_ sender: NetService, didUpdateTXTRecord data: Data) {
-        Task { @MainActor in resolved(sender, txtData: data) }
+        Task { @MainActor in
+            guard isSearching else { return }
+            resolved(sender, txtData: data)
+        }
     }
 
     nonisolated func netServiceBrowserDidStopSearch(_ browser: NetServiceBrowser) {

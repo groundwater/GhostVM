@@ -2,7 +2,7 @@ import Foundation
 
 /// Protocol for communicating with GhostTools running in the guest VM.
 /// Enables mock injection for testing services that depend on guest communication.
-public protocol GhostClientProtocol {
+public protocol GhostClientProtocol: AnyObject {
     func getClipboard() async throws -> ClipboardGetResponse
     func setClipboard(data: Data, type: String) async throws
     func sendFile(fileURL: URL, relativePath: String?, batchID: String?, isLastInBatch: Bool, permissions: Int?, progressHandler: ((Double) -> Void)?) async throws -> String
@@ -23,6 +23,12 @@ public protocol GhostClientProtocol {
     func listDirectoryMetadata(path: String) async throws -> GuestDirectoryMetadata
     func readFile(path: String, offset: UInt64, length: Int) async throws -> Data
     func readSymbolicLink(path: String) async throws -> String
+    func createFileSystemItem(path: String, type: GuestFileCreateType, mode: UInt32) async throws -> GuestFileMetadata
+    func createSymbolicLink(path: String, destination: String) async throws -> GuestFileMetadata
+    func writeFile(path: String, offset: UInt64, data: Data) async throws -> GuestFileMetadata
+    func setFileAttributes(path: String, attributes: GuestFileAttributes) async throws -> GuestFileMetadata
+    func removeFileSystemItem(path: String) async throws
+    func renameFileSystemItem(path: String, destinationPath: String) async throws -> GuestFileMetadata
     func mkdir(path: String) async throws
     func deleteFile(path: String) async throws
     func moveFile(from: String, to: String) async throws

@@ -19,22 +19,30 @@ final class LineReader {
         self.buffer.reserveCapacity(4096)
     }
 
+    var hasBufferedLine: Bool {
+        buffer.contains(0x0A)
+    }
+
     /// Read the next complete line (without the trailing `\n`).
     /// Returns `nil` on clean EOF before any data.
     /// Throws on line-too-long or read errors.
     func readLine() throws -> Data? {
         while true {
             if let nlIdx = buffer.firstIndex(of: 0x0A) {
+                guard nlIdx <= maxLineBytes else {
+                    throw LineReaderError.lineTooLong(max: maxLineBytes)
+                }
                 let line = Data(buffer[0..<nlIdx])
                 buffer.removeFirst(nlIdx + 1)
                 return line
             }
 
-            if buffer.count >= maxLineBytes {
+            if buffer.count > maxLineBytes {
                 throw LineReaderError.lineTooLong(max: maxLineBytes)
             }
 
-            var chunk = [UInt8](repeating: 0, count: 4096)
+            let readSize = min(4096, maxLineBytes - buffer.count + 1)
+            var chunk = [UInt8](repeating: 0, count: readSize)
             let n = Darwin.read(fd, &chunk, chunk.count)
 
             if n < 0 {

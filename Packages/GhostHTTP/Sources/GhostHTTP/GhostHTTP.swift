@@ -31,12 +31,14 @@ public enum HTTPStatus: Int, Sendable {
     case notFound = 404
     case methodNotAllowed = 405
     case requestTimeout = 408
+    case conflict = 409
     case payloadTooLarge = 413
     case rangeNotSatisfiable = 416
     case headerTooLarge = 431
     case badGateway = 502
     case serviceUnavailable = 503
     case gatewayTimeout = 504
+    case insufficientStorage = 507
     case internalServerError = 500
 
     public var reasonPhrase: String {
@@ -52,12 +54,14 @@ public enum HTTPStatus: Int, Sendable {
         case .notFound: return "Not Found"
         case .methodNotAllowed: return "Method Not Allowed"
         case .requestTimeout: return "Request Timeout"
+        case .conflict: return "Conflict"
         case .payloadTooLarge: return "Payload Too Large"
         case .rangeNotSatisfiable: return "Range Not Satisfiable"
         case .headerTooLarge: return "Request Header Fields Too Large"
         case .badGateway: return "Bad Gateway"
         case .serviceUnavailable: return "Service Unavailable"
         case .gatewayTimeout: return "Gateway Timeout"
+        case .insufficientStorage: return "Insufficient Storage"
         case .internalServerError: return "Internal Server Error"
         }
     }

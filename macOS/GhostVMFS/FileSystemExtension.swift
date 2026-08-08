@@ -1,9 +1,10 @@
 import ExtensionFoundation
 import FSKit
+import GhostFileKit
 
 @main
 struct GhostVMFileSystemExtension: UnaryFileSystemExtension {
-    var fileSystem: GhostVMFileSystem {
-        GhostVMFileSystem()
+    var fileSystem: GhostFileSystem {
+        GhostFileSystem()
     }
 }

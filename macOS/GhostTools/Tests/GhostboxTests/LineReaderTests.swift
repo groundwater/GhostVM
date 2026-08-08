@@ -41,6 +41,20 @@ final class LineReaderTests: XCTestCase {
         XCTAssertEqual(try reader.readLine(), Data("line3".utf8))
     }
 
+    func testReportsBufferedCompleteLine() throws {
+        let (writeFD, readFD) = try makeSocketPair()
+        defer {
+            Darwin.close(readFD)
+            Darwin.close(writeFD)
+        }
+        XCTAssertTrue(writeAll(fd: writeFD, Data("first\nsecond\n".utf8)))
+        let reader = LineReader(fd: readFD)
+        XCTAssertEqual(try reader.readLine(), Data("first".utf8))
+        XCTAssertTrue(reader.hasBufferedLine)
+        XCTAssertEqual(try reader.readLine(), Data("second".utf8))
+        XCTAssertFalse(reader.hasBufferedLine)
+    }
+
     func testReadLineAcrossMultipleReads() throws {
         let (fdA, fdB) = try makeSocketPair()
         defer {
@@ -115,6 +129,31 @@ final class LineReaderTests: XCTestCase {
             XCTAssertEqual(max, 10)
         } catch {
             XCTFail("Expected lineTooLong, got \(error)")
+        }
+    }
+
+    func testAcceptsExactLimitFollowedByNewline() throws {
+        let (writeFD, readFD) = try makeSocketPair()
+        defer {
+            Darwin.close(writeFD)
+            Darwin.close(readFD)
+        }
+        XCTAssertTrue(writeAll(fd: writeFD, Data("0123456789\n".utf8)))
+        XCTAssertEqual(try LineReader(fd: readFD, maxLineBytes: 10).readLine(), Data("0123456789".utf8))
+    }
+
+    func testRejectsOverLimitLineWhenNewlineIsAlreadyBuffered() throws {
+        let (writeFD, readFD) = try makeSocketPair()
+        defer {
+            Darwin.close(writeFD)
+            Darwin.close(readFD)
+        }
+        XCTAssertTrue(writeAll(fd: writeFD, Data("01234567890\n".utf8)))
+        XCTAssertThrowsError(try LineReader(fd: readFD, maxLineBytes: 10).readLine()) { error in
+            guard case LineReaderError.lineTooLong(let max) = error else {
+                return XCTFail("Expected lineTooLong, got \(error)")
+            }
+            XCTAssertEqual(max, 10)
         }
     }
 

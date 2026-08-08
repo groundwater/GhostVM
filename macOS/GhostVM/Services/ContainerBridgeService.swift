@@ -1,4 +1,5 @@
 import Foundation
+import GhostFileKit
 import Virtualization
 import GhostVMKit
 
@@ -6,13 +7,10 @@ import GhostVMKit
 ///
 /// Registered on the VM's VZVirtioSocketDevice. When a guest process connects to
 /// ContainerBridgeConstants.port, the service accepts the connection, reads one
-/// versioned NDJSON request, submits it to the runtime XPC service via
-/// ContainerRunner, and streams NDJSON response frames back. One request per
-/// connection; at most `maxConcurrentConnections` simultaneous connections.
+/// direct API request, submits it to the runtime XPC service, and returns one
+/// direct API response. One request is accepted per connection.
 final class ContainerBridgeService: @unchecked Sendable {
-    /// MVP invariant: one fetch/run chain per VM keeps Containerization's
-    /// process-local image-store locking from becoming a cross-process race.
-    static let maxConcurrentConnections = 1
+    static let maxConcurrentConnections = 32
 
     /// SO_RCVTIMEO/SO_SNDTIMEO applied to accepted sockets: bounds slowloris
     /// request reads and frame writes blocked on a stalled guest. This is not
@@ -27,6 +25,14 @@ final class ContainerBridgeService: @unchecked Sendable {
     private let sharedNetwork: SharedVmnetNetwork
     private let runtimeClient: ContainerRuntimeXPCClient
 
+    private struct PreparedGuestMount: Sendable {
+        let volume: GuestVolumeMount
+        let guestPath: String
+    }
+
+    private let mountLock = NSLock()
+    private var guestMounts = GuestMountRegistry<PreparedGuestMount>()
+
     private let stateLock = NSLock()
     private var listener: VZVirtioSocketListener?
     private var listenerDelegate: BridgeListenerDelegate?
@@ -34,19 +40,21 @@ final class ContainerBridgeService: @unchecked Sendable {
     private var activeCount = 0
     private var connections: [UUID: VZVirtioSocketConnection] = [:]
     private var writers: [UUID: VSockFrameWriter] = [:]
-    private var runners: [UUID: ContainerRunner] = [:]
     private var tasks: [UUID: Task<Void, Never>] = [:]
 
     /// - Parameters:
     ///   - vm: The running virtual machine (accessed only on `vmQueue`).
     ///   - vmQueue: The serial queue the VZVirtualMachine was created with.
     ///   - vmHash: Stable per-VM identifier used in generated container names.
+    ///   - volumeRootURL: Trusted per-VM storage for persistent container volumes.
     ///   - port: Vsock port to listen on.
     init(
         vm: VZVirtualMachine,
         vmQueue: DispatchQueue,
         vmHash: String,
         sharedNetwork: SharedVmnetNetwork,
+        volumeRootURL: URL,
+        imageRootURL: URL,
         fileSystemBridge: GuestFileSystemBridgeService? = nil,
         port: UInt32 = ContainerBridgeConstants.port
     ) {
@@ -56,7 +64,11 @@ final class ContainerBridgeService: @unchecked Sendable {
         self.port = port
         self.fileSystemBridge = fileSystemBridge
         self.sharedNetwork = sharedNetwork
-        self.runtimeClient = ContainerRuntimeXPCClient()
+        self.runtimeClient = ContainerRuntimeXPCClient(
+            sharedNetwork: sharedNetwork,
+            volumeRootURL: volumeRootURL,
+            imageRootURL: imageRootURL
+        )
     }
 
     /// Registers the vsock listener on vmQueue. Safe to call once per VM run.
@@ -77,12 +89,6 @@ final class ContainerBridgeService: @unchecked Sendable {
         self.listener = listener
         self.listenerDelegate = delegate
         stateLock.unlock()
-
-        // Listen even without the CLI so guests get a structured error frame
-        // (executableNotFound) instead of a dead port.
-        if !ContainerRunner.isExecutableAvailable {
-            NSLog("ContainerBridge: %@ is unavailable on this host; bridge will still listen and return structured errors to guest requests", ContainerRunner.executablePath)
-        }
 
         vmQueue.async {
             guard let socketDevice = self.vm.socketDevices.first as? VZVirtioSocketDevice else {
@@ -112,7 +118,6 @@ final class ContainerBridgeService: @unchecked Sendable {
         self.listenerDelegate = nil
         let openTasks = Array(tasks.values)
         let openWriters = Array(writers.values)
-        let activeRunners = Array(runners.values)
         let openConnections = connections
         stateLock.unlock()
 
@@ -130,11 +135,21 @@ final class ContainerBridgeService: @unchecked Sendable {
         for writer in openWriters {
             writer.shutdown()
         }
-        for runner in activeRunners {
-            runner.terminate()
-        }
         runtimeClient.invalidate()
-        NSLog("ContainerBridge: stopped (cancelled %d task(s), terminated %d run(s), signalled %d connection(s))", openTasks.count, activeRunners.count, openConnections.count)
+        let mounted = mountLock.withLock {
+            guestMounts.removeAll()
+        }
+        for record in mounted.reversed() {
+            record.volume.unmount()
+        }
+        if let fileSystemBridge, !mounted.isEmpty {
+            Task { @MainActor in
+                for record in mounted {
+                    fileSystemBridge.unregisterExport(id: record.volume.exportID)
+                }
+            }
+        }
+        NSLog("ContainerBridge: stopped (cancelled %d task(s), signalled %d connection(s))", openTasks.count, openConnections.count)
     }
 
     /// Closes the connection exactly once: the `connections` dictionary entry
@@ -207,252 +222,293 @@ final class ContainerBridgeService: @unchecked Sendable {
             closeConnectionOnce(id: id, connection: connection)
             stateLock.lock()
             writers[id] = nil
-            runners[id] = nil
             tasks[id] = nil
             activeCount -= 1
             stateLock.unlock()
         }
 
-        var mountedVolumes: [GuestVolumeMount] = []
-        var responseVersion = ContainerBridgeConstants.protocolVersion
-        let inputRelay = InputRelayTracker()
+        var requestID = "unknown"
         do {
-            let (line, initialInput) = try await readRequestLine(channel: channel)
-            let request = try ContainerRunRequest.decode(line: line)
-            if (ContainerBridgeConstants.minimumProtocolVersion...ContainerBridgeConstants.protocolVersion).contains(request.version) {
-                responseVersion = request.version
+            let line = try await readRequestLine(channel: channel)
+            requestID = (try? JSONDecoder().decode(GhostboxDirectRequestEnvelope.self, from: line).id) ?? requestID
+            let request = try GhostboxDirectRequest.decode(line: line)
+            requestID = request.id
+            guard request.version == ContainerBridgeConstants.protocolVersion,
+                  request.operation == "direct",
+                  !request.id.isEmpty else {
+                throw ContainerProtocolError.malformedRequest(
+                    "direct operations require protocol version \(ContainerBridgeConstants.protocolVersion) and a nonempty ID"
+                )
             }
-            let run = try ContainerRunPolicy.validate(request)
+            guard GuestMountAccessPolicy.allowsGuestInvocation(request.method.rawValue) else {
+                throw ContainerProtocolError.malformedRequest(
+                    "method '\(request.method.rawValue)' cannot access outer-host paths; use mount guest-share"
+                )
+            }
 
-            mountedVolumes = try await prepareVolumes(run.volumes)
-            var arguments = run.containerArguments(vmHash: vmHash, uniqueSuffix: Self.makeNameSuffix())
-            if let separator = arguments.firstIndex(of: "--") {
-                for mount in mountedVolumes {
-                    arguments.insert(
-                        contentsOf: ["--mount", mount.mountPoint.path, mount.destination, mount.readOnly ? "ro" : "rw"],
-                        at: separator
-                    )
+            if Self.isAttachmentMethod(request.method) {
+                Self.clearSocketTimeouts(fd: connection.fileDescriptor)
+                try await runtimeClient.attach(payload: line, descriptor: connection.fileDescriptor)
+                writer.shutdown()
+                return
+            }
+
+            let response: GhostboxDirectResponse
+            if request.method == .mountGuestShare {
+                response = try await createGuestMount(request)
+            } else if request.method == .mountDelete {
+                response = try await invokeRuntime(request)
+                if response.error == nil {
+                    try await releaseGuestMount(parameters: request.parameters)
                 }
+            } else if request.method.rawValue == "mount.source",
+                      let source = guestMountSource(parameters: request.parameters) {
+                response = .success(id: request.id, value: .string(source))
+            } else {
+                response = try await invokeRuntime(request, payload: line)
             }
-            let runner = ContainerRunner(
-                runtimeIdentifier: vmHash,
-                image: run.image,
-                arguments: arguments,
-                runtimeClient: runtimeClient,
-                sharedNetwork: sharedNetwork
-            )
-
-            // Re-check isRunning atomically with registration: stop()
-            // snapshots runners, so a runner registered after stop() began
-            // would never be terminated by it.
-            stateLock.lock()
-            let stillRunning = isRunning
-            if stillRunning {
-                runners[id] = runner
+            guard response.version == request.version, response.id == request.id else {
+                throw ContainerProtocolError.malformedRequest("runtime returned a mismatched direct response")
             }
-            stateLock.unlock()
-            guard stillRunning else {
-                runner.terminate()
-                throw ContainerProtocolError.connectionClosed
-            }
-
-            NSLog("ContainerBridge: starting XPC runtime run (image=%@, %d command arg(s)) for connection %@", run.image, run.command.count, id.uuidString)
-
-            let exitCode: Int32 = try await withCheckedThrowingContinuation { continuation in
-                do {
-                    try runner.start(
-                        onReady: { ipv4Address in
-                            Self.clearSocketReceiveTimeout(fd: connection.fileDescriptor)
-                            if run.protocolVersion >= 4 {
-                                guard let frame = try? ContainerResponse.ready(version: run.protocolVersion, ipv4Address: ipv4Address).encodeLine(),
-                                      writer.writeFrame(frame) else {
-                                    runner.terminate()
-                                    return
-                                }
-                            }
-                            let task = Task.detached {
-                                if run.protocolVersion >= 2 {
-                                    await Self.relayFramedInput(
-                                        channel: channel,
-                                        initialInput: initialInput,
-                                        run: run,
-                                        runner: runner,
-                                        writer: writer
-                                    )
-                                } else if run.attachStdin {
-                                    if !initialInput.isEmpty, !runner.writeStdin(initialInput) {
-                                        runner.closeStdin()
-                                        return
-                                    }
-                                    do {
-                                        while let chunk = try await channel.read(maxBytes: 32 * 1024) {
-                                            guard runner.writeStdin(chunk) else { break }
-                                        }
-                                    } catch {
-                                        // Closing the connection during normal teardown wakes this read.
-                                    }
-                                    runner.closeStdin()
-                                } else {
-                                    runner.closeStdin()
-                                }
-                            }
-                            inputRelay.set(task)
-                        },
-                        onOutput: { stream, data in
-                            let response = (stream == .stdout)
-                                ? ContainerResponse.stdout(data, version: run.protocolVersion)
-                                : ContainerResponse.stderr(data, version: run.protocolVersion)
-                            guard let frame = try? response.encodeLine() else { return }
-                            if !writer.writeFrame(frame) {
-                                // Guest went away; don't leave a container running.
-                                runner.terminate()
-                            }
-                        },
-                        onExit: { code in
-                            continuation.resume(returning: code)
-                        }
-                    )
-                } catch {
-                    continuation.resume(throwing: error)
-                }
-            }
-
-            // Emitted only after both pipes drained (see ContainerRunner), so
-            // the exit frame is always the last frame on the connection.
-            try writer.writeFrameOrThrow(ContainerResponse.exit(exitCode, version: run.protocolVersion).encodeLine())
-            NSLog("ContainerBridge: run finished (exit=%d) for connection %@", exitCode, id.uuidString)
-            await releaseVolumes(&mountedVolumes)
+            try writer.writeFrameOrThrow(response.encodeLine())
         } catch {
-            await releaseVolumes(&mountedVolumes)
             let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            if let frame = try? ContainerResponse.error(message, version: responseVersion).encodeLine() {
-                writer.writeFrame(frame)
+            if let frame = try? GhostboxDirectResponse.failure(
+                id: requestID,
+                code: .invalidArgument,
+                message: message
+            ).encodeLine() {
+                _ = writer.writeFrame(frame)
             }
-            NSLog("ContainerBridge: request failed: %@", message)
+            NSLog("ContainerBridge: direct request failed: %@", message)
         }
         writer.shutdown()
-        if let task = inputRelay.take() {
-            await task.value
-        }
     }
 
-    private static func relayFramedInput(
-        channel: BlockingVSockChannel,
-        initialInput: Data,
-        run: ValidatedContainerRun,
-        runner: ContainerRunner,
-        writer: VSockFrameWriter
-    ) async {
-        var buffer = initialInput
-        var stdinClosed = !run.attachStdin
-        if stdinClosed {
-            runner.closeStdin()
-        }
+    // MARK: - Guest volume bridge
 
-        do {
-            while true {
-                while let newline = buffer.firstIndex(of: 0x0A) {
-                    guard newline - buffer.startIndex <= ContainerBridgeConstants.maxRequestLineBytes else {
-                        throw ContainerProtocolError.requestTooLarge(limit: ContainerBridgeConstants.maxRequestLineBytes)
-                    }
-                    let line = Data(buffer[buffer.startIndex..<newline])
-                    buffer.removeSubrange(buffer.startIndex...newline)
-                    let frame = try ContainerInputFrame.decode(line: line)
-                    guard frame.version == run.protocolVersion else {
-                        throw ContainerProtocolError.malformedInputFrame("input frame version does not match request")
-                    }
-                    switch frame.type {
-                    case .stdin:
-                        guard run.attachStdin, !stdinClosed,
-                              let encoded = frame.data,
-                              let data = Data(base64Encoded: encoded) else {
-                            throw ContainerProtocolError.malformedInputFrame("invalid stdin frame")
-                        }
-                        guard runner.writeStdin(data) else { return }
-                    case .stdinClose:
-                        if !stdinClosed {
-                            stdinClosed = true
-                            runner.closeStdin()
-                        }
-                    case .resize:
-                        guard run.allocateTTY,
-                              let columns = frame.columns, columns > 0,
-                              let rows = frame.rows, rows > 0 else {
-                            throw ContainerProtocolError.malformedInputFrame("invalid resize frame")
-                        }
-                        runner.resize(columns: columns, rows: rows)
-                    }
-                }
-                guard buffer.count <= ContainerBridgeConstants.maxRequestLineBytes else {
-                    throw ContainerProtocolError.requestTooLarge(limit: ContainerBridgeConstants.maxRequestLineBytes)
-                }
-                guard let chunk = try await channel.read(maxBytes: 32 * 1024) else {
-                    guard buffer.isEmpty else {
-                        throw ContainerProtocolError.malformedInputFrame("connection closed during input frame")
-                    }
-                    break
-                }
-                buffer.append(chunk)
-            }
-        } catch {
-            let message = (error as? LocalizedError)?.errorDescription ?? String(describing: error)
-            if let frame = try? ContainerResponse.error(message, version: run.protocolVersion).encodeLine() {
-                writer.writeFrame(frame)
-            }
-            runner.terminate()
+    /// Adapts the proven `-V` pipeline to a persistent Ghostbox mount object:
+    /// guest path -> private GhostFile share -> outer-host FSKit mount -> Mount.share.
+    private func createGuestMount(_ request: GhostboxDirectRequest) async throws -> GhostboxDirectResponse {
+        let allowed: Set<String> = [
+            "mount", "source", "destination", "readOnly", "cacheTTL", "option", "runtimeOption",
+        ]
+        guard request.parameters.keys.allSatisfy(allowed.contains) else {
+            throw ContainerProtocolError.malformedRequest("mount.guestShare contains an unknown parameter")
         }
-        runner.closeStdin()
-    }
-
-    private func prepareVolumes(_ volumes: [ContainerRunVolume]) async throws -> [GuestVolumeMount] {
-        guard !volumes.isEmpty else { return [] }
+        let name = try Self.stringParameter("mount", in: request.parameters)
+        guard Self.isReferenceComponent(name) else {
+            throw ContainerProtocolError.malformedRequest("mount name is invalid")
+        }
+        let reference = "@mount/\(name)"
+        let guestPath = try Self.stringParameter("source", in: request.parameters)
+        guard guestPath.hasPrefix("/"), !guestPath.contains("\0"), guestPath.utf8.count <= 4096 else {
+            throw ContainerProtocolError.malformedRequest("guest mount source must be an absolute path of at most 4096 bytes")
+        }
+        let destination = try Self.stringParameter("destination", in: request.parameters)
+        guard Self.isContainerMountPath(destination), destination.utf8.count <= 4096 else {
+            throw ContainerProtocolError.malformedRequest("guest mount destination must be an absolute non-root container path")
+        }
+        let readOnly = try Self.boolParameter("readOnly", in: request.parameters) ?? false
+        let cacheTTL = try Self.unsignedIntegerParameter("cacheTTL", in: request.parameters)
+            ?? GhostFileProtocol.defaultCacheTTLSeconds
+        guard cacheTTL <= GhostFileProtocol.maximumCacheTTLSeconds else {
+            throw ContainerProtocolError.malformedRequest(
+                "guest mount cache TTL must be at most \(GhostFileProtocol.maximumCacheTTLSeconds) seconds"
+            )
+        }
+        var options = try Self.stringArrayParameter("option", in: request.parameters) ?? []
+        let runtimeOptions = try Self.stringArrayParameter("runtimeOption", in: request.parameters) ?? []
+        if readOnly, !options.contains("ro") { options.append("ro") }
         guard let fileSystemBridge else { throw GuestVolumeMount.MountError.bridgeUnavailable }
 
-        var mounted: [GuestVolumeMount] = []
+        let reserved = mountLock.withLock { guestMounts.reserve(reference) }
+        guard reserved else {
+            throw ContainerProtocolError.malformedRequest("object '\(reference)' already exists")
+        }
+        defer {
+            mountLock.withLock { guestMounts.abandon(reference) }
+        }
+
+        let registered = try await fileSystemBridge.registerExport(
+            guestPath: guestPath,
+            readOnly: readOnly,
+            cacheTTLSeconds: cacheTTL
+        )
+        let volume: GuestVolumeMount
         do {
-            for volume in volumes {
-                let registered = try await MainActor.run {
-                    try fileSystemBridge.registerExport(guestPath: volume.guestPath, readOnly: volume.readOnly)
-                }
-                do {
-                    mounted.append(try GuestVolumeMount.mount(
-                        registeredExport: registered,
-                        destination: volume.destination,
-                        readOnly: volume.readOnly,
-                        rootURL: ContainerRunner.runtimeRootURL
-                            .appendingPathComponent(vmHash, isDirectory: true)
-                            .appendingPathComponent("mounts", isDirectory: true)
-                    ))
-                } catch {
-                    await MainActor.run { fileSystemBridge.unregisterExport(id: registered.id) }
-                    throw error
-                }
-            }
-            return mounted
+            volume = try GuestVolumeMount.mount(
+                registeredExport: registered,
+                destination: destination,
+                readOnly: readOnly
+            )
         } catch {
-            await releaseVolumes(&mounted)
+            await fileSystemBridge.unregisterExport(id: registered.id)
             throw error
+        }
+
+        let runtimeRequest = GhostboxDirectRequest(
+            id: request.id,
+            method: GhostboxDirectMethod(rawValue: "mount.share"),
+            parameters: [
+                "mount": .string(name),
+                "source": .string(volume.mountPoint.path),
+                "destination": .string(destination),
+                "option": .array(options.map(GhostboxJSONValue.string)),
+                "runtimeOption": .array(runtimeOptions.map(GhostboxJSONValue.string)),
+            ]
+        )
+        let response: GhostboxDirectResponse
+        do {
+            response = try await invokeRuntime(runtimeRequest)
+        } catch {
+            volume.unmount()
+            await fileSystemBridge.unregisterExport(id: registered.id)
+            throw error
+        }
+        guard response.error == nil else {
+            volume.unmount()
+            await fileSystemBridge.unregisterExport(id: registered.id)
+            return response
+        }
+
+        switch registerPreparedGuestMount(
+            PreparedGuestMount(volume: volume, guestPath: guestPath),
+            reference: reference
+        ) {
+        case .registered:
+            return response
+        case .deleted:
+            volume.unmount()
+            await fileSystemBridge.unregisterExport(id: registered.id)
+            return .failure(
+                id: request.id,
+                code: .cancelled,
+                message: "mount '\(reference)' was deleted while creation was in progress"
+            )
+        case .stopped:
+            volume.unmount()
+            await fileSystemBridge.unregisterExport(id: registered.id)
+            throw ContainerProtocolError.connectionClosed
         }
     }
 
-    private func releaseVolumes(_ volumes: inout [GuestVolumeMount]) async {
-        guard !volumes.isEmpty else { return }
-        let mounted = volumes
-        volumes.removeAll()
-        for mount in mounted.reversed() {
-            mount.unmount()
-        }
-        if let fileSystemBridge {
-            await MainActor.run {
-                for mount in mounted {
-                    fileSystemBridge.unregisterExport(id: mount.exportID)
+    private enum GuestMountRegistration {
+        case registered
+        case deleted
+        case stopped
+    }
+
+    private func registerPreparedGuestMount(
+        _ mount: PreparedGuestMount,
+        reference: String
+    ) -> GuestMountRegistration {
+        stateLock.withLock {
+            guard isRunning else { return .stopped }
+            return mountLock.withLock {
+                switch guestMounts.complete(reference, value: mount) {
+                case .registered: return .registered
+                case .deleted: return .deleted
                 }
             }
         }
+    }
+
+    private func releaseGuestMount(parameters: [String: GhostboxJSONValue]) async throws {
+        let reference = try Self.stringParameter("mount", in: parameters)
+        guard reference.hasPrefix("@mount/") else {
+            throw ContainerProtocolError.malformedRequest("mount.delete requires an @mount/NAME reference")
+        }
+        let record = mountLock.withLock { guestMounts.release(reference) }
+        guard let record else { return }
+        record.volume.unmount()
+        if let fileSystemBridge {
+            await fileSystemBridge.unregisterExport(id: record.volume.exportID)
+        }
+    }
+
+    private func guestMountSource(parameters: [String: GhostboxJSONValue]) -> String? {
+        guard case .string(let reference) = parameters["mount"] else { return nil }
+        return mountLock.withLock { guestMounts[reference]?.guestPath }
+    }
+
+    func invokeRuntime(
+        _ request: GhostboxDirectRequest,
+        payload: Data? = nil
+    ) async throws -> GhostboxDirectResponse {
+        let encoded: Data
+        if let payload {
+            encoded = payload
+        } else {
+            encoded = try JSONEncoder().encode(request)
+        }
+        let responsePayload = try await runtimeClient.invoke(payload: encoded)
+        return try JSONDecoder().decode(GhostboxDirectResponse.self, from: responsePayload)
+    }
+
+    private static func stringParameter(
+        _ name: String,
+        in parameters: [String: GhostboxJSONValue]
+    ) throws -> String {
+        guard case .string(let value) = parameters[name] else {
+            throw ContainerProtocolError.malformedRequest("missing or invalid string parameter '\(name)'")
+        }
+        return value
+    }
+
+    private static func boolParameter(
+        _ name: String,
+        in parameters: [String: GhostboxJSONValue]
+    ) throws -> Bool? {
+        guard let raw = parameters[name] else { return nil }
+        guard case .boolean(let value) = raw else {
+            throw ContainerProtocolError.malformedRequest("parameter '\(name)' must be a boolean")
+        }
+        return value
+    }
+
+    private static func unsignedIntegerParameter(
+        _ name: String,
+        in parameters: [String: GhostboxJSONValue]
+    ) throws -> UInt64? {
+        guard let raw = parameters[name] else { return nil }
+        guard case .unsignedInteger(let value) = raw else {
+            throw ContainerProtocolError.malformedRequest("parameter '\(name)' must be an unsigned integer")
+        }
+        return value
+    }
+
+    private static func stringArrayParameter(
+        _ name: String,
+        in parameters: [String: GhostboxJSONValue]
+    ) throws -> [String]? {
+        guard let raw = parameters[name] else { return nil }
+        guard case .array(let values) = raw else {
+            throw ContainerProtocolError.malformedRequest("parameter '\(name)' must be an array")
+        }
+        return try values.map {
+            guard case .string(let value) = $0 else {
+                throw ContainerProtocolError.malformedRequest("parameter '\(name)' must contain strings")
+            }
+            return value
+        }
+    }
+
+    private static func isReferenceComponent(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 128 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0)
+                || $0 == 45 || $0 == 46 || $0 == 95
+        }
+    }
+
+    private static func isContainerMountPath(_ path: String) -> Bool {
+        let components = path.split(separator: "/", omittingEmptySubsequences: true)
+        return path.hasPrefix("/") && path != "/" && !path.contains("\0")
+            && !components.contains(where: { $0 == "." || $0 == ".." })
     }
 
     /// Reads a single NDJSON request line, enforcing the size cap.
-    private func readRequestLine(channel: BlockingVSockChannel) async throws -> (line: Data, initialInput: Data) {
+    private func readRequestLine(channel: BlockingVSockChannel) async throws -> Data {
         var buffer = Data()
         while true {
             guard let chunk = try await channel.read(maxBytes: 4096) else {
@@ -464,11 +520,7 @@ final class ContainerBridgeService: @unchecked Sendable {
                 guard newline - buffer.startIndex <= ContainerBridgeConstants.maxRequestLineBytes else {
                     throw ContainerProtocolError.requestTooLarge(limit: ContainerBridgeConstants.maxRequestLineBytes)
                 }
-                let inputStart = buffer.index(after: newline)
-                return (
-                    Data(buffer[buffer.startIndex..<newline]),
-                    Data(buffer[inputStart..<buffer.endIndex])
-                )
+                return Data(buffer[buffer.startIndex..<newline])
             }
             if buffer.count > ContainerBridgeConstants.maxRequestLineBytes {
                 throw ContainerProtocolError.requestTooLarge(limit: ContainerBridgeConstants.maxRequestLineBytes)
@@ -476,36 +528,21 @@ final class ContainerBridgeService: @unchecked Sendable {
         }
     }
 
-    /// The request header has a short timeout; attached stdin may remain idle
-    /// for the full lifetime of an interactive process.
-    private static func clearSocketReceiveTimeout(fd: Int32) {
+    private static func isAttachmentMethod(_ method: GhostboxDirectMethod) -> Bool {
+        [
+            GhostboxDirectMethod.readerStreamAttachProxy,
+            GhostboxDirectMethod.writerAttachProxy,
+            GhostboxDirectMethod.terminalAttachProxy,
+        ].contains(method)
+    }
+
+    private static func clearSocketTimeouts(fd: Int32) {
         var timeout = timeval(tv_sec: 0, tv_usec: 0)
         let length = socklen_t(MemoryLayout<timeval>.size)
-        if setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, length) != 0 {
-            NSLog("ContainerBridge: failed to clear stdin receive timeout (errno=%d)", errno)
-        }
+        _ = setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, length)
+        _ = setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, length)
     }
 
-    private static func makeNameSuffix() -> String {
-        String(UUID().uuidString.prefix(8)).lowercased()
-    }
-}
-
-private final class InputRelayTracker: @unchecked Sendable {
-    private let lock = NSLock()
-    private var task: Task<Void, Never>?
-
-    func set(_ task: Task<Void, Never>) {
-        lock.withLock { self.task = task }
-    }
-
-    func take() -> Task<Void, Never>? {
-        lock.withLock {
-            let task = self.task
-            self.task = nil
-            return task
-        }
-    }
 }
 
 // MARK: - VZ listener delegate adapter

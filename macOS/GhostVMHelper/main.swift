@@ -51,6 +51,7 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     private var ownsLock = false
     private var helperToolbar: HelperToolbar?
+    private var containerManagementWindowController: ContainerManagementWindowController?
     private var statusOverlay: StatusOverlay?
 
     // Services
@@ -831,6 +832,18 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
 
     func toolbarDidRequestIconChooser(_ toolbar: HelperToolbar) {
         helperToolbar?.showIconChooserPopover(bundleURL: vmBundleURL)
+    }
+
+    func toolbarDidRequestContainerManagement(_ toolbar: HelperToolbar) {
+        if containerManagementWindowController == nil {
+            containerManagementWindowController = ContainerManagementWindowController(
+                vmName: vmName,
+                layout: VMFileLayout(bundleURL: vmBundleURL),
+                runtime: { [weak self] in self?.containerBridgeService }
+            )
+        }
+        containerManagementWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func toolbar(_ toolbar: HelperToolbar, didSelectIconMode mode: String?, icon: NSImage?) {
@@ -1682,18 +1695,30 @@ final class HelperAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate
                 try fileSystemBridge.start(client: client)
                 self.guestFileSystemBridgeService = fileSystemBridge
                 if let debugPath = UserDefaults.standard.string(forKey: "GuestFilesystemExportPath") {
-                    let resource = try fileSystemBridge.registerExport(guestPath: debugPath)
-                    NSLog("GhostVMHelper: Debug guest filesystem resource: \(resource.resourceURL.absoluteString)")
+                    Task { @MainActor in
+                        do {
+                            let resource = try await fileSystemBridge.registerExport(guestPath: debugPath)
+                            NSLog(
+                                "GhostVMHelper: Debug guest filesystem export ready at %@:%d",
+                                resource.resourceURL.host ?? "loopback",
+                                resource.resourceURL.port ?? 0
+                            )
+                        } catch {
+                            NSLog("GhostVMHelper: Failed to start debug filesystem export: \(error.localizedDescription)")
+                        }
+                    }
                 }
             } catch {
                 NSLog("GhostVMHelper: Failed to start guest filesystem bridge: \(error.localizedDescription)")
             }
-            if let sharedNetwork = sharedVmnetNetwork {
+            if sharedVmnetNetwork != nil {
                 let bridge = ContainerBridgeService(
                     vm: vm,
                     vmQueue: queue,
                     vmHash: String(vmBundleURL.path.stableHash),
-                    sharedNetwork: sharedNetwork,
+                    sharedNetwork: sharedVmnetNetwork!,
+                    volumeRootURL: VMFileLayout(bundleURL: vmBundleURL).containerRuntimeVolumesURL,
+                    imageRootURL: VMFileLayout(bundleURL: vmBundleURL).containerRuntimeImagesURL,
                     fileSystemBridge: fileSystemBridge
                 )
                 bridge.start()

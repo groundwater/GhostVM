@@ -59,6 +59,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private enum ItemID {
         static let guestToolsStatus = NSToolbarItem.Identifier("guestToolsStatus")
         static let portForwards = NSToolbarItem.Identifier("portForwards")
+        static let containers = NSToolbarItem.Identifier("containers")
         static let sharedFolders = NSToolbarItem.Identifier("sharedFolders")
         static let clipboardSync = NSToolbarItem.Identifier("clipboardSync")
         static let iconChooser = NSToolbarItem.Identifier("iconChooser")
@@ -99,6 +100,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
     private weak var guestToolsLabel: NSTextField?
     private var iconChooserItem: NSToolbarItem?
     private var portForwardsItem: NSToolbarItem?
+    private var containersItem: NSToolbarItem?
     private var sharedFoldersItem: NSMenuToolbarItem?
     private var clipboardSyncItem: NSToolbarItem?
     private var terminalItem: NSMenuToolbarItem?
@@ -171,6 +173,15 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         toolbar.autosavesConfiguration = true
         window.toolbar = toolbar
         window.toolbarStyle = .unifiedCompact
+
+        let migrationKey = "HelperToolbarIncludesContainerManagement"
+        if !UserDefaults.standard.bool(forKey: migrationKey) {
+            if !toolbar.items.contains(where: { $0.itemIdentifier == ItemID.containers }) {
+                let portIndex = toolbar.items.firstIndex(where: { $0.itemIdentifier == ItemID.portForwards }) ?? 0
+                toolbar.insertItem(withItemIdentifier: ItemID.containers, at: min(portIndex + 1, toolbar.items.count))
+            }
+            UserDefaults.standard.set(true, forKey: migrationKey)
+        }
     }
 
     /// Returns the anchor view for a toolbar item identifier.
@@ -182,6 +193,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         switch identifier {
         case ItemID.guestToolsStatus: item = guestToolsItem
         case ItemID.portForwards: item = portForwardsItem
+        case ItemID.containers: item = containersItem
         case ItemID.clipboardSync: item = clipboardSyncItem
         case ItemID.captureCommands: item = captureCommandsItem
         case ItemID.queuedFiles: item = queuedFilesItem
@@ -326,6 +338,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         [
             ItemID.iconChooser,
             ItemID.portForwards,
+            ItemID.containers,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
             ItemID.terminal,
@@ -342,6 +355,7 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         [
             ItemID.iconChooser,
             ItemID.portForwards,
+            ItemID.containers,
             ItemID.sharedFolders,
             ItemID.clipboardSync,
             ItemID.terminal,
@@ -361,6 +375,8 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
             return makeIconChooserItem()
         case ItemID.portForwards:
             return makePortForwardsItem()
+        case ItemID.containers:
+            return makeContainersItem()
         case ItemID.sharedFolders:
             return makeSharedFoldersItem()
         case ItemID.clipboardSync:
@@ -458,6 +474,24 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         portForwardsItem = item
         updatePortForwardsButton()
 
+        return item
+    }
+
+    private func makeContainersItem() -> NSToolbarItem {
+        let item = NSToolbarItem(itemIdentifier: ItemID.containers)
+        item.label = "Containers"
+        item.paletteLabel = "Container Management"
+        item.toolTip = "Manage containers, images, volumes, and logs"
+        item.minSize = NSSize(width: 36, height: 32)
+        item.maxSize = NSSize(width: 36, height: 32)
+
+        let image = NSImage(systemSymbolName: "server.rack", accessibilityDescription: "Containers")!
+            .withSymbolConfiguration(iconConfig)!
+        let button = NSButton(image: image, target: self, action: #selector(containersClicked))
+        button.bezelStyle = .toolbar
+        button.isBordered = true
+        item.view = button
+        containersItem = item
         return item
     }
 
@@ -1135,6 +1169,10 @@ final class HelperToolbar: NSObject, NSToolbarDelegate, NSMenuDelegate, PortForw
         }
     }
 
+    @objc private func containersClicked() {
+        delegate?.toolbarDidRequestContainerManagement(self)
+    }
+
     @objc private func revealSharedFolder(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String else { return }
         NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
@@ -1569,5 +1607,6 @@ protocol HelperToolbarDelegate: AnyObject {
     func toolbar(_ toolbar: HelperToolbar, didUnblockPort port: UInt16)
     func toolbarDidUnblockAllPorts(_ toolbar: HelperToolbar)
     func toolbarDidRequestIconChooser(_ toolbar: HelperToolbar)
+    func toolbarDidRequestContainerManagement(_ toolbar: HelperToolbar)
     func toolbar(_ toolbar: HelperToolbar, didSelectIconMode mode: String?, icon: NSImage?)
 }
